@@ -318,6 +318,26 @@ class TestSendMessageTool:
         )
 
 
+    def test_successful_send_mirrors_as_labelled_user_turn(self):
+        """``send_message`` is not agent-callable, so its mirror must not land assistant→assistant:
+        strict Responses adapters reject the earlier turn's native message id with HTTP 400
+        "Ambiguous Responses native assistant history" (live 2026-11-22). The label replaces
+        the mirror metadata that SQLite drops, matching the cron and webhook delivery mirrors."""
+        config, _telegram_cfg = _make_config()
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("gateway.outbound.send._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(send_message_tool(
+                {"action": "send", "target": "telegram:12345", "message": "deploy finished"}
+            ))
+
+        assert result["success"] is True and result["mirrored"] is True
+        args, kwargs = mirror_mock.call_args
+        assert args == ("telegram", "12345", "[Sent to telegram]\ndeploy finished")
+        assert kwargs["role"] == "user"
+
     def test_media_tag_outside_allowed_roots_is_not_sent(self, tmp_path, monkeypatch):
         # This test exercises the strict-allowlist path; force strict mode on
         # and disable recency trust so the freshly-written tmp_path file is

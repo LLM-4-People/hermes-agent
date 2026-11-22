@@ -117,6 +117,24 @@ class TestMirrorToSession:
         mock_sqlite.assert_called_once()
         assert mock_sqlite.call_args[0][0] == "sess_alice"
 
+    def test_default_role_is_user(self, tmp_path):
+        """Delivery text is external, never the agent's own reply: the default role must not create
+        an assistant→assistant pair on replay."""
+        sessions_dir, index_file = _setup_sessions(tmp_path, {
+            "dm": {
+                "session_id": "sess_dm",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+                "updated_at": "2026-01-01T00:00:00",
+            },
+        })
+
+        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
+             patch("gateway.mirror._append_to_sqlite") as mock_sqlite:
+            assert mirror_to_session("telegram", "123", "delivery notice") is True
+
+        assert mock_sqlite.call_args[0][1]["role"] == "user"
+
     def test_no_matching_session(self, tmp_path):
         sessions_dir, index_file = _setup_sessions(tmp_path, {})
 

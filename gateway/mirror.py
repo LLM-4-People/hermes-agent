@@ -35,22 +35,21 @@ def _origin_user_id(entry: dict) -> str:
 
 def mirror_to_session(
     platform: str, chat_id: str, message_text: str, source_label: str = "cli", thread_id: Optional[str] = None,
-    user_id: Optional[str] = None, role: str = "assistant", session_id: Optional[str] = None,
+    user_id: Optional[str] = None, role: str = "user", session_id: Optional[str] = None,
 ) -> bool:
     """Append a delivery-mirror message to the target session's SQLite transcript.
 
     Pass ``session_id`` when the caller already holds the exact session (e.g. the
     cron in_channel seed) to skip the origin scan, which drops the mirror when a bare
     target's room can't be told apart (no General/thread-1 and no flat session).
-    Text that is NOT the agent speaking (e.g. a cron brief) must pass
-    ``role="user"``: ``mirror`` metadata is dropped at the SQLite boundary, so an
-    assistant-role mirror replays as a real turn and yields assistant→assistant
-    pairs that break strict-alternation providers, while a user-role mirror
-    collapses safely via the consecutive-user merge.
+    ``mirror`` metadata is dropped at the SQLite boundary, so an assistant-role
+    mirror replays as a real turn and yields assistant→assistant pairs that break
+    strict-alternation providers, while a user-role mirror collapses safely via the
+    consecutive-user merge. Every in-tree delivery source (cron, webhook, ``hermes
+    send``, kanban, MCP) is external text, so ``"user"`` is the default; a caller
+    mirroring the agent's own reply must ask for ``role="assistant"`` explicitly
+    and only when that turn is not already in the transcript.
     Returns True if mirrored, False if no matching session or error. Never raises.
-
-    ``role`` defaults to ``"assistant"`` — correct for the interactive ``send_message`` mirror, where the
-    mirrored text is the agent's own outgoing reply (a genuine assistant turn). See #2221.
     """
     try:
         if not session_id:

@@ -748,6 +748,58 @@ def test_message_id_is_dropped_when_its_turn_replays_reasoning_without_id():
     assert alone["id"] == "msg_alone"
 
 
+def test_native_message_id_dropped_before_another_assistant_message():
+    """Two adjacent assistant messages make a replayed native id cover two turns, which strict
+    adapters reject (400 "Ambiguous Responses native assistant history", live 2026-11-22).
+    The id is a prefix-cache hint only, so both messages stay and the earlier id goes; a tool call
+    between them keeps the id."""
+    def _assistant(text, *, item_id=None, calls=None):
+        msg = {"role": "assistant", "content": text}
+        if item_id:
+            msg["codex_message_items"] = [{
+                "type": "message", "role": "assistant", "status": "completed", "id": item_id,
+                "phase": "final_answer", "content": [{"type": "output_text", "text": text}],
+            }]
+        if calls:
+            msg["tool_calls"] = [
+                {"id": call_id, "type": "function", "function": {"name": "foo", "arguments": "{}"}}
+                for call_id in calls
+            ]
+        return msg
+
+    def _text(item):
+        content = item["content"]
+        return content if isinstance(content, str) else "".join(p.get("text", "") for p in content)
+
+    adjacent = _chat_messages_to_responses_input([
+        {"role": "user", "content": "write it"},
+        _assistant("Done.", item_id="msg_first"),
+        _assistant("Delivery notice"),
+        {"role": "user", "content": "next"},
+    ])
+    assistant_items = [i for i in adjacent if i.get("type") == "message" and i.get("role") == "assistant"]
+    assert [_text(i) for i in assistant_items] == ["Done.", "Delivery notice"]
+    assert "id" not in assistant_items[0]
+    assert assistant_items[0]["status"] == "completed" and assistant_items[0]["phase"] == "final_answer"
+
+    separated = _chat_messages_to_responses_input([
+        {"role": "user", "content": "write it"},
+        _assistant("Done.", item_id="msg_kept"),
+        {"role": "user", "content": "next"},
+    ])
+    kept = next(i for i in separated if i.get("type") == "message" and i.get("role") == "assistant")
+    assert kept["id"] == "msg_kept"
+
+    with_call = _chat_messages_to_responses_input([
+        {"role": "user", "content": "check"},
+        _assistant("Checking.", item_id="msg_call", calls=["call_1"]),
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        {"role": "user", "content": "next"},
+    ])
+    call_message = next(i for i in with_call if i.get("type") == "message" and i.get("role") == "assistant")
+    assert call_message["id"] == "msg_call"
+
+
 def _reasoning_history(item):
     return [
         {"role": "assistant", "content": "done", "codex_reasoning_items": [item]},
