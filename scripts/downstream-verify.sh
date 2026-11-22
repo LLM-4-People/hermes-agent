@@ -49,6 +49,7 @@ scripts/run_tests.sh \
   tests/gateway/test_runtime_footer.py \
   tests/gateway/test_session_info.py \
   tests/persistence_sqlite/conversation/test_photo_previews.py \
+  tests/persistence_sqlite/conversation/test_session_list_index_choice.py \
   tests/gateway/test_hygiene_provider_identity.py \
   tests/gateway/api_server/test_skills.py \
   tests/tools/test_skills_tool_discovery_cache.py \

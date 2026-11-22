@@ -8,7 +8,7 @@ from persistence.sqlite._schema_ddl import _BRANCH_CHILD_SQL, _RESET_CHILD_SQL, 
 from persistence.sqlite.conversation._store.rules import (
     AUTO_LOAD_SCAFFOLD_SQL_LIKE, EPOCH_MAX, EPOCH_MIN, SKILL_SCAFFOLD_SQL_LIKE,
 )
-from session_rules.photo_previews import PHOTO_PREVIEW_KEY, PREVIEW_HEAD_CHARS
+from session_rules.photo_previews import PREVIEW_HEAD_CHARS
 from session_rules.turns import (
     LEGACY_SUMMARY_PREFIX, SKILL_EXCERPT_JOINT, SUMMARY_PREFIX, _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER,
     _SUMMARY_END_MARKER,
@@ -123,11 +123,10 @@ _PREVIEW_MAY_SHOW_PHOTO = f"""typeof(m.content) = 'text' AND (instr(substr(m.con
 
 def _sql_preview_raw(has_admissions: bool, session_alias: str = "s") -> str:
     """Walk only the first eligible user row in timestamp order; look up an old photo's owner by its unique ID."""
-    stamp = f"'$.{PHOTO_PREVIEW_KEY}'"
-    user_photo = f"""CASE WHEN json_valid(m.display_metadata) THEN
-        CASE WHEN json_type(m.display_metadata, {stamp}) = 'text' THEN
-            substr(json_extract(m.display_metadata, {stamp}), 1, {PREVIEW_HEAD_CHARS}) END END"""
-    admission = """(SELECT a.payload_json FROM session_admissions a
+    # Read the underlying bytes of archived JSON. Some legacy JSON strings contain
+    # isolated surrogates which SQLite's JSON functions would return as invalid UTF-8.
+    user_photo = "stored_photo_preview(CAST(m.display_metadata AS BLOB))"
+    admission = """(SELECT CAST(a.payload_json AS BLOB) FROM session_admissions a
         WHERE a.admission_id = m.platform_message_id AND a.target_session_id = m.session_id)""" if has_admissions else "NULL"
     archived = f"archived_photo_preview(m.content, {session_alias}.source, {admission})"
     # The ordinary head/scaffold/compaction rules also apply to recovered captions. Confine

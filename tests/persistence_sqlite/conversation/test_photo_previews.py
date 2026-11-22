@@ -166,3 +166,34 @@ def test_read_only_list_and_export_from_before_runtime_tables(tmp_path):
     with open_persistence_reader(tmp_path / "state.db") as reader:
         assert list_sessions_rich(raw_holder(reader), limit=10)[0]["preview"] == "Souvenir"
         assert reader.maintenance.export_session("photo").messages[0].content == raw
+
+
+@pytest.mark.parametrize("surrogate", [chr(0xd801), chr(0xdc01)])
+@pytest.mark.parametrize("literal", [False, True])
+def test_historical_unpaired_surrogate_isolated_to_its_own_caption(backend, scope_a, surrogate, literal):
+    import json
+    import sqlite3
+    from tests.persistence_sqlite.conftest import store_for
+
+    store = backend.open(scope_a)
+    epoch = store.runtime.begin_epoch(instance_id="owner")
+    raw = f"Intact\n\n{_hint('b' * 64)}\n[screenshot]"
+    for sid, content in (("damaged", raw), ("valid", "📷 À Montréal")):
+        store.sessions.create(NewSession(sid, "api_server"))
+        owner, _ = store.admissions.admit(epoch=epoch, session_id=sid, principal_id="api",
+                                          request_id=sid, payload={"text": content})
+        store.messages.append(sid, NewMessage(role="user", content=content, platform_message_id=owner.admission_id))
+        if sid == "damaged":
+            original = surrogate + raw if literal else [
+                {"type": "text", "text": surrogate}, {"type": "image_url", "image_url": {"url": "retained:old"}}]
+            with sqlite3.connect(store_for(scope_a)) as conn:
+                conn.execute("UPDATE session_admissions SET payload_json=? WHERE admission_id=?",
+                             (json.dumps({"text": original, "api_turn_v1": {}}), owner.admission_id))
+                conn.execute("UPDATE messages SET display_metadata=? WHERE session_id=?",
+                             (json.dumps({"api_photo_preview": surrogate}), sid))
+    assert _preview(store, "damaged") == "Intact"
+    assert _preview(store, "valid") == "📷 À Montréal"
+    assert store.sessions.set_title("valid", "Après la lecture")
+    portable = store.maintenance.export_session("damaged").messages[0].as_wire_row()
+    assert "api_photo_preview" not in (portable.get("display_metadata") or {})
+    json.dumps(portable, ensure_ascii=False).encode("utf-8")

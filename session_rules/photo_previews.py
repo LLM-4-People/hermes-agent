@@ -8,6 +8,33 @@ PREVIEW_HEAD_CHARS = 63
 _DEFAULT_IMAGE_CAPTION = "What do you see in this image?"
 
 
+def valid_photo_head(value):
+    if not isinstance(value, str):
+        return None
+    head = value[:PREVIEW_HEAD_CHARS]
+    try:
+        head.encode("utf-8")
+    except UnicodeEncodeError:
+        # Historical JSON can legally escape an isolated surrogate; SQLite TEXT cannot carry it.
+        return None
+    return head
+
+
+def _json_object(raw):
+    if raw is not None:
+        try:
+            value = json.loads(raw)
+            if isinstance(value, dict):
+                return value
+        except (TypeError, ValueError, RecursionError):
+            pass
+    return {}
+
+
+def stored_photo_preview(metadata):
+    return valid_photo_head(_json_object(metadata).get(PHOTO_PREVIEW_KEY))
+
+
 def might_show_photo_receipt(value):
     return "[Image attached" in value and "[screenshot" in value
 
@@ -18,7 +45,7 @@ def api_photo_preview(payload):
         return None
     value = payload.get("text")
     if isinstance(value, str):
-        return value.lstrip(" \t\r\n")[:PREVIEW_HEAD_CHARS] if might_show_photo_receipt(value) else None
+        return valid_photo_head(value.lstrip(" \t\r\n")) if might_show_photo_receipt(value) else None
     if not isinstance(value, list):
         return None
     head = ""
@@ -45,17 +72,12 @@ def api_photo_preview(payload):
             return None
     if not image and not literal:
         return None
-    return head if has_text else _DEFAULT_IMAGE_CAPTION
+    return valid_photo_head(head) if has_text else _DEFAULT_IMAGE_CAPTION
 
 
 def admitted_photo_preview(admission):
     """Read a pre-stamp API admission without handing damaged metadata to SQLite's JSON functions."""
-    if admission is not None:
-        try:
-            return api_photo_preview(json.loads(admission))
-        except (TypeError, ValueError, UnicodeError, RecursionError):
-            pass
-    return None
+    return api_photo_preview(_json_object(admission))
 
 
 def archived_photo_preview(content, source, admission):
