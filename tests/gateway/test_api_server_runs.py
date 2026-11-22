@@ -589,10 +589,10 @@ class TestRunStatus:
                     "provider": "openai-codex", "model": "gpt-5.6-luna", "route_source": "raw_request",
                     "requested": {"provider": "", "model": "deepseek-v4-pro"},
                 }
-                assert status["usage"] == {
-                    "input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
-                    "cache_read_tokens": 84, "cache_write_tokens": 11,
-                }
+                usage = status["usage"]
+                assert usage["scope"] == "run" and usage["cache_hit_ratio"] == 0.84
+                assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"], usage["cache_read_tokens"], usage["cache_write_tokens"]) == (100, 5, 105, 84, 11)
+                assert usage["cost_usd"] is None and usage["ttft_ms"] is None and usage["tokens_per_sec"] is None and usage["api_calls"] is None
 
 
 # ---------------------------------------------------------------------------

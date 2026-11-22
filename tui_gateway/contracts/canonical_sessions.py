@@ -114,6 +114,7 @@ class CanonicalPendingPrompt(Result):
     command: str | None = None
     description: str | None = None
     edit: dict[str, JsonValue] | None = None
+    preview: dict[str, JsonValue] | None = None
     question: str | None = None
     multi_select: bool | None = None
     # Local viewer turns: the seconds the gateway waits before it gives up on this prompt.
