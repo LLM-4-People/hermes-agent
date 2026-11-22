@@ -47,7 +47,34 @@ ALLOWED_DELIVERY_KINDS = frozenset({
     "briefing",
 })
 
-ALLOWED_URGENCIES = frozenset({"low", "normal", "high", "urgent"})
+DELIVERY_KIND_ALIASES: dict[str, str] = {
+    "alert": "notice",
+    "notification": "notice",
+    "message": "notice",
+    "summary": "briefing",
+    "daily": "briefing",
+    "digest": "briefing",
+    "widget": "widget_update",
+    "reminder": "reminder_result",
+    "action": "device_action",
+    "handoff": "device_action",
+    "ui": "ui_patch",
+    "patch": "ui_patch",
+    "attachment": "file",
+    "document": "file",
+}
+
+ALLOWED_URGENCIES = frozenset({"silent", "normal", "high", "urgent"})
+URGENCY_ALIASES: dict[str, str] = {
+    "low": "silent",
+    "quiet": "silent",
+    "mute": "silent",
+    "muted": "silent",
+    "default": "normal",
+    "medium": "normal",
+    "critical": "urgent",
+    "important": "high",
+}
 MAX_DELIVERY_TITLE_LEN = 200
 MAX_DELIVERY_PAYLOAD_BYTES = 131_072
 
@@ -160,33 +187,56 @@ def _fire_wakeup_hooks(wakeup_meta: dict[str, Any]) -> None:
 
 # ── Validation & SQLite Store ────────────────────────────────────────────────
 
-def validate_delivery_input(kind: Any, title: Any, payload: Any, urgency: Any = "normal") -> Optional[str]:
-    if kind not in ALLOWED_DELIVERY_KINDS:
-        return f"kind must be one of {sorted(ALLOWED_DELIVERY_KINDS)}."
-    if urgency not in ALLOWED_URGENCIES:
-        return f"urgency must be one of {sorted(ALLOWED_URGENCIES)}."
+def normalize_delivery_input(
+    kind: Any, title: Any, payload: Any, urgency: Any = "normal"
+) -> tuple[Optional[tuple[str, str, dict[str, Any], str]], Optional[str]]:
+    """Normalize small-LLM friendly aliases and validate delivery fields strictly."""
+    norm_kind = (
+        DELIVERY_KIND_ALIASES.get(kind.strip().lower(), kind.strip().lower())
+        if isinstance(kind, str)
+        else kind
+    )
+    if norm_kind not in ALLOWED_DELIVERY_KINDS:
+        return None, f"kind must be one of {sorted(ALLOWED_DELIVERY_KINDS)}."
+    norm_urgency = (
+        URGENCY_ALIASES.get(urgency.strip().lower(), urgency.strip().lower())
+        if isinstance(urgency, str)
+        else urgency
+    )
+    if norm_urgency not in ALLOWED_URGENCIES:
+        return None, f"urgency must be one of {sorted(ALLOWED_URGENCIES)} (alias 'low' maps to 'silent')."
     if not _valid_utf8_text(title, max_len=MAX_DELIVERY_TITLE_LEN):
-        return f"title must be non-empty UTF-8 text (<= {MAX_DELIVERY_TITLE_LEN} chars)."
-    if not isinstance(payload, dict):
-        return "payload must be a JSON object."
-    scan_err = _scan_strings_safe(payload)
+        return None, f"title must be non-empty UTF-8 text (<= {MAX_DELIVERY_TITLE_LEN} chars)."
+    norm_payload: Any = payload
+    if isinstance(norm_payload, str) and norm_kind in {"notice", "card", "briefing", "reminder_result"}:
+        norm_payload = {"text": norm_payload}
+    if not isinstance(norm_payload, dict):
+        return None, "payload must be a JSON object."
+    scan_err = _scan_strings_safe(norm_payload)
     if scan_err:
-        return scan_err
+        return None, scan_err
     try:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(norm_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError) as exc:
-        return f"payload must be JSON-serializable: {exc}"
+        return None, f"payload must be JSON-serializable: {exc}"
     if len(encoded) > MAX_DELIVERY_PAYLOAD_BYTES:
-        return f"payload exceeds maximum size of {MAX_DELIVERY_PAYLOAD_BYTES} bytes."
-    if kind == "ui_patch":
-        _, ops_err = validate_ui_patch_ops(payload.get("ops"))
+        return None, f"payload exceeds maximum size of {MAX_DELIVERY_PAYLOAD_BYTES} bytes."
+    if norm_kind == "ui_patch":
+        norm_ops, ops_err = validate_ui_patch_ops(norm_payload.get("ops"))
         if ops_err:
-            return f"ui_patch payload invalid: {ops_err}"
-    elif kind == "widget_update":
-        _, widget_err = validate_widget_spec(payload, prefix="widget_update")
+            return None, f"ui_patch payload invalid: {ops_err}"
+        norm_payload = {**norm_payload, "ops": norm_ops}
+    elif norm_kind == "widget_update":
+        norm_widget, widget_err = validate_widget_spec(norm_payload, prefix="widget_update")
         if widget_err:
-            return f"widget_update payload invalid: {widget_err}"
-    return None
+            return None, f"widget_update payload invalid: {widget_err}"
+        norm_payload = norm_widget
+    return (norm_kind, title.strip(), norm_payload, norm_urgency), None
+
+
+def validate_delivery_input(kind: Any, title: Any, payload: Any, urgency: Any = "normal") -> Optional[str]:
+    _, err = normalize_delivery_input(kind, title, payload, urgency)
+    return err
 
 
 class MobileDeliveryStore:
@@ -234,13 +284,13 @@ class MobileDeliveryStore:
         session_id: Optional[str] = None,
         origin: str = "agent",
     ) -> dict[str, Any]:
-        err = validate_delivery_input(kind, title, payload, urgency)
-        if err:
-            raise ValueError(err)
+        normalized, err = normalize_delivery_input(kind, title, payload, urgency)
+        if err or normalized is None:
+            raise ValueError(err or "Invalid delivery payload.")
+        kind, clean_title, payload, urgency = normalized
 
         now = time.time()
         delivery_id = f"dlv_{uuid.uuid4().hex[:16]}"
-        clean_title = title.strip()
         clean_origin = str(origin or "agent").strip()[:48] or "agent"
         with self._lock, closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -376,8 +426,8 @@ MOBILE_DELIVER_SCHEMA = {
             },
             "urgency": {
                 "type": "string",
-                "enum": ["low", "normal", "high", "urgent"],
-                "description": "Delivery priority (default: normal).",
+                "enum": ["silent", "low", "normal", "high", "urgent"],
+                "description": "Delivery priority (default: normal; 'low' normalizes to 'silent').",
             },
             "session_id": {
                 "type": "string",
@@ -398,6 +448,14 @@ def _detect_delivery_origin() -> str:
     return "agent"
 
 
+_DELIVERY_EXAMPLE = {
+    "kind": "briefing",
+    "title": "Briefing du matin",
+    "payload": {"summary": "3 tâches prioritaires aujourd'hui"},
+    "urgency": "normal",
+}
+
+
 def mobile_deliver_tool(
     kind: str,
     title: str,
@@ -407,7 +465,7 @@ def mobile_deliver_tool(
     session_id: Optional[str] = None,
     origin: Optional[str] = None,
 ) -> str:
-    """Execute ``mobile_deliver`` tool call and return JSON receipt."""
+    """Execute ``mobile_deliver`` tool call and return JSON receipt (with self-correcting hints on error)."""
     if not session_id:
         from gateway.session_context import get_session_env
         session_id = get_session_env("HERMES_SESSION_ID") or None
@@ -423,7 +481,18 @@ def mobile_deliver_tool(
         )
     except ValueError as exc:
         logger.warning("mobile_deliver rejected: %s", exc)
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "ok": False,
+                "error": str(exc),
+                "hint": (
+                    f"Use kind in {sorted(ALLOWED_DELIVERY_KINDS)} (alias 'alert'->'notice'), "
+                    f"urgency in {sorted(ALLOWED_URGENCIES)} (alias 'low'->'silent'), non-empty title, and JSON payload."
+                ),
+                "example": _DELIVERY_EXAMPLE,
+            },
+            ensure_ascii=False,
+        )
     return json.dumps({"ok": True, "delivery": delivery}, ensure_ascii=False)
 
 

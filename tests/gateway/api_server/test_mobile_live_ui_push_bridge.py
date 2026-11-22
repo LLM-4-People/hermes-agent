@@ -326,6 +326,14 @@ async def test_ui_patch_live_sse_apply_idempotent_revert_and_profile_isolation(t
             st2 = await (await client.get("/api/mobile/ui/state", headers=headers)).json()
             assert {s["surface_id"] for s in st2["atelier_surfaces"]} == {"kpi_sprint", "spark_tps"}
 
+            # Guard: reverting a non-active applied revision (rev1 while rev2 is active) MUST return 409!
+            conflict = await client.post(f"/api/mobile/ui/revisions/{rev1_id}/revert", headers=headers)
+            assert conflict.status == 409 and conflict.headers["Cache-Control"] == "no-store"
+            assert (await conflict.json())["error"]["code"] == "revision_not_active"
+            # Active state stays synchronized at rev2.
+            st_still_2 = await (await client.get("/api/mobile/ui/state", headers=headers)).json()
+            assert st_still_2["active_revision_id"] == rev2["revision_id"]
+
             rv2 = await (await client.post(f"/api/mobile/ui/revisions/{rev2['revision_id']}/revert", headers=headers)).json()
             assert rv2["already_reverted"] is False and rv2["active_revision_id"] == rev1_id
             rv2_again = await (await client.post(f"/api/mobile/ui/revisions/{rev2['revision_id']}/revert", headers=headers)).json()
@@ -751,5 +759,201 @@ async def test_mobile_companion_prompt_builder_and_suggested_actions(tmp_path, m
             st2 = await (await client.get(f"/v1/runs/{run2_id}", headers=headers)).json()
             assert "suggested_actions" not in st2
 
+            # Persisted suggested_actions survive reload in both /state (pending_revisions) and /history!
+            ui_state = await (await client.get("/api/mobile/ui/state", headers=headers)).json()
+            assert ui_state["pending_revisions"][0]["suggested_actions"][0]["id"] == "pin_kpi"
+            ui_hist = await (await client.get("/api/mobile/ui/history", headers=headers)).json()
+            assert ui_hist["data"][0]["suggested_actions"][1]["id"] == "save_mem"
+
     assert "[Hermes Mobile Companion]" in seen_prompts[0] and "alarm_timer" in seen_prompts[0]
     assert seen_prompts[1] == "BASE_SYSTEM"
+
+
+# ── 6. Small-LLM Forgiving Normalization, Auto-Slugs & Self-Correcting Hints ─
+
+
+def test_small_llm_forgiving_normalization_auto_slugs_and_error_hints(tmp_path):
+    with override_hermes_home(tmp_path):
+        # Single dict op (not wrapped in list), omitted summary, omitted IDs, accented French title,
+        # named accent alias ("teal"), template alias ("tasks" -> "checklist"), omitted home_screen_safe,
+        # string items, and suggested_actions without explicit ids.
+        res = json.loads(
+            mobile_ui_patch_tool(
+                ops={
+                    "op": "upsert_widget",
+                    "title": "Mes tâches d’été",
+                    "template": "tasks",
+                    "accent": "teal",
+                    "items": ["Acheter du café", {"label": "Budget", "value": 42}],
+                },
+                requires_apply=False,
+                suggested_actions=[{"label": "Épingler ce widget", "kind": "pin_widget"}],
+            )
+        )
+        assert res["ok"] is True
+        widget_op = res["revision"]["ops"][0]
+        assert widget_op["widget_id"] == "mes_taches_dete"
+        assert widget_op["template"] == "checklist"
+        assert widget_op["accent_hex"] == "#0D6E6E" and widget_op["accent_ink_hex"] == "#FFFFFF"
+        assert widget_op["home_screen_safe"] is True
+        assert widget_op["items"] == [{"label": "Acheter du café"}, {"label": "Budget", "value": "42"}]
+        assert res["revision"]["suggested_actions"][0]["id"] == "epingler_ce_widget"
+
+        # Surface alias + auto-slug + theme accent preset ("coral").
+        res2 = json.loads(
+            mobile_ui_patch_tool(
+                ops=[
+                    {"op": "upsert_surface", "title": "Vitesse API", "kind": "kpi"},
+                    {"op": "upsert_quick_action", "label": "Résumé matin", "prompt": "Fais mon résumé"},
+                    {"op": "set_theme_override", "theme": {"accent": "coral"}},
+                ],
+                requires_apply=False,
+            )
+        )
+        assert res2["ok"] is True
+        assert res2["revision"]["ops"][0]["surface_id"] == "vitesse_api"
+        assert res2["revision"]["ops"][0]["kind"] == "kpi_grid"
+        assert res2["revision"]["ops"][1]["action_id"] == "resume_matin"
+        assert res2["revision"]["ops"][2]["theme"]["accent_hex"] == "#B83227"
+
+        # Strict security preserved even when home_screen_safe is omitted: secrets & explicit False STILL fail with hint+example!
+        secret_fail = json.loads(
+            mobile_ui_patch_tool(ops={"op": "upsert_widget", "title": "Token sk-abcdef1234567890", "template": "kpi"})
+        )
+        assert secret_fail["ok"] is False and "hint" in secret_fail and "example" in secret_fail
+        false_fail = json.loads(
+            mobile_ui_patch_tool(
+                ops={"op": "upsert_widget", "title": "Privé", "template": "kpi", "home_screen_safe": False}
+            )
+        )
+        assert false_fail["ok"] is False and "hint" in false_fail
+
+        # mobile_deliver forgiving aliases: kind="alert" -> "notice", urgency="low" -> "silent", plain string payload.
+        dlv = json.loads(mobile_deliver_tool(kind="alert", title="Rappel doux", payload="Pense à boire de l'eau", urgency="low"))
+        assert dlv["ok"] is True
+        assert dlv["delivery"]["kind"] == "notice"
+        assert dlv["delivery"]["urgency"] == "silent"
+        assert dlv["delivery"]["payload"] == {"text": "Pense à boire de l'eau"}
+
+        # mobile_deliver self-correcting error hint + example.
+        bad_dlv = json.loads(mobile_deliver_tool(kind="invalid_kind", title="Bad", payload={}))
+        assert bad_dlv["ok"] is False and "hint" in bad_dlv and "example" in bad_dlv
+
+    # Device bridge alias normalization ("timer" -> "alarm_timer") still enforces advertised scope + self-correcting hints.
+    broker = DeviceBridgeBroker()
+    with device_bridge_scope("owner", capabilities=["alarm_timer"], run_id="r_alias", profile_key="default", broker=broker):
+        bad_dev = json.loads(request_device_action_tool("photo", "Take photo"))
+        assert bad_dev["ok"] is False and bad_dev["error"] == "capability_not_advertised"
+        assert bad_dev["action_type"] == "camera" and "hint" in bad_dev
+        bad_reason = json.loads(request_device_action_tool("timer", ""))
+        assert bad_reason["ok"] is False and "hint" in bad_reason and "example" in bad_reason
+
+
+# ── 7. Real Gateway-Authority TurnRunner End-to-End Integration ──────────────
+
+
+def test_gateway_authority_turn_runner_wires_device_bridge_and_live_emitters(tmp_path):
+    import threading
+    from types import SimpleNamespace
+
+    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.session_api_turn import api_execution
+    from gateway.turn_context import TurnContext
+
+    # Build a minimal real-shaped authority + adapter fixture matching gateway/run.py.
+    adapter = _make_adapter()
+    ui_seen: list[dict] = []
+    dlv_seen: list[dict] = []
+    dev_events: list[tuple[str, dict]] = []
+
+    live_session = SimpleNamespace(event_stream=SimpleNamespace(execution={"admission_id": "adm_auth_1"}))
+    authority = SimpleNamespace(
+        profile_id="default",
+        logical_owner=lambda sid: sid,
+        persistence=SimpleNamespace(sessions=SimpleNamespace(get=lambda sid: SimpleNamespace(runtime_generation=1))),
+        sessions={"sess-auth-1": live_session},
+        api_observers={
+            "adm_auth_1": [{
+                "run_id": "run_auth_1",
+                "ui_patch_callback": ui_seen.append,
+                "delivery_callback": dlv_seen.append,
+            }]
+        },
+    )
+    runner = SimpleNamespace(
+        session_authority=authority,
+        _consume_pending_native_image_paths=lambda key: [],
+    )
+    adapter.gateway_runner = runner
+    broker = ensure_device_bridge_broker(adapter)
+    broker.register_run_listener("default", "run_auth_1", lambda ev, p: dev_events.append((ev, p)))
+
+    # Resolve pending device request from a helper thread once requested.
+    def _approve_when_requested():
+        for _ in range(100):
+            pending = broker.list_pending("default", "run_auth_1")
+            if pending:
+                broker.resolve_request(
+                    profile_key="default",
+                    run_id="run_auth_1",
+                    request_id=pending[0]["request_id"],
+                    status="completed",
+                    data={"ok_from_phone": True},
+                )
+                return
+            import time
+            time.sleep(0.01)
+
+    approver = threading.Thread(target=_approve_when_requested, daemon=True)
+    approver.start()
+
+    prepared = {
+        "adapter": adapter,
+        "settings": {},
+        "history": None,
+        "content": "go",
+        "turn_author": None,
+        "relay_metadata": None,
+        "run_instructions": None,
+        "device_capabilities": ["alarm_timer", "ui_surfaces_v2"],
+        "resume_unanswered": False,
+    }
+    token = api_execution.set(prepared)
+    with override_hermes_home(tmp_path):
+        try:
+            turn = TurnRunner(
+                runner,
+                TurnContext(
+                    message="go",
+                    session_id="sess-auth-1",
+                    session_key="api",
+                    source=SimpleNamespace(user_id="owner", user_name="Owner", is_bot=False),
+                ),
+            )
+            agent = SimpleNamespace(ephemeral_system_prompt=None, _cached_system_prompt="base")
+            outcomes = {}
+
+            def _run(message, **kwargs):
+                outcomes["ui"] = json.loads(
+                    mobile_ui_patch_tool(
+                        ops={"op": "upsert_widget", "title": "Brief", "template": "metric", "accent": "teal"},
+                        session_id="sess-auth-1",
+                    )
+                )
+                outcomes["dlv"] = json.loads(
+                    mobile_deliver_tool(kind="alert", title="Done", payload="All set", urgency="low", session_id="sess-auth-1")
+                )
+                outcomes["dev"] = json.loads(request_device_action_tool("timer", "Set 5m timer"))
+                return {"final_response": "ok"}
+
+            agent.run_conversation = _run
+            turn._run_conversation_with_approval(agent, [], None, None, None)
+        finally:
+            api_execution.reset(token)
+            approver.join(timeout=2.0)
+
+    assert outcomes["ui"]["ok"] is True and len(ui_seen) == 1
+    assert outcomes["dlv"]["ok"] is True and len(dlv_seen) == 1
+    assert outcomes["dev"]["ok"] is True and outcomes["dev"]["data"] == {"ok_from_phone": True}
+    assert [ev for ev, _ in dev_events] == ["device.requested", "device.settled"]

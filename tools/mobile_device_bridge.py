@@ -40,6 +40,34 @@ ALLOWED_DEVICE_CAPABILITIES = frozenset({
     "ui_surfaces_v2",
 })
 
+DEVICE_ACTION_ALIASES: dict[str, str] = {
+    "photo": "camera",
+    "picture": "camera",
+    "take_photo": "camera",
+    "location": "location_coarse",
+    "gps": "location_coarse",
+    "where": "location_coarse",
+    "nearby": "nearby_osm",
+    "places": "nearby_osm",
+    "calendar": "calendar_draft",
+    "event": "calendar_draft",
+    "alarm": "alarm_timer",
+    "timer": "alarm_timer",
+    "countdown": "alarm_timer",
+    "maps": "maps_handoff",
+    "directions": "maps_handoff",
+    "navigate": "maps_handoff",
+    "share": "share_sheet",
+    "clipboard": "clipboard_read",
+    "call": "dial_draft",
+    "phone": "dial_draft",
+    "dial": "dial_draft",
+    "email": "email_draft",
+    "mail": "email_draft",
+    "contact": "contacts_pick",
+    "contacts": "contacts_pick",
+}
+
 ALLOWED_DEVICE_RESULT_STATUSES = frozenset({"completed", "denied", "unavailable"})
 MAX_DEVICE_PARAMS_BYTES = 32_768
 MAX_DEVICE_RESULT_BYTES = 131_072
@@ -370,6 +398,13 @@ REQUEST_DEVICE_ACTION_SCHEMA = {
 }
 
 
+_DEVICE_ACTION_EXAMPLE = {
+    "action_type": "alarm_timer",
+    "reason": "Régler un minuteur de 10 minutes",
+    "params": {"duration_seconds": 600, "label": "Pause"},
+}
+
+
 def request_device_action_tool(
     action_type: Any,
     reason: Any,
@@ -382,42 +417,64 @@ def request_device_action_tool(
             "ok": False,
             "error": "device_bridge_unavailable",
             "message": "No active mobile device bridge is bound to this run.",
+            "hint": "Only call request_device_action when the client advertised device_capabilities on this run.",
         }, ensure_ascii=False)
-    if not isinstance(action_type, str) or action_type not in ALLOWED_DEVICE_CAPABILITIES:
+    norm_action = (
+        DEVICE_ACTION_ALIASES.get(action_type.strip().lower(), action_type.strip().lower())
+        if isinstance(action_type, str)
+        else action_type
+    )
+    if not isinstance(norm_action, str) or norm_action not in ALLOWED_DEVICE_CAPABILITIES:
         return json.dumps({
             "ok": False,
             "error": "invalid_action_type",
             "allowed": sorted(ALLOWED_DEVICE_CAPABILITIES),
+            "hint": f"Choose action_type from advertised capabilities: {sorted(scope.capabilities)}.",
+            "example": _DEVICE_ACTION_EXAMPLE,
         }, ensure_ascii=False)
-    if action_type not in scope.capabilities:
+    if norm_action not in scope.capabilities:
         return json.dumps({
             "ok": False,
             "error": "capability_not_advertised",
-            "action_type": action_type,
+            "action_type": norm_action,
             "advertised": sorted(scope.capabilities),
+            "hint": f"This phone run only advertised {sorted(scope.capabilities)}; use one of those or answer without device access.",
         }, ensure_ascii=False)
     if not _valid_utf8_text(reason, max_len=MAX_REASON_LEN):
         return json.dumps({
             "ok": False,
             "error": f"reason must be non-empty UTF-8 text (<= {MAX_REASON_LEN} chars).",
+            "hint": "Provide a short, plain-language reason shown to the user before they approve.",
+            "example": _DEVICE_ACTION_EXAMPLE,
         }, ensure_ascii=False)
     clean_params = {} if params is None else params
     if not isinstance(clean_params, dict):
-        return json.dumps({"ok": False, "error": "params must be a JSON object."}, ensure_ascii=False)
+        return json.dumps({
+            "ok": False,
+            "error": "params must be a JSON object.",
+            "hint": "Pass params as a flat JSON object (or omit it).",
+            "example": _DEVICE_ACTION_EXAMPLE,
+        }, ensure_ascii=False)
     scan_err = _scan_strings_safe(clean_params)
     if scan_err:
-        return json.dumps({"ok": False, "error": scan_err}, ensure_ascii=False)
+        return json.dumps({
+            "ok": False,
+            "error": scan_err,
+            "hint": "Remove any script tags or unsafe URIs from params and retry.",
+            "example": _DEVICE_ACTION_EXAMPLE,
+        }, ensure_ascii=False)
     encoded = json.dumps(clean_params, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_DEVICE_PARAMS_BYTES:
         return json.dumps({
             "ok": False,
             "error": f"params exceeds maximum size of {MAX_DEVICE_PARAMS_BYTES} bytes.",
+            "hint": "Trim params to only the essential fields for the native Android confirmation screen.",
         }, ensure_ascii=False)
 
     outcome = scope.broker.request_action(
         profile_key=scope.profile_key,
         run_id=scope.run_id,
-        action_type=action_type,
+        action_type=norm_action,
         params=clean_params,
         reason=reason.strip(),
         timeout_seconds=scope.timeout_seconds,

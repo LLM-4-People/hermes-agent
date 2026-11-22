@@ -34,6 +34,16 @@ def ensure_device_bridge_broker(adapter) -> DeviceBridgeBroker:
     return broker
 
 
+def resolve_device_profile_key(adapter, request_profile: str | None = None) -> str:
+    """Single source of truth for the ``DeviceBridgeBroker`` profile isolation key."""
+    if request_profile:
+        return str(request_profile)
+    from gateway.session_authorities import active_authority
+    authority = active_authority(getattr(adapter, "gateway_runner", None))
+    pid = getattr(authority, "profile_id", None)
+    return str(pid) if pid else "default"
+
+
 def _error_no_store(_openai_error, message: str, *, code: str, status: int) -> web.Response:
     return web.json_response(_openai_error(message, code=code), status=status, headers=_NO_STORE)
 
@@ -98,7 +108,7 @@ def _http_routes(adapter) -> list[tuple[str, str, Any]]:
                     status=400,
                 )
 
-        profile_key = _api_server._api_request_profile.get() or "default"
+        profile_key = resolve_device_profile_key(adapter, _api_server._api_request_profile.get())
         broker = ensure_device_bridge_broker(adapter)
         outcome, summary = broker.resolve_request(
             profile_key=profile_key,

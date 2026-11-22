@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
@@ -87,7 +88,62 @@ DEFAULT_SURFACE_HEX = "#FAF8F5"
 DEFAULT_INK_HEX = "#1A1917"
 DEFAULT_ACCENT_INK_HEX = "#FFFFFF"
 
+# Guaranteed WCAG 2.1 AA (>= 4.5:1) named accent presets for small-LLM ergonomics.
+ACCENT_PALETTE_ALIASES: dict[str, tuple[str, str]] = {
+    "teal": ("#0D6E6E", "#FFFFFF"),
+    "green": ("#1B6B3A", "#FFFFFF"),
+    "blue": ("#1D4ED8", "#FFFFFF"),
+    "amber": ("#92400E", "#FFFFFF"),
+    "coral": ("#B83227", "#FFFFFF"),
+    "indigo": ("#4338CA", "#FFFFFF"),
+    "slate": ("#334155", "#FFFFFF"),
+}
+
+SURFACE_KIND_ALIASES: dict[str, str] = {
+    "kpi": "kpi_grid",
+    "metrics": "kpi_grid",
+    "stats": "kpi_grid",
+    "chart": "sparkline",
+    "line_chart": "sparkline",
+    "bars": "bar_chart",
+    "list": "table",
+    "grid": "table",
+    "card": "markdown_card",
+    "markdown": "markdown_card",
+    "text": "markdown_card",
+    "progress": "progress_tracker",
+    "toggles": "toggle_group",
+    "switches": "toggle_group",
+    "chips": "chip_filter",
+    "filters": "chip_filter",
+    "actions": "action_bar",
+    "buttons": "action_bar",
+    "map": "map_compass",
+    "compass": "map_compass",
+}
+
+WIDGET_TEMPLATE_ALIASES: dict[str, str] = {
+    "list": "checklist",
+    "tasks": "checklist",
+    "todo": "checklist",
+    "todos": "checklist",
+    "kpi": "metric",
+    "counter": "metric",
+    "stats": "metric",
+    "number": "metric",
+    "actions": "quick_actions",
+    "buttons": "quick_actions",
+    "shortcuts": "quick_actions",
+    "summary": "briefing",
+    "daily": "briefing",
+    "digest": "briefing",
+    "morning": "briefing",
+    "state": "status",
+    "health": "status",
+}
+
 _SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SLUG_STRIP_RE = re.compile(r"[^a-z0-9_-]+")
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _FORBIDDEN_PAYLOAD_RE = re.compile(
     r"(?i)<\s*/?\s*(script|iframe|object|embed|svg)\b|javascript\s*:|vbscript\s*:|data\s*:\s*text/html|intent\s*:|file\s*://"
@@ -190,21 +246,74 @@ def contrast_ratio(hex_a: str, hex_b: str) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def slugify_id(text: Any, *, fallback: str = "item") -> str:
+    """Derive a deterministic safe ID (``^[a-z0-9][a-z0-9_-]{0,63}$``) from any title/label."""
+    if isinstance(text, str) and text.strip():
+        ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()
+        slug = _SLUG_STRIP_RE.sub("_", ascii_text).strip("_-")
+        if slug and slug[0].isalnum():
+            return slug[:MAX_ID_LEN]
+    return fallback[:MAX_ID_LEN]
+
+
+def resolve_accent_color(raw_accent: Any, raw_ink: Any = None) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve a named accent preset (e.g. ``teal``) or ``#RRGGBB`` into WCAG-AA verified hex pair."""
+    if isinstance(raw_accent, str):
+        preset = ACCENT_PALETTE_ALIASES.get(raw_accent.strip().lower())
+        if preset is not None:
+            hex_color, default_ink = preset
+            ink_color = raw_ink.upper() if isinstance(raw_ink, str) and _HEX_COLOR_RE.match(raw_ink) else default_ink
+            if raw_ink is not None and not (isinstance(raw_ink, str) and _HEX_COLOR_RE.match(raw_ink)):
+                return None, None, "accent_ink_hex must be a 6-digit hex color like #FFFFFF."
+            ratio = contrast_ratio(hex_color, ink_color)
+            if ratio < MIN_WCAG_AA_CONTRAST:
+                return None, None, (
+                    f"WCAG AA contrast failure: {ink_color} on {hex_color} is "
+                    f"{ratio:.2f}:1 (minimum {MIN_WCAG_AA_CONTRAST}:1)."
+                )
+            return hex_color, ink_color, None
+    if not isinstance(raw_accent, str) or not _HEX_COLOR_RE.match(raw_accent):
+        return (
+            None,
+            None,
+            f"accent_hex must be a 6-digit hex color like #0D6E6E or one of {sorted(ACCENT_PALETTE_ALIASES)}.",
+        )
+    ink_color = DEFAULT_ACCENT_INK_HEX if raw_ink is None else raw_ink
+    if not isinstance(ink_color, str) or not _HEX_COLOR_RE.match(ink_color):
+        return None, None, "accent_ink_hex must be a 6-digit hex color like #FFFFFF."
+    ratio = contrast_ratio(raw_accent, ink_color)
+    if ratio < MIN_WCAG_AA_CONTRAST:
+        return None, None, (
+            f"WCAG AA contrast failure: {ink_color.upper()} on {raw_accent.upper()} is "
+            f"{ratio:.2f}:1 (minimum {MIN_WCAG_AA_CONTRAST}:1)."
+        )
+    return raw_accent.upper(), ink_color.upper(), None
+
+
 def validate_theme_override(theme: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """Validate declarative theme tokens and enforce WCAG AA (>= 4.5:1) contrast."""
     if not isinstance(theme, dict) or not theme:
         return None, "theme must be a non-empty object."
-    allowed_keys = {"accent_hex", "accent_ink_hex", "surface_hex", "ink_hex", "density", "font_scale_step", "surface_style"}
+    allowed_keys = {
+        "accent",
+        "accent_hex",
+        "accent_ink_hex",
+        "surface_hex",
+        "ink_hex",
+        "density",
+        "font_scale_step",
+        "surface_style",
+    }
     unknown = sorted(set(theme) - allowed_keys)
     if unknown:
         return None, f"Unsupported theme keys: {', '.join(unknown)}"
 
     cleaned: dict[str, Any] = {}
-    for color_key in ("accent_hex", "accent_ink_hex", "surface_hex", "ink_hex"):
+    for color_key in ("surface_hex", "ink_hex"):
         if color_key in theme:
             raw = theme[color_key]
             if not isinstance(raw, str) or not _HEX_COLOR_RE.match(raw):
-                return None, f"{color_key} must be a 6-digit hex color like #0D6E6E."
+                return None, f"{color_key} must be a 6-digit hex color like #FAF8F5."
             cleaned[color_key] = raw.upper()
 
     if "density" in theme:
@@ -232,17 +341,14 @@ def validate_theme_override(theme: Any) -> tuple[Optional[dict[str, Any]], Optio
             f"{text_contrast:.2f}:1 (minimum {MIN_WCAG_AA_CONTRAST}:1)."
         )
 
-    if "accent_hex" in cleaned or "accent_ink_hex" in cleaned:
-        accent = cleaned.get("accent_hex")
-        if accent is None:
-            return None, "accent_ink_hex requires accent_hex."
-        accent_ink = cleaned.get("accent_ink_hex", DEFAULT_ACCENT_INK_HEX)
-        accent_contrast = contrast_ratio(accent, accent_ink)
-        if accent_contrast < MIN_WCAG_AA_CONTRAST:
-            return None, (
-                f"WCAG AA contrast failure: accent_ink {accent_ink} on accent {accent} is "
-                f"{accent_contrast:.2f}:1 (minimum {MIN_WCAG_AA_CONTRAST}:1)."
-            )
+    raw_accent = theme.get("accent_hex", theme.get("accent"))
+    if raw_accent is not None or "accent_ink_hex" in theme:
+        if raw_accent is None:
+            return None, "accent_ink_hex requires accent_hex or accent."
+        accent_hex, accent_ink, accent_err = resolve_accent_color(raw_accent, theme.get("accent_ink_hex"))
+        if accent_err:
+            return None, accent_err
+        cleaned["accent_hex"] = accent_hex
         cleaned["accent_ink_hex"] = accent_ink
 
     return cleaned, None
@@ -257,24 +363,37 @@ def _validate_safe_id(value: Any, label: str) -> Optional[str]:
 
 
 def validate_widget_spec(raw: Any, *, prefix: str = "widget") -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    """Validate a declarative home-screen widget spec (shared SSoT for ``upsert_widget`` and ``widget_update``)."""
+    """Validate & normalize a declarative home-screen widget spec (shared SSoT for ``upsert_widget`` and ``widget_update``).
+
+    Forgiving for small LLMs: auto-derives ``widget_id`` from ``title`` when omitted, normalizes friendly
+    template/accent aliases (e.g. ``tasks`` -> ``checklist``, ``teal`` -> ``#0D6E6E``), and defaults omitted
+    ``home_screen_safe`` to ``True`` while strictly rejecting explicit ``home_screen_safe=False``, WCAG-AA
+    contrast failures, script/URI injection, and credential/token leaks.
+    """
     if not isinstance(raw, dict):
         return None, f"{prefix} must be an object."
     scan_err = _scan_strings_safe(raw)
     if scan_err:
         return None, f"{prefix}: {scan_err}"
-    wid = raw.get("widget_id")
-    id_err = _validate_safe_id(wid, f"{prefix}.widget_id")
-    if id_err:
-        return None, id_err
-    if raw.get("home_screen_safe") is not True:
-        return None, f"{prefix}.home_screen_safe must be explicitly true to publish onto the Android home screen."
-    template = raw.get("template")
-    if template not in ALLOWED_WIDGET_TEMPLATES:
-        return None, f"{prefix}.template must be one of {sorted(ALLOWED_WIDGET_TEMPLATES)}."
     title = raw.get("title")
     if not _valid_utf8_text(title, max_len=80):
         return None, f"{prefix}.title must be non-empty UTF-8 text (<= 80 chars)."
+    raw_wid = raw.get("widget_id")
+    wid = slugify_id(title, fallback="widget") if (raw_wid is None or raw_wid == "") else raw_wid
+    id_err = _validate_safe_id(wid, f"{prefix}.widget_id")
+    if id_err:
+        return None, id_err
+    raw_safe = raw.get("home_screen_safe")
+    if raw_safe is False or (raw_safe is not None and not isinstance(raw_safe, bool)):
+        return None, f"{prefix}.home_screen_safe must be true (explicitly false blocks home-screen publishing)."
+    raw_template = raw.get("template")
+    template = (
+        WIDGET_TEMPLATE_ALIASES.get(raw_template.strip().lower(), raw_template.strip().lower())
+        if isinstance(raw_template, str)
+        else raw_template
+    )
+    if template not in ALLOWED_WIDGET_TEMPLATES:
+        return None, f"{prefix}.template must be one of {sorted(ALLOWED_WIDGET_TEMPLATES)}."
     subtitle = raw.get("subtitle")
     if subtitle is not None and not _valid_utf8_text(subtitle, max_len=120, allow_empty=True):
         return None, f"{prefix}.subtitle must be UTF-8 text (<= 120 chars)."
@@ -284,16 +403,20 @@ def validate_widget_spec(raw: Any, *, prefix: str = "widget") -> tuple[Optional[
     if not isinstance(raw_items, list) or len(raw_items) > MAX_WIDGET_ITEMS:
         return None, f"{prefix}.items must be an array of at most {MAX_WIDGET_ITEMS} entries."
     for idx, item in enumerate(raw_items):
+        if isinstance(item, str) and _valid_utf8_text(item, max_len=80):
+            clean_items.append({"label": item.strip()})
+            continue
         if not isinstance(item, dict):
-            return None, f"{prefix}.items[{idx}] must be an object."
+            return None, f"{prefix}.items[{idx}] must be an object or short string."
         label = item.get("label")
         if not _valid_utf8_text(label, max_len=80):
             return None, f"{prefix}.items[{idx}].label must be non-empty UTF-8 text (<= 80 chars)."
         clean_item: dict[str, Any] = {"label": label.strip()}
         if "value" in item and item["value"] is not None:
-            if not _valid_utf8_text(item["value"], max_len=80, allow_empty=True):
+            val_str = str(item["value"]) if isinstance(item["value"], (int, float)) and not isinstance(item["value"], bool) else item["value"]
+            if not _valid_utf8_text(val_str, max_len=80, allow_empty=True):
                 return None, f"{prefix}.items[{idx}].value must be UTF-8 text (<= 80 chars)."
-            clean_item["value"] = item["value"].strip()
+            clean_item["value"] = val_str.strip()
         if "checked" in item and item["checked"] is not None:
             if not isinstance(item["checked"], bool):
                 return None, f"{prefix}.items[{idx}].checked must be a boolean."
@@ -314,21 +437,13 @@ def validate_widget_spec(raw: Any, *, prefix: str = "widget") -> tuple[Optional[
     if subtitle is not None and subtitle.strip():
         spec["subtitle"] = subtitle.strip()
 
-    if "accent_hex" in raw and raw["accent_hex"] is not None:
-        accent = raw["accent_hex"]
-        accent_ink = raw.get("accent_ink_hex") or DEFAULT_ACCENT_INK_HEX
-        if not isinstance(accent, str) or not _HEX_COLOR_RE.match(accent):
-            return None, f"{prefix}.accent_hex must be a 6-digit hex color like #0D6E6E."
-        if not isinstance(accent_ink, str) or not _HEX_COLOR_RE.match(accent_ink):
-            return None, f"{prefix}.accent_ink_hex must be a 6-digit hex color like #FFFFFF."
-        ratio = contrast_ratio(accent, accent_ink)
-        if ratio < MIN_WCAG_AA_CONTRAST:
-            return None, (
-                f"{prefix}: WCAG AA contrast failure: {accent_ink.upper()} on {accent.upper()} is "
-                f"{ratio:.2f}:1 (minimum {MIN_WCAG_AA_CONTRAST}:1)."
-            )
-        spec["accent_hex"] = accent.upper()
-        spec["accent_ink_hex"] = accent_ink.upper()
+    raw_accent = raw.get("accent_hex", raw.get("accent"))
+    if raw_accent is not None:
+        accent_hex, accent_ink, accent_err = resolve_accent_color(raw_accent, raw.get("accent_ink_hex"))
+        if accent_err:
+            return None, f"{prefix}: {accent_err}"
+        spec["accent_hex"] = accent_hex
+        spec["accent_ink_hex"] = accent_ink
 
     # Reject obvious credential/secret strings before they can ever reach a home screen.
     if _WIDGET_SECRET_RE.search(json.dumps(spec, ensure_ascii=False)):
@@ -351,17 +466,18 @@ def validate_suggested_actions(raw: Any) -> tuple[Optional[list[dict[str, Any]]]
     for idx, item in enumerate(raw):
         if not isinstance(item, dict):
             return None, f"suggested_actions[{idx}] must be an object."
-        aid = item.get("id")
+        label = item.get("label")
+        if not _valid_utf8_text(label, max_len=48):
+            return None, f"suggested_actions[{idx}].label must be non-empty UTF-8 text (<= 48 chars)."
+        raw_id = item.get("id")
+        aid = slugify_id(label, fallback=f"action_{idx + 1}") if (raw_id is None or raw_id == "") else raw_id
         id_err = _validate_safe_id(aid, f"suggested_actions[{idx}].id")
         if id_err:
             return None, id_err
         if aid in seen_ids:
             return None, f"suggested_actions[{idx}].id duplicates '{aid}'."
         seen_ids.add(aid)
-        label = item.get("label")
-        if not _valid_utf8_text(label, max_len=48):
-            return None, f"suggested_actions[{idx}].label must be non-empty UTF-8 text (<= 48 chars)."
-        kind = item.get("kind")
+        kind = item.get("kind", "prompt")
         if kind not in ALLOWED_SUGGESTED_ACTION_KINDS:
             return None, f"suggested_actions[{idx}].kind must be one of {sorted(ALLOWED_SUGGESTED_ACTION_KINDS)}."
         entry: dict[str, Any] = {"id": aid, "label": label.strip(), "kind": kind}
@@ -385,6 +501,8 @@ def validate_suggested_actions(raw: Any) -> tuple[Optional[list[dict[str, Any]]]
 
 def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
     """Validate and normalize a declarative UI patch op list."""
+    if isinstance(ops, dict):
+        ops = [ops]
     if not isinstance(ops, list) or not ops:
         return None, "ops must be a non-empty array."
     if len(ops) > MAX_OPS_PER_PATCH:
@@ -408,20 +526,28 @@ def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Opt
             return None, f"ops[{idx}].op must be one of {sorted(ALLOWED_OP_TYPES)}."
 
         if op_type == "upsert_surface":
-            surface_id = raw_op.get("surface_id")
+            title = raw_op.get("title")
+            if not _valid_utf8_text(title, max_len=MAX_TITLE_LEN):
+                return None, f"ops[{idx}].title must be non-empty UTF-8 text (<= {MAX_TITLE_LEN} chars)."
+            raw_sid = raw_op.get("surface_id")
+            surface_id = slugify_id(title, fallback=f"surface_{idx + 1}") if (raw_sid is None or raw_sid == "") else raw_sid
             id_err = _validate_safe_id(surface_id, f"ops[{idx}].surface_id")
             if id_err:
                 return None, id_err
-            kind = raw_op.get("kind")
+            raw_kind = raw_op.get("kind")
+            kind = (
+                SURFACE_KIND_ALIASES.get(raw_kind.strip().lower(), raw_kind.strip().lower())
+                if isinstance(raw_kind, str)
+                else raw_kind
+            )
             if kind not in ALLOWED_SURFACE_KINDS:
                 return None, f"ops[{idx}].kind must be one of {sorted(ALLOWED_SURFACE_KINDS)}."
             scope = raw_op.get("scope", "atelier")
             if scope not in ALLOWED_SCOPES:
                 return None, f"ops[{idx}].scope must be one of {sorted(ALLOWED_SCOPES)}."
-            title = raw_op.get("title")
-            if not _valid_utf8_text(title, max_len=MAX_TITLE_LEN):
-                return None, f"ops[{idx}].title must be non-empty UTF-8 text (<= {MAX_TITLE_LEN} chars)."
             spec = raw_op.get("spec")
+            if spec is None:
+                spec = {}
             if not isinstance(spec, dict):
                 return None, f"ops[{idx}].spec must be an object."
             tab = raw_op.get("tab")
@@ -452,13 +578,14 @@ def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Opt
             normalized.append({"op": "remove_surface", "surface_id": surface_id, "scope": scope})
 
         elif op_type == "upsert_quick_action":
-            action_id = raw_op.get("action_id")
-            id_err = _validate_safe_id(action_id, f"ops[{idx}].action_id")
-            if id_err:
-                return None, id_err
             label = raw_op.get("label")
             if not _valid_utf8_text(label, max_len=64):
                 return None, f"ops[{idx}].label must be non-empty UTF-8 text (<= 64 chars)."
+            raw_aid = raw_op.get("action_id")
+            action_id = slugify_id(label, fallback=f"action_{idx + 1}") if (raw_aid is None or raw_aid == "") else raw_aid
+            id_err = _validate_safe_id(action_id, f"ops[{idx}].action_id")
+            if id_err:
+                return None, id_err
             action_kind = raw_op.get("action_kind", "prompt")
             if action_kind not in ALLOWED_QUICK_ACTION_KINDS:
                 return None, f"ops[{idx}].action_kind must be one of {sorted(ALLOWED_QUICK_ACTION_KINDS)}."
@@ -613,6 +740,7 @@ CREATE TABLE IF NOT EXISTS ui_revisions (
     summary TEXT NOT NULL,
     ops_json TEXT NOT NULL,
     state_snapshot_json TEXT NOT NULL,
+    suggested_actions_json TEXT,
     status TEXT NOT NULL,
     requires_apply INTEGER NOT NULL,
     created_at REAL NOT NULL,
@@ -631,6 +759,14 @@ CREATE TABLE IF NOT EXISTS ui_active_state (
 _GLOBAL_STATE_KEY = "profile"
 
 
+class RevisionConflictError(ValueError):
+    """Raised when attempting to revert an applied revision that is not the active head."""
+
+    def __init__(self, message: str, *, active_revision_id: Optional[str]) -> None:
+        super().__init__(message)
+        self.active_revision_id = active_revision_id
+
+
 class MobileUiStore:
     """Profile-scoped SQLite store for declarative UI revisions and rollback."""
 
@@ -645,6 +781,9 @@ class MobileUiStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(_UI_SCHEMA_SQL)
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(ui_revisions)").fetchall()}
+        if "suggested_actions_json" not in cols:
+            conn.execute("ALTER TABLE ui_revisions ADD COLUMN suggested_actions_json TEXT")
         try:
             os.chmod(self._db_path, 0o600)
         except OSError:
@@ -662,6 +801,8 @@ class MobileUiStore:
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        raw_suggestions = row["suggested_actions_json"] if "suggested_actions_json" in row.keys() else None
+        suggestions = json.loads(raw_suggestions) if raw_suggestions else None
         return {
             "revision_id": row["revision_id"],
             "parent_revision_id": row["parent_revision_id"],
@@ -674,6 +815,7 @@ class MobileUiStore:
             "reversible": True,
             "created_at": row["created_at"],
             "applied_at": row["applied_at"],
+            **({"suggested_actions": suggestions} if suggestions else {}),
         }
 
     def propose_or_apply(
@@ -709,8 +851,8 @@ class MobileUiStore:
                 conn.execute(
                     """INSERT INTO ui_revisions
                        (revision_id, parent_revision_id, session_id, scope, summary, ops_json,
-                        state_snapshot_json, status, requires_apply, created_at, applied_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        state_snapshot_json, suggested_actions_json, status, requires_apply, created_at, applied_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         revision_id,
                         parent_id,
@@ -719,6 +861,7 @@ class MobileUiStore:
                         summary.strip(),
                         json.dumps(normalized, ensure_ascii=False),
                         json.dumps(next_state, ensure_ascii=False),
+                        json.dumps(clean_suggestions, ensure_ascii=False) if clean_suggestions else None,
                         status,
                         1 if requires_apply else 0,
                         now,
@@ -861,6 +1004,13 @@ class MobileUiStore:
                     conn.execute("UPDATE ui_revisions SET status = 'reverted' WHERE revision_id = ?", (revision_id,))
                     active_id, _ = self._read_active(conn)
                 else:
+                    current_active_id, _ = self._read_active(conn)
+                    if current_active_id != revision_id:
+                        raise RevisionConflictError(
+                            f"Cannot revert non-active revision {revision_id}; active revision is {current_active_id}. "
+                            "Revert the active revision first.",
+                            active_revision_id=current_active_id,
+                        )
                     restored_state = _empty_state()
                     restored_id = None
                     if parent_id:
@@ -938,24 +1088,42 @@ MOBILE_UI_PATCH_SCHEMA = {
 }
 
 
+_UI_PATCH_EXAMPLE = {
+    "summary": "Add morning widget",
+    "ops": [{
+        "op": "upsert_widget",
+        "title": "Mon matin",
+        "template": "metric",
+        "accent": "teal",
+        "items": [{"label": "Tâches", "value": "3"}],
+        "home_screen_safe": True,
+    }],
+}
+
+
 def mobile_ui_patch_tool(
     ops: Any,
-    summary: str,
+    summary: str = "",
     *,
     scope: str = "atelier",
     requires_apply: bool = True,
     session_id: Optional[str] = None,
     suggested_actions: Any = None,
 ) -> str:
-    """Execute ``mobile_ui_patch`` tool call and return JSON result."""
+    """Execute ``mobile_ui_patch`` tool call and return JSON result (with self-correcting hints on error)."""
     if not session_id:
         from gateway.session_context import get_session_env
         session_id = get_session_env("HERMES_SESSION_ID") or None
+    effective_summary = summary.strip() if isinstance(summary, str) and summary.strip() else ""
+    if not effective_summary:
+        first_op = ops[0] if isinstance(ops, list) and ops and isinstance(ops[0], dict) else (ops if isinstance(ops, dict) else {})
+        label = first_op.get("title") or first_op.get("label") or first_op.get("op") or "UI update"
+        effective_summary = f"Update: {str(label)[:120]}"
     store = MobileUiStore()
     try:
         revision = store.propose_or_apply(
             ops,
-            summary,
+            effective_summary,
             session_id=session_id,
             scope=scope,
             requires_apply=bool(requires_apply),
@@ -963,7 +1131,18 @@ def mobile_ui_patch_tool(
         )
     except ValueError as exc:
         logger.warning("mobile_ui_patch rejected: %s", exc)
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "ok": False,
+                "error": str(exc),
+                "hint": (
+                    "Pass ops=[{op, title, ...}] using allowed ops/templates/accent presets "
+                    "(teal, green, blue, amber, coral, indigo, slate) and safe UTF-8 text."
+                ),
+                "example": _UI_PATCH_EXAMPLE,
+            },
+            ensure_ascii=False,
+        )
     return json.dumps({"ok": True, "revision": revision}, ensure_ascii=False)
 
 

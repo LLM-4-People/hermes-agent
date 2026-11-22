@@ -23,7 +23,8 @@ api_execution: ContextVar[dict | None] = ContextVar('api_execution', default=Non
 _SETTINGS_PREFIX = 'gateway.api.settings.v1.'
 # Request-owned sinks an API observer may register for its admission's execution.
 _OBSERVER_KEYS = ('stream_delta_callback', 'tool_start_callback', 'tool_complete_callback',
-                  'reasoning_callback', 'status_callback', 'interim_assistant_callback')
+                  'reasoning_callback', 'status_callback', 'interim_assistant_callback',
+                  'run_id', 'ui_patch_callback', 'delivery_callback')
 _TOOL_SINKS = {'tool_start_callback', 'tool_complete_callback'}
 _SETTING_KEYS = ('ephemeral_system_prompt', 'requested_model', 'requested_provider',
                  'model_options', 'route', 'session_model', 'confirmed_runtime_lock',
@@ -455,9 +456,27 @@ def prepare_api_execution(authority, ref, payload):
 
 
 def _api_observers(authority, session_id):
-    execution = authority.sessions[session_id].event_stream.execution
+    live = getattr(authority, 'sessions', {}).get(session_id)
+    execution = live.event_stream.execution if live is not None else None
     admission_id = execution.get('admission_id') if execution else None
     return tuple(getattr(authority, 'api_observers', {}).get(admission_id, ()))
+
+
+def active_api_run_id(authority, session_id):
+    """Return the live API ``run_id`` observing the active admission for ``session_id``, if any."""
+    for observer in _api_observers(authority, session_id):
+        run_id = observer.get('run_id')
+        if isinstance(run_id, str) and run_id:
+            return run_id
+    return None
+
+
+def notify_api_ui_patch(authority, session_id, revision):
+    return _notify_observers(authority, session_id, 'ui_patch_callback', revision)
+
+
+def notify_api_delivery(authority, session_id, delivery):
+    return _notify_observers(authority, session_id, 'delivery_callback', delivery)
 
 
 def _notify_observers(authority, session_id, key, *args, **kwargs):

@@ -14,7 +14,7 @@ from aiohttp import web
 
 from hermes_constants import get_hermes_home
 from tools.mobile_deliver import MobileDeliveryStore
-from tools.mobile_ui_patch import MobileUiStore
+from tools.mobile_ui_patch import MobileUiStore, RevisionConflictError
 
 logger = logging.getLogger("gateway.platforms.api_server")
 
@@ -115,7 +115,10 @@ def _http_routes(adapter) -> list[tuple[str, str, Any]]:
             return err
         revision_id = request.match_info["revision_id"].strip()
         profile_home = get_hermes_home()
-        outcome = await asyncio.to_thread(lambda: MobileUiStore(profile_home).revert_revision(revision_id))
+        try:
+            outcome = await asyncio.to_thread(lambda: MobileUiStore(profile_home).revert_revision(revision_id))
+        except RevisionConflictError as exc:
+            return _error_no_store(_api_server._openai_error, str(exc), code="revision_not_active", status=409)
         if outcome is None:
             return _error_no_store(
                 _api_server._openai_error, f"UI revision not found: {revision_id}", code="revision_not_found", status=404

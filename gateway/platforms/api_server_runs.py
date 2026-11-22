@@ -1036,7 +1036,9 @@ def _served_runtime(agent) -> dict[str, str]:
     return pair
 
 
-def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server, loop=None):
+def _run_agent_sync(
+    self, run: _RunLaunch, agent, approval_notify, *, _api_server, emit_ui=None, emit_delivery=None
+):
     """Executor-thread body of one run; returns ``(result, usage, served_runtime)``."""
     from gateway.session_context import clear_session_vars
     from gateway.hosted_room_execution_policy import (
@@ -1083,30 +1085,15 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             # Passed only when set: a human turn keeps today's call shape.
             author_kwargs = {"turn_author": run.turn_author} if run.turn_author is not None else {}
-            from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+            from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
             broker = ensure_device_bridge_broker(self)
-            profile_key = run.request_profile or "default"
-
-            def _emit_ui(revision: dict[str, Any]) -> None:
-                suggestions = revision.get("suggested_actions")
-                if suggestions:
-                    cur = self._run_statuses.get(run.run_id, {})
-                    if cur.get("status") not in TERMINAL_STATUSES:
-                        self._set_run_status(run.run_id, str(cur.get("status") or "running"), suggested_actions=suggestions)
-                if run.run_id in self._run_streams and loop is not None:
-                    with suppress(Exception):
-                        loop.call_soon_threadsafe(run.put_event, _run_event(run.run_id, "ui.patch", **revision))
-
-            def _emit_delivery(delivery: dict[str, Any]) -> None:
-                if run.run_id in self._run_streams and loop is not None:
-                    with suppress(Exception):
-                        loop.call_soon_threadsafe(run.put_event, _run_event(run.run_id, "mobile.delivery", **delivery))
+            profile_key = resolve_device_profile_key(self, run.request_profile)
 
             effective_once = combine_run_instructions(run.run_instructions, run.device_capabilities)
             with (
                 run_instruction_scope(agent, effective_once),
-                bind_ui_patch_emitter(_emit_ui),
-                bind_delivery_emitter(_emit_delivery),
+                bind_ui_patch_emitter(emit_ui),
+                bind_delivery_emitter(emit_delivery),
                 device_bridge_scope(
                     agent,
                     capabilities=run.device_capabilities,
@@ -1238,30 +1225,60 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             # need not yield to already-scheduled commentary/tool callbacks.
             loop.call_soon(run.put_event, _run_event(run_id, f"run.{status}", **fields, **extra))
 
-    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
-    _profile_key = run.request_profile or "default"
+    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
+    _profile_key = resolve_device_profile_key(self, run.request_profile)
     _device_broker = ensure_device_bridge_broker(self)
 
     def _device_cb(event_name: str, payload: dict[str, Any]) -> None:
-        pending = _device_broker.list_pending(_profile_key, run_id)
-        cur_status = self._run_statuses.get(run_id, {}).get("status", "running")
-        if cur_status not in TERMINAL_STATUSES | {"stopping"}:
-            next_status = "waiting_for_device" if pending else "running"
-            self._set_run_status(
-                run_id, next_status, last_event=event_name,
-                **({"pending_device_requests": pending} if pending else {}),
-            )
-            emit_run_progress(
-                run_id=run_id, status=next_status, session_id=run.session_id,
-                profile=_profile_key, stage=event_name, pending_device=bool(pending),
-            )
         event_fields = {k: v for k, v in payload.items() if k != "run_id"}
+
+        def _on_loop() -> None:
+            pending = _device_broker.list_pending(_profile_key, run_id)
+            cur_status = self._run_statuses.get(run_id, {}).get("status", "running")
+            if cur_status not in TERMINAL_STATUSES | {"stopping"}:
+                next_status = "waiting_for_device" if pending else "running"
+                self._set_run_status(
+                    run_id, next_status, last_event=event_name,
+                    **({"pending_device_requests": pending} if pending else {}),
+                )
+                emit_run_progress(
+                    run_id=run_id, status=next_status, session_id=run.session_id,
+                    profile=_profile_key, stage=event_name, pending_device=bool(pending),
+                )
+            run.put_event(_run_event(run_id, event_name, **event_fields))
+
         try:
-            loop.call_soon_threadsafe(run.put_event, _run_event(run_id, event_name, **event_fields))
+            loop.call_soon_threadsafe(_on_loop)
         except RuntimeError:
             logger.debug("device bridge SSE loop closed for run=%s event=%s", run_id, event_name)
 
     _device_broker.register_run_listener(_profile_key, run_id, _device_cb)
+
+    def _emit_ui(revision: dict[str, Any]) -> None:
+        suggestions = revision.get("suggested_actions")
+
+        def _on_loop() -> None:
+            if suggestions:
+                cur = self._run_statuses.get(run_id, {})
+                if cur.get("status") not in TERMINAL_STATUSES:
+                    self._set_run_status(run_id, str(cur.get("status") or "running"), suggested_actions=suggestions)
+            if run_id in self._run_streams:
+                run.put_event(_run_event(run_id, "ui.patch", **revision))
+
+        try:
+            loop.call_soon_threadsafe(_on_loop)
+        except RuntimeError:
+            logger.debug("ui.patch SSE loop closed for run=%s", run_id)
+
+    def _emit_delivery(delivery: dict[str, Any]) -> None:
+        def _on_loop() -> None:
+            if run_id in self._run_streams:
+                run.put_event(_run_event(run_id, "mobile.delivery", **delivery))
+
+        try:
+            loop.call_soon_threadsafe(_on_loop)
+        except RuntimeError:
+            logger.debug("mobile.delivery SSE loop closed for run=%s", run_id)
 
     try:
         # Shutdown landed between admission and the task's first tick: nothing to
@@ -1299,7 +1316,8 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             with observe_api_controls(run.admission, _control_cb):
                 result, usage = await observe_api_turn(
                     run.admission, stream_delta_callback=_text_cb,
-                    tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
+                    tool_start_callback=_tool_start, tool_complete_callback=_tool_complete,
+                    run_id=run_id, ui_patch_callback=_emit_ui, delivery_callback=_emit_delivery)
             from gateway.platforms.api_server_authority_runs import canonical_run_usage
             usage = canonical_run_usage(usage)
             # The canonical turn has no agent object here; the served pair rides on the
@@ -1318,7 +1336,14 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             result, usage, served_runtime = await _submit_api_worker(
                 loop,
                 lambda: run_context.run(
-                    _run_agent_sync, self, run, agent, approval_notify, _api_server=_api_server, loop=loop
+                    _run_agent_sync,
+                    self,
+                    run,
+                    agent,
+                    approval_notify,
+                    _api_server=_api_server,
+                    emit_ui=_emit_ui,
+                    emit_delivery=_emit_delivery,
                 ),
             )
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
@@ -1440,8 +1465,8 @@ async def _handle_get_run(self, request: web.Request, *, _api_server) -> web.Res
         return err
     if getattr(self.gateway_runner, "session_authority", None) is None:
         status = _standalone_approval_status(self, request, run_id, status, project=_api_server._approval_request_event)
-    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
-    profile_key = _api_server._api_request_profile.get() or "default"
+    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
+    profile_key = resolve_device_profile_key(self, _api_server._api_request_profile.get())
     pending_dev = ensure_device_bridge_broker(self).list_pending(profile_key, run_id)
     if pending_dev:
         status = dict(status)
@@ -1749,8 +1774,10 @@ async def _handle_stop_run(self, request: web.Request, *, _api_server) -> web.Re
     self._set_run_status(run_id, "stopping", last_event="run.stopping")
     self._stopping_run_ids.add(run_id)
     with suppress(Exception):
-        from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
-        ensure_device_bridge_broker(self).cancel_run(_api_server._api_request_profile.get() or "default", run_id)
+        from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
+        ensure_device_bridge_broker(self).cancel_run(
+            resolve_device_profile_key(self, _api_server._api_request_profile.get()), run_id
+        )
     if agent is not None:
         with suppress(Exception):
             _api_server.request_hard_interrupt(agent, "Stop requested via API")

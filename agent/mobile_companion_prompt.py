@@ -17,23 +17,23 @@ from typing import Optional
 
 from tools.mobile_device_bridge import ALLOWED_DEVICE_CAPABILITIES
 
-# Single source of truth: capability token -> plain guidance line for Hermes.
+# Single source of truth: capability token -> concise 1-line tool-call pattern for any LLM.
 _CAPABILITY_GUIDANCE: dict[str, str] = {
-    "camera": "camera: request a live photo via request_device_action(action_type='camera') when visual context helps.",
-    "location_coarse": "location_coarse: request approximate area via request_device_action(action_type='location_coarse') for local help.",
-    "nearby_osm": "nearby_osm: offer native nearby places exploration with distance/compass and verified OpenStreetMap links.",
-    "calendar_draft": "calendar_draft: propose a pre-filled native calendar event draft via request_device_action(action_type='calendar_draft').",
-    "alarm_timer": "alarm_timer: propose a native alarm or countdown timer via request_device_action(action_type='alarm_timer').",
-    "maps_handoff": "maps_handoff: propose opening directions or a place in Maps via request_device_action(action_type='maps_handoff').",
-    "share_sheet": "share_sheet: propose sharing text or a summary through Android's share sheet via request_device_action(action_type='share_sheet').",
-    "clipboard_read": "clipboard_read: ask permission to read the clipboard via request_device_action(action_type='clipboard_read') only when relevant.",
-    "dial_draft": "dial_draft: prepare a dialer draft (never auto-calls) via request_device_action(action_type='dial_draft').",
-    "email_draft": "email_draft: prepare a pre-filled email draft (never auto-sends) via request_device_action(action_type='email_draft').",
-    "contacts_pick": "contacts_pick: ask the user to pick a contact via request_device_action(action_type='contacts_pick').",
+    "camera": 'camera -> request_device_action(action_type="camera", reason="...")',
+    "location_coarse": 'location_coarse -> request_device_action(action_type="location_coarse", reason="...")',
+    "nearby_osm": 'nearby_osm -> request_device_action(action_type="nearby_osm", reason="...", params={"category":"cafe"})',
+    "calendar_draft": 'calendar_draft -> request_device_action(action_type="calendar_draft", reason="...", params={"title":"...","start":"..."})',
+    "alarm_timer": 'alarm_timer -> request_device_action(action_type="alarm_timer", reason="...", params={"duration_seconds":600})',
+    "maps_handoff": 'maps_handoff -> request_device_action(action_type="maps_handoff", reason="...", params={"query":"..."})',
+    "share_sheet": 'share_sheet -> request_device_action(action_type="share_sheet", reason="...", params={"text":"..."})',
+    "clipboard_read": 'clipboard_read -> request_device_action(action_type="clipboard_read", reason="...")',
+    "dial_draft": 'dial_draft -> request_device_action(action_type="dial_draft", reason="...", params={"phone":"..."})',
+    "email_draft": 'email_draft -> request_device_action(action_type="email_draft", reason="...", params={"to":"...","subject":"...","body":"..."})',
+    "contacts_pick": 'contacts_pick -> request_device_action(action_type="contacts_pick", reason="...")',
     "ui_surfaces_v2": (
-        "ui_surfaces_v2: proactively live-edit the app with mobile_ui_patch (KPI grids, sparklines, charts, tables, "
-        "checklists, forms, quick actions, WCAG-AA theme palettes) and create on-the-fly Android Home Screen widgets "
-        "with upsert_widget (always home_screen_safe=true, never secrets or private transcripts)."
+        'ui_surfaces_v2 -> mobile_ui_patch(ops=[{"op":"upsert_widget","title":"...","template":"metric|checklist|briefing|status|quick_actions",'
+        '"accent":"teal|green|blue|amber|coral","items":[{"label":"...","value":"..."}],"home_screen_safe":true}]) '
+        'or op="upsert_surface" (kpi_grid|sparkline|bar_chart|table|form|toggle_group|chip_filter|slider|markdown_card) / "set_theme_override" (IDs auto-slug from title; never put secrets on widgets)'
     ),
 }
 
@@ -41,15 +41,13 @@ _HEADER = (
     "[Hermes Mobile Companion]\n"
     "You are running inside the user's native Android companion app. "
     "Remove friction proactively: never expect the user to know commands, feature names, or AI jargon "
-    "(use everyday plain language rather than terms like tokens, TTFT, TPS, cron, JSON, SSE, or toolsets unless asked). "
-    "Never execute sensitive OS actions silently; always present clear, reversible previews."
+    "(use everyday plain language instead of tokens, TTFT, TPS, cron, JSON, SSE, or toolsets unless asked). "
+    "Always preview sensitive OS actions and UI edits."
 )
 
 _SHARED_MOBILE_TOOLS_LINE = (
-    "- Proactive delivery: use mobile_deliver (briefing, card, file, ui_patch, widget_update, device_action, "
-    "reminder_result) to push structured items to Activité (closed phones get a zero-leak encrypted wakeup).\n"
-    "- Follow-up suggestions: when useful, include 2-3 short 1-tap suggested_actions "
-    "(pin_widget, save_memory, create_reminder, open_surface, save_skill, prompt) in mobile_ui_patch."
+    '- Push to Activité: mobile_deliver(kind="briefing|notice|card|widget_update|file|ui_patch|device_action|reminder_result", title="...", payload={...}, urgency="silent|normal|high|urgent")\n'
+    '- Follow-up chips: pass suggested_actions=[{"label":"...","kind":"pin_widget|save_memory|create_reminder|open_surface|save_skill|prompt"}] (1-3 chips) on mobile_ui_patch.'
 )
 
 
