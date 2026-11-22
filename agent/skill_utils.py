@@ -88,6 +88,8 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             if ":" in line:
                 key, value = line.split(":", 1)
                 frontmatter[key.strip()] = value.strip()
+    if isinstance(frontmatter.get("name"), str):
+        frontmatter["name"] = frontmatter["name"].strip()
     return frontmatter, body
 
 

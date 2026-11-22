@@ -46,6 +46,8 @@ async def test_skills_returns_enabled_profile_catalog(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bad_frontmatter_does_not_hide_healthy_skills(tmp_path, monkeypatch):
+    from tools.skills_tool import skill_view
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     for folder, metadata in {
@@ -53,6 +55,12 @@ async def test_bad_frontmatter_does_not_hide_healthy_skills(tmp_path, monkeypatc
         "list": "description: [one, two]",
         "map": "description: {one: two}",
         "set": "description: !!set {one: null}",
+        "dated": "description: 2025-11-14",
+        "nested": "description: {updated: 2025-11-14}",
+        "optional": (
+            "description: Typed fields\ncompatibility: 2025-11-14\n"
+            "metadata: {last_updated: 2025-11-14, hermes: [wrong-type], channel: {status: ready}}"
+        ),
         "invalid-name": "name: [one, two]",
     }.items():
         skill = tmp_path / "skills" / folder
@@ -65,8 +73,15 @@ async def test_bad_frontmatter_does_not_hide_healthy_skills(tmp_path, monkeypatc
         entries = (await resp.json())["data"]
     assert {row["name"]: row["description"] for row in entries} == {
         "good": "Text description", "list": "Fallback description.",
-        "map": "Fallback description.", "set": "Fallback description.",
+        "map": "Fallback description.", "set": "Fallback description.", "dated": "Fallback description.",
+        "nested": "Fallback description.", "optional": "Typed fields",
     }
+    for row in entries:
+        view = json.loads(skill_view(row["name"], preprocess=False))
+        assert view["success"] and view["description"] == row["description"]
+        if row["name"] == "optional":
+            assert view["metadata"] == {"channel": {"status": "ready"}}
+            assert "compatibility" not in view
 
 
 @pytest.mark.asyncio
@@ -143,3 +158,25 @@ async def test_catalog_reloads_when_root_roles_change(tmp_path, monkeypatch):
         config.write_text("skills:\n  create_dir: first\n  external_dirs: [second]\n", encoding="utf-8")
         assert await names() == {"shared"}
         assert "Source first/north/one" in json.loads(skill_view("shared", preprocess=False))["content"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_directories_and_folded_names_load_as_packages(tmp_path, monkeypatch):
+    from tools.skills_tool import skill_view
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    for folder, definition in (("notes/release", "release"), ("notes/release.md", "release-note"),
+                               ("routine", ">\n  review")):
+        skill = tmp_path / "skills" / folder
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {definition}\n---\nPackage {folder}.", encoding="utf-8")
+    async with TestClient(TestServer(_create_app(_make_adapter(api_key="sk-secret")))) as cli:
+        resp = await cli.get("/v1/skills", headers={"Authorization": "Bearer sk-secret"})
+        assert resp.status == 200
+        locators = {row["name"] for row in (await resp.json())["data"]}
+    expected = {"release": "notes/release", "release-note": "notes/release.md", "review": "routine"}
+    assert locators == expected.keys()
+    for name, folder in expected.items():
+        assert f"Package {folder}." in json.loads(skill_view(name, preprocess=False))["content"]
+    assert "Package routine." in json.loads(skill_view("review\n", preprocess=False))["content"]

@@ -18,7 +18,7 @@ from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
 from agent.skill_utils import (
-    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, is_skill_support_path as _is_skill_support_path)
+    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, _hermes_metadata, is_skill_support_path as _is_skill_support_path)
 from tools.skills_tool_setup import (
     SkillReadinessStatus, _build_setup_note, _capture_required_environment_variables,
     _get_required_environment_variables, _is_env_var_persisted, _is_remote_env_backend)
@@ -185,6 +185,32 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     return None
 
 
+def _skill_description(frontmatter: dict, body: str) -> str:
+    description = frontmatter.get("description")
+    if isinstance(description, str) and description:
+        return description
+    return next((line for line in map(str.strip, body.splitlines()) if line and not line.startswith("#")), "")
+
+
+def _optional_view_metadata(frontmatter: dict) -> dict:
+    fields = {}
+    if isinstance(compatibility := frontmatter.get("compatibility"), str) and compatibility:
+        fields["compatibility"] = compatibility
+    if isinstance(metadata := frontmatter.get("metadata"), dict):
+        public = {}
+        for key, value in metadata.items():
+            if not isinstance(key, str) or (key == "hermes" and not isinstance(value, dict)):
+                continue
+            try:
+                json.dumps(value, allow_nan=False)
+            except (TypeError, ValueError, RecursionError):
+                # YAML also permits dates, sets and cyclic aliases. The view exposes JSON metadata.
+                continue
+            public[key] = value
+        fields["metadata"] = public
+    return fields
+
+
 def _parse_tags(tags_value) -> list[str]:
     """Tags from frontmatter: a parsed list, "[a, b]", or "a, b"."""
     if not tags_value:
@@ -258,11 +284,8 @@ def _skill_catalog(
                 name = frontmatter.get("name", skill_md.parent.name)
                 if not isinstance(name, str) or not name.strip():
                     continue
-                description = frontmatter.get("description")
-                if not isinstance(description, str) or not description:
-                    description = next((ln for ln in map(str.strip, body.splitlines()) if ln and not ln.startswith("#")), "")
                 scanned.append({
-                    "name": name, "description": _truncate_description(description),
+                    "name": name, "description": _truncate_description(_skill_description(frontmatter, body)),
                     "category": _get_category_from_path(skill_md), "tier": tier, "root": scan_dir,
                     "path": skill_md, "visible": bool(skill_matches_platform(frontmatter)
                                                       and skill_matches_environment(frontmatter)
@@ -444,7 +467,7 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
         flat = direct_path if direct_path.suffix == ".md" else direct_path.parent / (direct_path.name + ".md")
         if not _is_skill_support_path(direct_path) and direct_path.is_dir() and (direct_path / "SKILL.md").exists():
             _record(direct_path, direct_path / "SKILL.md")
-        elif (flat.exists() and not _is_skill_support_path(flat)
+        elif (flat.is_file() and not _is_skill_support_path(flat)
               and not _is_package_owned_markdown(flat, search_root)):
             _record(None, flat)
 
@@ -455,12 +478,12 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
         # exposes the frontmatter name, so skill_view(name) must accept it too.
         for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
             if (found_skill_md.parent.name == name
-                    or _safe_frontmatter(found_skill_md).get("name") == name):
+                    or _safe_frontmatter(found_skill_md).get("name") == name.strip()):
                 _record(found_skill_md.parent, found_skill_md)
         # Legacy flat <name>.md anywhere under the dir. Markdown owned by an ancestor
         # directory skill loads through file_path and must not shadow a real skill.
         for found_md in search_dir.rglob(glob.escape(name) + ".md"):
-            if (found_md.name != "SKILL.md" and not _is_skill_support_path(found_md)
+            if (found_md.name != "SKILL.md" and found_md.is_file() and not _is_skill_support_path(found_md)
                     and not _is_package_owned_markdown(found_md, search_dir)):
                 _record(None, found_md)
     return candidates
@@ -667,7 +690,7 @@ def skill_view(
         except Exception as e:
             return _fail(f"Failed to read skill '{name}': {e}")
         _log_security_warnings(name, skill_md, content, all_dirs, active_skills_dir)
-        frontmatter = _safe_frontmatter(content=content)
+        frontmatter, body = _parse_frontmatter(content)
         if not skill_matches_platform(frontmatter):
             return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
         resolved_name = frontmatter.get("name", skill_md.parent.name)
@@ -682,8 +705,7 @@ def skill_view(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
                 hint="Use a relative path within the skill directory")
         # tags/related_skills: metadata.hermes.* (agentskills.io) first, then top-level.
-        metadata = frontmatter.get("metadata")
-        hermes_meta = (metadata.get("hermes", {}) or {}) if isinstance(metadata, dict) else {}
+        hermes_meta = _hermes_metadata(frontmatter)
         tags, related_skills = (
             _parse_tags(hermes_meta.get(k) or frontmatter.get(k, "")) for k in ("tags", "related_skills"))
         linked_files = _skill_linked_files(skill_dir)
@@ -723,7 +745,7 @@ def skill_view(
                 )
 
         result = {
-            "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
+            "success": True, "name": skill_name, "description": _skill_description(frontmatter, body),
             "tags": tags, "related_skills": related_skills, "content": rendered_content,
             "path": rel_path, "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
@@ -733,10 +755,7 @@ def skill_view(
         if deps_note:
             result["deps_note"] = deps_note
         _mark_background_review_read(skill_md)
-        if frontmatter.get("compatibility"):  # agentskills.io optional fields
-            result["compatibility"] = frontmatter["compatibility"]
-        if isinstance(metadata, dict):
-            result["metadata"] = metadata
+        result.update(_optional_view_metadata(frontmatter))
         return _json(result)
     except Exception as e:
         return tool_error(str(e), success=False)
