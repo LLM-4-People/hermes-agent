@@ -292,3 +292,124 @@ async def test_cross_profile_isolation_memory_search_and_fork(tmp_path, monkeypa
         assert (await beta_search.json())["data"] == []
         assert (await cli.post("/p/beta/api/sessions/default-only-sess/fork", headers=beta_h, json={})).status == 404
         assert (await cli.get("/p/beta/api/sessions/default-only-sess/export", headers=beta_h)).status == 404
+
+
+@pytest.mark.asyncio
+async def test_search_pagination_has_more_and_compacted_lineage_fork(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    headers = {"Authorization": f"Bearer {OWNER_KEY}"}
+
+    # Seed 5 FTS5 matches across 2 sessions for multi-page cross-thread pagination.
+    _seed_session_with_messages(
+        adapter,
+        "sess-page-1",
+        [
+            ("user", "nebula match alpha one"),
+            ("assistant", "nebula match alpha two"),
+            ("user", "nebula match alpha three"),
+        ],
+        title="Nebula One",
+    )
+    _seed_session_with_messages(
+        adapter,
+        "sess-page-2",
+        [
+            ("user", "nebula match beta four"),
+            ("assistant", "nebula match beta five"),
+        ],
+        title="Nebula Two",
+    )
+
+    # Seed a compacted lineage: root -> compacted tip, plus an unrelated session.
+    root_ids = _seed_session_with_messages(
+        adapter,
+        "sess-compact-root",
+        [
+            ("user", "Pre-compaction turn one"),
+            ("assistant", "Pre-compaction reply one"),
+            ("user", "Pre-compaction turn two"),
+        ],
+        title="Compacted Thread",
+    )
+    db = adapter._ensure_store()
+    store = adapter._store_beside(db)
+    store.sessions.end("sess-compact-root", "compression")
+    store.sessions.create(
+        NewSession(
+            session_id="sess-compact-tip",
+            source="api_server",
+            model="gpt-5",
+            parent_session_id="sess-compact-root",
+        )
+    )
+    now = time.time() + 100
+    tip_id_1 = int(
+        store.messages.append("sess-compact-tip", NewMessage(role="user", content="Post-compaction turn three", timestamp=now))
+    )
+    store.messages.append("sess-compact-tip", NewMessage(role="assistant", content="Post-compaction reply three", timestamp=now + 1))
+    other_ids = _seed_session_with_messages(
+        adapter,
+        "sess-unrelated",
+        [("user", "Completely unrelated session message")],
+        title="Unrelated",
+    )
+
+    async with TestClient(TestServer(_make_full_app(adapter))) as cli:
+        # Cross-thread pagination across 5 total matches with limit=2.
+        p1 = await (await cli.get("/api/sessions/search?q=nebula&limit=2&offset=0", headers=headers)).json()
+        assert len(p1["data"]) == 2
+        assert p1["has_more"] is True
+        assert p1["total"] >= 3
+
+        p2 = await (await cli.get("/api/sessions/search?q=nebula&limit=2&offset=2", headers=headers)).json()
+        assert len(p2["data"]) == 2
+        assert p2["has_more"] is True
+        assert p2["total"] >= 5
+
+        p3 = await (await cli.get("/api/sessions/search?q=nebula&limit=2&offset=4", headers=headers)).json()
+        assert len(p3["data"]) == 1
+        assert p3["has_more"] is False
+        assert p3["total"] == 5
+
+        # Exact boundary: limit=5 returns all 5 with has_more=False.
+        exact = await (await cli.get("/api/sessions/search?q=nebula&limit=5&offset=0", headers=headers)).json()
+        assert len(exact["data"]) == 5
+        assert exact["has_more"] is False
+        assert exact["total"] == 5
+
+        # Single-session pagination honors has_more and exact total.
+        s1 = await (await cli.get("/api/sessions/search?q=nebula&session_id=sess-page-1&limit=2&offset=0", headers=headers)).json()
+        assert len(s1["data"]) == 2 and s1["has_more"] is True and s1["total"] == 3
+        s2 = await (await cli.get("/api/sessions/search?q=nebula&session_id=sess-page-1&limit=2&offset=2", headers=headers)).json()
+        assert len(s2["data"]) == 1 and s2["has_more"] is False and s2["total"] == 3
+
+        # Fork from compacted tip targeting a pre-compaction message in root succeeds!
+        fork_pre = await cli.post(
+            "/api/sessions/sess-compact-tip/fork",
+            headers=headers,
+            json={"up_to_message_id": root_ids[1], "keep_source_open": True},
+        )
+        assert fork_pre.status == 201
+        fork_pre_body = await fork_pre.json()
+        assert fork_pre_body["copied_messages"] == 2
+        fork_pre_msgs = (await (await cli.get(f"/api/sessions/{fork_pre_body['session']['id']}/messages", headers=headers)).json())["data"]
+        assert [m["content"] for m in fork_pre_msgs] == ["Pre-compaction turn one", "Pre-compaction reply one"]
+
+        # Fork from root targeting a post-compaction message in tip also resolves across lineage!
+        fork_post = await cli.post(
+            "/api/sessions/sess-compact-root/fork",
+            headers=headers,
+            json={"up_to_message_id": tip_id_1, "keep_source_open": True},
+        )
+        assert fork_post.status == 201
+        assert (await fork_post.json())["copied_messages"] == 4
+
+        # Negative: unrelated session message ID STILL fails closed with 404 message_not_found.
+        bad_fork = await cli.post(
+            "/api/sessions/sess-compact-tip/fork",
+            headers=headers,
+            json={"up_to_message_id": other_ids[0], "keep_source_open": True},
+        )
+        assert bad_fork.status == 404
+        assert (await bad_fork.json())["error"]["code"] == "message_not_found"
