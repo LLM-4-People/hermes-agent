@@ -537,7 +537,7 @@ def _normalized_model_capabilities(
             if info is None and slug.lower() in {"openrouter", "nous"} and "/" in model:
                 info = get_model_info("openrouter", model, config=metadata_config)
         except Exception:
-            logging.getLogger(__name__).debug("Model capability lookup failed for %s/%s", slug, model, exc_info=True)
+            logging.getLogger(__name__).debug("Model capability lookup failed", exc_info=True)
             info = None
 
     ctx_len: Optional[int] = None
@@ -988,7 +988,7 @@ def _local_pricing_entry(slug: str, model_id: str, *, base_url: Optional[str], f
             return None
         entry = _lookup_official_docs_pricing(route) or _models_dev_pricing_entry(route)
     except Exception:
-        logging.getLogger(__name__).debug("Local pricing lookup failed for %s/%s", slug, model_id, exc_info=True)
+        logging.getLogger(__name__).debug("Local pricing lookup failed", exc_info=True)
         return None
     if entry is None:
         return None
