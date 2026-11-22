@@ -7,14 +7,33 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sqlite3
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import GatewayConfig, PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter, security_headers_middleware
-from tools.mobile_notes import mobile_notes_tool
+import tools.mobile_notes as mobile_notes_mod
+import tools.mobile_sharing as mobile_sharing_mod
+from tools.mobile_notes import list_notes, mobile_notes_tool
 from tools.mobile_sharing import mobile_share_tool
+
+
+def _seed_mobile_ui_state(home: Path, state: dict) -> None:
+    """Seed Fork PR #15's ``mobile_state.db`` ``ui_active_state`` table."""
+    db_path = home / "mobile_state.db"
+    conn = sqlite3.connect(str(db_path))  # health: allow HX015 -- test fixture for mobile_state.db
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS ui_active_state (id INTEGER PRIMARY KEY, state_json TEXT NOT NULL)")
+        conn.execute(
+            "INSERT OR REPLACE INTO ui_active_state (id, state_json) VALUES (1, ?)",
+            (json.dumps(state),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 OWNER_KEY = "owner-key-1234567890abcdef"
 BETA_KEY = "beta-key-1234567890abcdef"
@@ -279,12 +298,43 @@ async def test_universal_resource_sharing_engine_all_kinds_and_ssot_acls(tmp_pat
     (gamma / "config.yaml").write_text("{}\n", encoding="utf-8")
     (beta / ".env").write_text(f"API_SERVER_KEY={BETA_KEY}\n", encoding="utf-8")
     (gamma / ".env").write_text(f"API_SERVER_KEY={GAMMA_KEY}\n", encoding="utf-8")
-    # Seed a user skill in default profile
+    # Seed a user skill and Fork PR #15 mobile_state.db UI specs in default profile
     skill_dir = root / "skills" / "deploy-guide"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: deploy-guide\ndescription: Safe release steps.\n---\nRun tests then tag.\n",
         encoding="utf-8",
+    )
+    _seed_mobile_ui_state(
+        root,
+        {
+            "surfaces": {
+                "atelier:kpi-1": {
+                    "surface_id": "kpi-1",
+                    "scope": "atelier",
+                    "kind": "dashboard",
+                    "title": "Sales KPIs",
+                    "spec": {"blocks": [{"type": "stat", "label": "MRR", "value": "$42k"}]},
+                },
+            },
+            "widgets": {
+                "daily-metrics": {
+                    "widget_id": "daily-metrics",
+                    "title": "Daily Metrics",
+                    "kind": "metric",
+                    "value": "99.9%",
+                },
+            },
+            "quick_actions": {
+                "deploy-btn": {
+                    "action_id": "deploy-btn",
+                    "label": "Deploy Staging",
+                    "kind": "prompt",
+                    "prompt": "Run staging deploy",
+                },
+            },
+            "theme": {},
+        },
     )
     monkeypatch.setenv("HERMES_HOME", str(root))
 
@@ -343,7 +393,7 @@ async def test_universal_resource_sharing_engine_all_kinds_and_ssot_acls(tmp_pat
             )
         ).status == 403
 
-        # 3. Share a widget -> recipient dismisses it -> disappears from both incoming and outgoing!
+        # 3. Share a widget -> beta reads content, CANNOT re-share (403!), then dismisses it cleanly
         w_share = await cli.post(
             "/api/shares",
             headers=owner_h,
@@ -351,14 +401,69 @@ async def test_universal_resource_sharing_engine_all_kinds_and_ssot_acls(tmp_pat
         )
         assert w_share.status == 201
         w_share_id = (await w_share.json())["share"]["share_id"]
+        w_content = await cli.get(f"/p/beta/api/shares/incoming/{w_share_id}/content", headers=beta_h)
+        assert w_content.status == 200
+        assert (await w_content.json())["content"]["spec"]["value"] == "99.9%"
+        # Non-owner re-share of widget MUST be rejected with 403 share_owner_required
+        w_reshare = await cli.post(
+            "/p/beta/api/shares",
+            headers=beta_h,
+            json={"resource_kind": "widget", "resource_id": "daily-metrics", "target_profile": "gamma", "permission": "read"},
+        )
+        assert w_reshare.status == 403
+        assert (await w_reshare.json())["error"]["code"] == "share_owner_required"
         dismiss = await cli.delete(f"/p/beta/api/shares/{w_share_id}", headers=beta_h)
         assert dismiss.status == 200 and (await dismiss.json())["action"] == "dismissed"
         assert (await (await cli.get("/api/shares/outgoing?resource_kind=widget", headers=owner_h)).json())["data"] == []
 
-        # 4. Negative checks: invalid kind (400), path traversal resource_id (400), missing profile (404)
+        # 3b. Share an atelier-prefixed surface by bare ID AND a quick-action tool; reject non-owner re-share & missing IDs
+        s_share = await cli.post(
+            "/api/shares",
+            headers=owner_h,
+            json={"resource_kind": "surface", "resource_id": "kpi-1", "target_profile": "beta", "permission": "read"},
+        )
+        assert s_share.status == 201
+        s_share_id = (await s_share.json())["share"]["share_id"]
+        s_content = await cli.get(f"/p/beta/api/shares/incoming/{s_share_id}/content", headers=beta_h)
+        assert s_content.status == 200 and (await s_content.json())["content"]["title"] == "Sales KPIs"
+        assert (
+            await cli.post(
+                "/p/beta/api/shares",
+                headers=beta_h,
+                json={"resource_kind": "surface", "resource_id": "kpi-1", "target_profile": "gamma", "permission": "read"},
+            )
+        ).status == 403
+        t_share = await cli.post(
+            "/api/shares",
+            headers=owner_h,
+            json={"resource_kind": "tool", "resource_id": "deploy-btn", "target_profile": "beta", "permission": "clone"},
+        )
+        assert t_share.status == 201
+        assert (
+            await cli.post(
+                "/p/beta/api/shares",
+                headers=beta_h,
+                json={"resource_kind": "tool", "resource_id": "deploy-btn", "target_profile": "gamma", "permission": "read"},
+            )
+        ).status == 403
+
+        # 4. Negative checks: invalid kind (400), traversal resource_id (400), missing profile (404), non-existent UI resource (404)
         assert (await cli.post("/api/shares", headers=owner_h, json={"resource_kind": "secret", "resource_id": "x", "target_profile": "beta"})).status == 400
         assert (await cli.post("/api/shares", headers=owner_h, json={"resource_kind": "skill", "resource_id": "../etc", "target_profile": "beta"})).status == 400
-        assert (await cli.post("/api/shares", headers=owner_h, json={"resource_kind": "widget", "resource_id": "w1", "target_profile": "nobody"})).status == 404
+        assert (await cli.post("/api/shares", headers=owner_h, json={"resource_kind": "widget", "resource_id": "daily-metrics", "target_profile": "nobody"})).status == 404
+        missing_ui = await cli.post(
+            "/api/shares",
+            headers=owner_h,
+            json={"resource_kind": "surface", "resource_id": "does-not-exist", "target_profile": "beta"},
+        )
+        assert missing_ui.status == 404 and (await missing_ui.json())["error"]["code"] == "resource_not_found"
+        assert (
+            await cli.post(
+                "/api/shares",
+                headers=owner_h,
+                json={"resource_kind": "widget", "resource_id": "ghost-widget", "target_profile": "beta"},
+            )
+        ).status == 404
 
     # 5. Small-LLM forgiving mobile_share tool aliases & self-correcting hints
     tool_res = json.loads(
@@ -369,3 +474,38 @@ async def test_universal_resource_sharing_engine_all_kinds_and_ssot_acls(tmp_pat
     assert tool_res["share"]["permission"] == "clone"
     bad_tool = json.loads(mobile_share_tool({"action": "bogus"}))
     assert bad_tool["success"] is False and "hint" in bad_tool and "example" in bad_tool
+
+
+def test_notes_tag_pagination_and_tool_error_sanitization(tmp_path, monkeypatch):
+    """Tag filtering runs in SQL BEFORE LIMIT/OFFSET, and storage errors never leak host paths."""
+    root = tmp_path / "hermes"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(root))
+
+    # Create oldest tagged note first, then 3 newer untagged notes
+    first = json.loads(mobile_notes_tool({"action": "create", "title": "Old Urgent Note", "tags": ["urgent", "work"]}))
+    assert first["success"] is True
+    for idx in range(3):
+        res = json.loads(mobile_notes_tool({"action": "create", "title": f"Newer Note {idx}", "tags": ["misc"]}))
+        assert res["success"] is True
+
+    # With limit=1, SQL tag filtering MUST still return the oldest matching note
+    filtered = list_notes(tag="urgent", limit=1)
+    assert len(filtered) == 1
+    assert filtered[0]["id"] == first["note"]["id"]
+
+    # Storage failure errors in tools MUST NOT leak raw filesystem paths or SQLite internals
+    def _boom(*_a, **_kw):
+        raise sqlite3.OperationalError("/secret/host/path/db.sqlite: disk I/O error")
+
+    monkeypatch.setattr(mobile_notes_mod, "_connect_notes_db", _boom)
+    notes_err = json.loads(mobile_notes_tool({"action": "list"}))
+    assert notes_err["success"] is False
+    assert "/secret/host/path" not in notes_err["error"]
+    assert "disk I/O" not in notes_err["error"]
+
+    monkeypatch.setattr(mobile_sharing_mod, "_connect_shares_db", _boom)
+    share_err = json.loads(mobile_share_tool({"action": "outgoing"}))
+    assert share_err["success"] is False
+    assert "/secret/host/path" not in share_err["error"]
+    assert "disk I/O" not in share_err["error"]

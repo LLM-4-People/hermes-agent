@@ -345,6 +345,10 @@ def list_notes(
         like = f"%{query.strip().lower()}%"
         clauses.append("(lower(title) LIKE ? OR lower(content) LIKE ? OR lower(tags_json) LIKE ?)")
         params.extend([like, like, like])
+    wanted_tag = tag.strip().lower() if tag and tag.strip() else None
+    if wanted_tag:
+        clauses.append("EXISTS (SELECT 1 FROM json_each(notes.tags_json) WHERE lower(value) = ?)")
+        params.append(wanted_tag)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     shares_by_note: dict[str, list[dict[str, Any]]] = {}
     for s in list_outgoing_shares(resource_kind="note"):
@@ -354,16 +358,10 @@ def list_notes(
             f"SELECT * FROM notes {where} ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?",
             (*params, max(1, min(limit, 200)), max(0, offset)),
         ).fetchall()
-        results: list[dict[str, Any]] = []
-        wanted_tag = tag.strip().lower() if tag and tag.strip() else None
-        for row in rows:
-            note = _row_to_note(
-                row, owner_profile=owner, access="owner", shares=shares_by_note.get(row["id"], [])
-            )
-            if wanted_tag and wanted_tag not in note["tags"]:
-                continue
-            results.append(note)
-        return results
+        return [
+            _row_to_note(row, owner_profile=owner, access="owner", shares=shares_by_note.get(row["id"], []))
+            for row in rows
+        ]
 
 
 def list_shared_with_me(*, limit: int = 50) -> list[dict[str, Any]]:
@@ -754,9 +752,12 @@ def mobile_notes_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         if exc.example:
             payload["example"] = exc.example
         return json.dumps(payload, ensure_ascii=False)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        logger.warning("mobile_notes tool failed on action=%s", action, exc_info=True)
-        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+    except ValueError:
+        logger.warning("mobile_notes tool invalid parameter on action=%s", action, exc_info=True)
+        return json.dumps({"success": False, "error": "Invalid parameter value.", "code": "invalid_parameter"}, ensure_ascii=False)
+    except (OSError, sqlite3.Error):
+        logger.warning("mobile_notes tool storage failure on action=%s", action, exc_info=True)
+        return json.dumps({"success": False, "error": "Storage operation failed.", "code": "storage_error"}, ensure_ascii=False)
 
 
 MOBILE_NOTES_SCHEMA: dict[str, Any] = {

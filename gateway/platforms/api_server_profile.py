@@ -257,12 +257,13 @@ def _sync_patch_profile_defaults(updates: dict[str, Any]) -> dict[str, Any]:
             platform_toolsets["api_server"] = updates["enabled_toolsets"]
             config["platform_toolsets"] = platform_toolsets
         if "preferred_language" in updates:
-            display_cfg = config.get("display")
-            if not isinstance(display_cfg, dict):
-                display_cfg = {}
+            raw_display = config.get("display")
+            display_cfg = dict(raw_display) if isinstance(raw_display, dict) else {}
             display_cfg["preferred_language"] = updates["preferred_language"]
             if updates["preferred_language"] in ("fr", "en"):
                 display_cfg["language"] = updates["preferred_language"]
+            else:
+                display_cfg.pop("language", None)
             config["display"] = display_cfg
         save_config(config)
     if "preferred_language" in updates:

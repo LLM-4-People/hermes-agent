@@ -414,31 +414,75 @@ def _read_session_resource(owner_home: Path, resource_id: str, *, include_conten
         store.close()
 
 
+def _match_surface_entry(surfaces: Any, resource_id: str) -> Optional[Any]:
+    if not isinstance(surfaces, dict):
+        return None
+    if resource_id in surfaces:
+        return surfaces[resource_id]
+    atelier_key = f"atelier:{resource_id}"
+    if atelier_key in surfaces:
+        return surfaces[atelier_key]
+    suffix = f":{resource_id}"
+    for key in sorted(surfaces):
+        spec = surfaces[key]
+        if (isinstance(spec, dict) and spec.get("surface_id") == resource_id) or str(key).endswith(suffix):
+            return spec
+    return None
+
+
+def _match_keyed_entry(bucket: Any, resource_id: str, id_field: str) -> Optional[Any]:
+    if not isinstance(bucket, dict):
+        return None
+    if resource_id in bucket:
+        return bucket[resource_id]
+    for key in sorted(bucket):
+        spec = bucket[key]
+        if isinstance(spec, dict) and spec.get(id_field) == resource_id:
+            return spec
+    return None
+
+
+def _lookup_ui_spec(state: dict[str, Any], resource_kind: str, resource_id: str) -> Optional[Any]:
+    if resource_kind == "surface":
+        return _match_surface_entry(state.get("surfaces"), resource_id)
+    if resource_kind == "widget":
+        return _match_keyed_entry(state.get("widgets"), resource_id, "widget_id")
+    if resource_kind == "tool":
+        found = _match_surface_entry(state.get("surfaces"), resource_id)
+        if found is not None:
+            return found
+        return _match_keyed_entry(state.get("quick_actions"), resource_id, "action_id")
+    return None
+
+
 def _read_mobile_ui_resource(
     owner_home: Path, resource_kind: str, resource_id: str, *, include_content: bool
 ) -> Optional[dict[str, Any]]:
-    """Read a surface, widget, or tool from ``mobile_state.db`` when present."""
+    """Read an existing surface, widget, or tool from ``mobile_state.db`` (fail-closed)."""
     db_path = owner_home / "mobile_state.db"
-    if db_path.is_file():
+    if not db_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)  # health: allow HX015 -- reads mobile_state.db, not session state.db
+        conn.row_factory = sqlite3.Row
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)  # health: allow HX015 -- reads mobile_state.db, not session state.db
-            conn.row_factory = sqlite3.Row
-            try:
-                row = conn.execute("SELECT state_json FROM ui_active_state LIMIT 1").fetchone()
-            finally:
-                conn.close()
-            if row and row["state_json"]:
-                state = json.loads(row["state_json"])
-                bucket_key = {"surface": "surfaces", "widget": "widgets", "tool": "surfaces"}[resource_kind]
-                bucket = state.get(bucket_key)
-                if isinstance(bucket, dict) and resource_id in bucket:
-                    spec = bucket[resource_id]
-                    title = str(spec.get("title") or resource_id) if isinstance(spec, dict) else resource_id
-                    return {"title": title, "spec": spec} if include_content else {"title": title}
-        except (sqlite3.Error, json.JSONDecodeError):
-            logger.debug("mobile_state.db read skipped for %s/%s", resource_kind, resource_id, exc_info=True)
-    # Declarative mobile surfaces/widgets/tools can also be shared by client-known ID before state sync.
-    return {"title": resource_id, "resource_kind": resource_kind, "resource_id": resource_id}
+            row = conn.execute("SELECT state_json FROM ui_active_state LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        if not row or not row["state_json"]:
+            return None
+        state = json.loads(row["state_json"])
+        if not isinstance(state, dict):
+            return None
+    except (sqlite3.Error, json.JSONDecodeError):
+        logger.debug("mobile_state.db read failed for %s/%s", resource_kind, resource_id, exc_info=True)
+        return None
+
+    spec = _lookup_ui_spec(state, resource_kind, resource_id)
+    if spec is None:
+        return None
+    title = str(spec.get("title") or spec.get("label") or resource_id) if isinstance(spec, dict) else resource_id
+    return {"title": title, "spec": spec} if include_content else {"title": title}
 
 
 def _read_artifact_resource(owner_home: Path, resource_id: str, *, include_content: bool) -> Optional[dict[str, Any]]:
@@ -780,25 +824,27 @@ def revoke_or_dismiss_share(share_id: str) -> dict[str, Any]:
     """Owner instant revoke OR recipient dismiss for ``share_id``."""
     clean_id = _validate_share_id(share_id)
     current = active_profile_name()
-    # 1. Owner revoke path
+    # 1. Owner revoke path (release owner lock/txn before opening target DB to avoid AB-BA deadlock)
+    revoked_target: Optional[str] = None
     with _connect_shares_db(write=True) as conn:
         row = conn.execute(
             "SELECT share_id, resource_kind, resource_id, target_profile FROM outgoing_shares WHERE share_id = ?",
             (clean_id,),
         ).fetchone()
         if row is not None:
-            target = str(row["target_profile"])
+            revoked_target = str(row["target_profile"])
             conn.execute("DELETE FROM outgoing_shares WHERE share_id = ?", (clean_id,))
-            target_home = resolve_profile_home_if_exists(target)
-            if target_home is not None:
-                with suppress(OSError, sqlite3.Error):
-                    with _connect_shares_db(target_home, write=True) as tconn:
-                        tconn.execute(
-                            "DELETE FROM incoming_shares WHERE owner_profile = ? AND share_id = ?",
-                            (current, clean_id),
-                        )
-            logger.info("Owner '%s' revoked share %s from '%s'", current, clean_id, target)
-            return {"share_id": clean_id, "action": "revoked", "target_profile": target}
+    if revoked_target is not None:
+        target_home = resolve_profile_home_if_exists(revoked_target)
+        if target_home is not None:
+            with suppress(OSError, sqlite3.Error):
+                with _connect_shares_db(target_home, write=True) as tconn:
+                    tconn.execute(
+                        "DELETE FROM incoming_shares WHERE owner_profile = ? AND share_id = ?",
+                        (current, clean_id),
+                    )
+        logger.info("Owner '%s' revoked share %s from '%s'", current, clean_id, revoked_target)
+        return {"share_id": clean_id, "action": "revoked", "target_profile": revoked_target}
 
     # 2. Recipient dismiss path
     with _connect_shares_db(write=True) as conn:
@@ -945,9 +991,12 @@ def mobile_share_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         if exc.example:
             payload["example"] = exc.example
         return json.dumps(payload, ensure_ascii=False)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        logger.warning("mobile_share tool failed on action=%s", action, exc_info=True)
-        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+    except ValueError:
+        logger.warning("mobile_share tool invalid parameter on action=%s", action, exc_info=True)
+        return json.dumps({"success": False, "error": "Invalid parameter value.", "code": "invalid_parameter"}, ensure_ascii=False)
+    except (OSError, sqlite3.Error):
+        logger.warning("mobile_share tool storage failure on action=%s", action, exc_info=True)
+        return json.dumps({"success": False, "error": "Storage operation failed.", "code": "storage_error"}, ensure_ascii=False)
 
 
 MOBILE_SHARE_SCHEMA: dict[str, Any] = {

@@ -10,6 +10,7 @@ import subprocess
 import types
 import pytest
 from aiohttp import FormData, web
+from ruamel.yaml import YAML
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import GatewayConfig, PlatformConfig
@@ -213,11 +214,19 @@ async def test_profile_defaults_soul_capabilities_and_secret_safety(tmp_path, mo
         assert updated["reasoning_effort"] == "high"
         assert updated["preferred_language"] == "fr"
         assert updated["enabled_toolsets"] == ["file", "web"]
+        safe_yaml = YAML(typ="safe")
+        cfg_fr = safe_yaml.load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        assert cfg_fr["display"]["language"] == "fr"
+        assert cfg_fr["display"]["preferred_language"] == "fr"
         assert "# Keep this comment" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
 
-        # Reset preferred_language back to auto, and reject invalid language
+        # Reset preferred_language back to auto -> clears stale display.language on disk & keeps comment
         auto_patch = await cli.patch("/api/profile/defaults", headers=headers, json={"preferred_language": "auto"})
         assert auto_patch.status == 200 and (await auto_patch.json())["preferred_language"] == "auto"
+        cfg_auto = safe_yaml.load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        assert cfg_auto["display"]["preferred_language"] == "auto"
+        assert "language" not in cfg_auto["display"]
+        assert "# Keep this comment" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert (await cli.patch("/api/profile/defaults", headers=headers, json={"preferred_language": "de"})).status == 400
 
         # Negative: disallowed keys / invalid effort / unknown toolset
