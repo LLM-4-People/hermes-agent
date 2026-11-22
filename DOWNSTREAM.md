@@ -50,6 +50,12 @@ the sync workflow opens its PR with a GitHub App installation token. That app to
 step if a second reviewer joins the fork; until then this is an explicit single-maintainer
 exception.
 
+Both the organization and repository Actions settings must allow GitHub Actions to create pull
+requests (`can_approve_pull_request_reviews: true`). Without that setting, step 5 fails with
+`GitHub Actions is not permitted to create or approve pull requests` after the verified branch has
+already been pushed. This is the same single-maintainer exception as the missing required-check
+rule; replace it with a GitHub App installation token when a second reviewer joins.
+
 A conflict aborts the merge, pushes nothing, and opens/updates the `upstream-sync` issue with the
 conflicting files. Resolve on the automation branch:
 
