@@ -110,6 +110,8 @@ class RunIdempotencyStore:
                 add_column_if_missing(self._conn, "run_idempotency", column, f"{column} {ddl}")
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS run_idempotency_run_id ON run_idempotency(run_id)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS run_idempotency_changes ON run_idempotency(scope, updated_at)")
         self._conn.commit()
         self._lock = threading.Lock()
         self._tighten_permissions()
