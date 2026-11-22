@@ -226,7 +226,9 @@ def skill_search_dirs() -> tuple[list[tuple[int, Path]], Path]:
     return roots, active_skills_dir
 
 
-def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False) -> list[dict[str, Any]]:
+def _skill_catalog(
+    *, skip_disabled: bool = False, include_hidden: bool = False, platform: str | None = None
+) -> list[dict[str, Any]]:
     """Every scanned skill resolved by ``agent.skill_utils.resolve_skill_catalog`` (status /
     load_name / tier / path), visible ones only unless *include_hidden*; cached per session.
     Resolution runs over ALL files first — skill_view ignores platform/disabled gates when
@@ -234,7 +236,7 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
     from agent.skill_utils import (
         TIER_PROJECT, is_disabled_entry, iter_project_skill_files, iter_skill_index_files, resolve_skill_catalog)
     cache_key = ("with_disabled" if skip_disabled else "filtered", include_hidden)
-    disabled = set() if skip_disabled else _get_disabled_skill_names()
+    disabled = set() if skip_disabled else _get_disabled_skill_names(platform)
     roots, _ = skill_search_dirs()
     signature = _skills_scan_signature([d for _t, d in roots], disabled)
     now = time.monotonic()
@@ -274,12 +276,13 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
     return [dict(s) for s in skills]
 
 
-def find_all_skills(*, skip_disabled: bool = False) -> list[dict[str, Any]]:
+def find_all_skills(*, skip_disabled: bool = False, platform: str | None = None) -> list[dict[str, Any]]:
     """Loadable skills (name, description, category): ``name`` is what skill_view() accepts —
     the declared name, or the exact relative path for a same-tier duplicate. Shadowed and
-    unloadable copies are left out. ``skip_disabled=True`` ignores disabled state (config UI)."""
+    unloadable copies are left out. Set ``platform`` to apply its disabled list outside a session.
+    ``skip_disabled=True`` ignores disabled state (config UI)."""
     return [{"name": s["load_name"], "description": s["description"], "category": s["category"]}
-            for s in _skill_catalog(skip_disabled=skip_disabled) if s["load_name"]]
+            for s in _skill_catalog(skip_disabled=skip_disabled, platform=platform) if s["load_name"]]
 
 
 def sort_skills(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:

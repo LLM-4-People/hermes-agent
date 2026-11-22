@@ -953,25 +953,39 @@ class TestCapabilitiesEndpoint:
 
 class TestSkillsEndpoint:
     @pytest.mark.asyncio
-    async def test_skills_returns_list_envelope(self, adapter):
-        fake_skills = [
-            {"name": "github", "description": "GitHub workflow skill", "category": "github"},
-            {"name": "ascii-art", "description": "ASCII art generation", "category": "creative"},
-        ]
-        with patch(
-            "tools.skills_tool.find_all_skills",
-            return_value=list(fake_skills),
+    async def test_skills_returns_enabled_profile_catalog(self, auth_adapter, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HERMES_PLATFORM", "telegram")
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n  disabled: [disabled-skill]\n  platform_disabled:\n    api_server: [cli-only]\n    telegram: [notes]\n",
+            encoding="utf-8",
+        )
+        for path, name in (
+            ("uncategorized", "first"),
+            ("writing/notes", "notes"),
+            ("editing/shared", "shared"),
+            ("writing/shared", "shared"),
+            ("disabled-skill", "disabled-skill"),
+            ("cli-only", "cli-only"),
         ):
-            app = _create_app(adapter)
-            async with TestClient(TestServer(app)) as cli:
-                resp = await cli.get("/v1/skills")
-                assert resp.status == 200
-                data = await resp.json()
-                assert data["object"] == "list"
-                names = sorted(s["name"] for s in data["data"])
-                assert names == ["ascii-art", "github"]
-                for entry in data["data"]:
-                    assert set(entry.keys()) >= {"name", "description", "category"}
+            directory = tmp_path / "skills" / path
+            directory.mkdir(parents=True)
+            (directory / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: Description for {name}\n---\nPrivate instructions.",
+                encoding="utf-8",
+            )
+        async with TestClient(TestServer(_create_app(auth_adapter))) as cli:
+            for headers in ({}, {"Authorization": "Bearer invalid"}):
+                assert (await cli.get("/v1/skills", headers=headers)).status == 401
+            resp = await cli.get("/v1/skills", headers={"Authorization": "Bearer sk-secret"})
+            assert resp.status == 200
+            assert await resp.json() == {"object": "list", "data": [
+                {"name": "first", "description": "Description for first", "category": None},
+                {"name": "editing/shared", "description": "Description for shared", "category": "editing"},
+                {"name": "notes", "description": "Description for notes", "category": "writing"},
+                {"name": "writing/shared", "description": "Description for shared", "category": "writing"},
+            ]}
 
 
 class TestToolsetsEndpoint:
