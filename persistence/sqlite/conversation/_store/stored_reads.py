@@ -322,7 +322,7 @@ def picker_session_facts(holder: StoreHolder, root_ids: Iterable[str], unlisted_
             "SELECT id, cwd, git_repo_root FROM sessions WHERE id IN (SELECT value FROM json_each(?))",
             (_ids(root_ids),)).fetchall()}
         unlisted = {row["id"]: dict(row) for row in conn.execute(
-            f"SELECT s.id, s.git_branch, s.pinned, {_sql_preview_raw('s.id')}, {_sql_session_last_active('s')} "
+            f"SELECT s.id, s.git_branch, s.pinned, {_sql_preview_raw(holder.has_session_admissions)}, {_sql_session_last_active('s')} "
             "AS last_active FROM sessions s WHERE s.id IN (SELECT value FROM json_each(?))",
             (_ids(unlisted_ids),)).fetchall()} if unlisted_ids else {}
         sql = _LAST_REPLIES_SQL.format(visible=DISPLAY_VISIBLE_SQL)

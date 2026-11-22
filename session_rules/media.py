@@ -6,11 +6,45 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 _API_IMAGE_NAME = re.compile(r'api_[0-9a-f]{32}\.(png|jpg|gif|webp)')
 _SHA256_NAME = re.compile(r'[0-9a-f]{64}')
+
+
+_SCREENSHOT_LINE = re.compile(r"\[screenshot(?: detail=(?:low|high|auto))?\]")
+
+
+def legacy_api_photo_caption(content: str) -> str:
+    """Recover the caption of an old flattened API photo without an admission record.
+
+    Both the attachment receipts and their matching screenshot lines must form the complete
+    suffix. A literal mention, a path embedded in prose or an unrelated file is user text.
+    """
+    caption, separator, suffix = content.rpartition("\n\n")
+    if not separator:
+        return content
+    lines = suffix.split("\n")
+    count = len(lines) // 2
+    if not count or len(lines) != 2 * count or not all(_SCREENSHOT_LINE.fullmatch(line) for line in lines[count:]):
+        return content
+    local = False
+    for line in lines[:count]:
+        if line.startswith(("[Image attached: https://", "[Image attached: http://")) and line.endswith("]"):
+            continue
+        if not (line.startswith("[Image attached at: ") and line.endswith("]")):
+            return content
+        raw = line[len("[Image attached at: "):-1]
+        path = PurePosixPath(raw) if raw.startswith("/") else PureWindowsPath(raw)
+        digest = path.parent.name
+        cache = path.parent.parent.parent
+        document_cache = cache.name == "document_cache" or (cache.name == "documents" and cache.parent.name == "cache")
+        if not (path.is_absolute() and document_cache and path.parent.parent.name == "native-inputs" and _SHA256_NAME.fullmatch(digest)
+                and _API_IMAGE_NAME.fullmatch(path.name) and path.name[4:36] == digest[:32]):
+            return content
+        local = True
+    return caption if local else content
 
 
 # A hosted room's non-image document is retained under ``native-inputs/<sha256>/<name>`` like any

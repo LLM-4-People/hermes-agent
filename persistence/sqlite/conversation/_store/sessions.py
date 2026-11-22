@@ -1191,7 +1191,7 @@ def list_recent_sessions_bounded(
                 tip.message_count,
                 tip.tool_call_count,
                 rt.activity AS last_active,
-                {_sql_preview_raw('tip.id')},
+                {_sql_preview_raw(holder.has_session_admissions, 'tip')},
                 CASE WHEN s.id != tip.id THEN s.id ELSE NULL END
                     AS _lineage_root_id
             FROM ranked_tips rt
@@ -1292,7 +1292,7 @@ def list_sessions_rich(
     select_head = (
         f"SELECT {_compact_session_cols(holder.db_path.parent) if compact_rows else 's.*'}"
         + ("" if compact_rows else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved")
-        + f",\n                    {_sql_preview_raw()},\n                    "
+        + f",\n                    {_sql_preview_raw(holder.has_session_admissions)},\n                    "
     )
     prompt_join = (
         "" if compact_rows else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"

@@ -813,6 +813,7 @@ class TranscriptRead:
     latest: bool = False
     after_id: Optional[MessageId] = None
     include_lineage: bool = False
+    for_export: bool = False  # preserve historical typed photo provenance in a portable copy
 
     def __post_init__(self) -> None:
         if self.after_id is not None and (self.latest or self.offset):

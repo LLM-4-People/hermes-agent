@@ -783,6 +783,10 @@ Trigger the job to run immediately, out of schedule.
 
 External UIs can manage Hermes sessions over REST without standing up the dashboard. All endpoints are gated by `API_SERVER_KEY` and live under `/api/sessions/*`.
 
+The session list takes its preview from the first visible, eligible user message. For an API photo turn it shows the original caption, including text parts that follow the image. A photo sent without text shows the gateway’s default image question. Transcript history retains the attachment details.
+
+Session exports preserve the distinction between a photo and a pasted copy of its attachment text when the original admission or its saved caption is available. An older API archive can lack both. For those rows, a complete content-addressed local image receipt and its matching screenshot lines are displayed as a photo, even if someone originally pasted the same text.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/sessions` | List sessions (paginated — `limit`, `offset`, `source`, `include_children`) |
