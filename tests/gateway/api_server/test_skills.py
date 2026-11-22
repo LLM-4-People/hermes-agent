@@ -219,6 +219,8 @@ async def test_catalog_publishes_only_single_line_loadable_identifiers(tmp_path,
         "notes/reports": '"R: Report"',
         "notes/research": '"R&D: overview"',
         "notes/scoped": '"research:report"',
+        "notes/generated": json.dumps("R📌"),
+        "notes/incomplete": r'"draft\uD83D"',
         "notes/hide\nthis": r'"bad\x01name"',
         "notes/保留": "Résumé 📌",
     }

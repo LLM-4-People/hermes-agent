@@ -518,13 +518,13 @@ def skill_lookup_path_error(name: str) -> Optional[str]:
     return None
 
 
-# Colons dispatch to the plugin registry. Local catalog locators must round-trip without that
-# dispatch and fit on one line, including when their exact relative path is used.
-_LOCAL_LOCATOR_SEPARATOR = re.compile(r"[:\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# Local locators must round-trip on a single JSON line without triggering plugin dispatch.
+# YAML can preserve UTF-16 surrogate escapes that JSON readers combine into a different name.
+_INVALID_LOCAL_LOCATOR_CHAR = re.compile(r"[:\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 
 
 def _is_local_catalog_locator(alias: str) -> bool:
-    return not _LOCAL_LOCATOR_SEPARATOR.search(alias) and skill_lookup_path_error(alias) is None
+    return not _INVALID_LOCAL_LOCATOR_CHAR.search(alias) and skill_lookup_path_error(alias) is None
 
 
 def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[dict[str, Any]]:
