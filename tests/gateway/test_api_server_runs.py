@@ -1935,9 +1935,7 @@ class TestRunIdempotency:
         from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 
         path = tmp_path / "idem.db"
-        scope = hashlib.sha256(
-            b"default\0unauthenticated-test-listener"
-        ).hexdigest()
+        scope = hashlib.sha256(b"default\0unauthenticated-test-listener").hexdigest()
         store = RunIdempotencyStore(str(path))
         store.reserve(
             scope,
