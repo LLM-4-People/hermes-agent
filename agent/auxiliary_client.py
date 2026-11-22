@@ -4942,7 +4942,7 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
         )
         _clean_base, _dq = _extract_url_query_params(custom_base)
         extra = {"default_query": _dq} if _dq else {}
-        from hermes_cli.config import get_custom_provider_extra_headers  # this endpoint's entry, as agent_init
+        from hermes_cli.config import get_custom_provider_extra_headers, merge_headers_case_insensitive
         from hermes_cli.providers import live_provider_identity
         # Aux calls on a shared proxy endpoint must carry THIS provider's routing header, not a sibling's.
         # ``req.original_provider`` is often the bare adapter ("custom"); only a concrete identity wins.
@@ -4950,8 +4950,9 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
             req.original_provider or provider,
             (main_runtime or {}).get("requested_provider") or provider or "",
         )
-        _custom_headers = {**(_endpoint_default_headers(custom_base, _aux_identity, is_vision=req.is_vision) or {}),
-                           **get_custom_provider_extra_headers(custom_base, provider=_aux_identity)}
+        _custom_headers = merge_headers_case_insensitive(
+            dict(_endpoint_default_headers(custom_base, _aux_identity, is_vision=req.is_vision) or {}),
+            get_custom_provider_extra_headers(custom_base, provider=_aux_identity))
         if _custom_headers:
             extra["default_headers"] = _custom_headers
         client = _create_openai_client(
@@ -4984,7 +4985,10 @@ def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_he
     _extra = {"default_query": _dq} if _dq else {}
     _headers = _apply_user_default_headers(None)
     if extra_headers:
-        _headers = {**(_headers or {}), **extra_headers}
+        from hermes_cli.config import merge_headers_case_insensitive
+        # Case-insensitive like the main client: the entry's routing value must replace a same-name
+        # user default instead of sending two wire headers.
+        _headers = merge_headers_case_insensitive(dict(_headers or {}), extra_headers)
     if _headers:
         _extra["default_headers"] = _headers
     return _create_openai_client(api_key=custom_key, base_url=_clean_base, provider=provider, **_extra)

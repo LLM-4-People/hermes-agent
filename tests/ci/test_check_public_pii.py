@@ -99,3 +99,22 @@ def test_invalid_regex_is_misuse_not_a_silent_pass(tmp_path):
 
     assert result.returncode == 2
     assert "invalid denylist regex" in result.stderr
+
+
+def test_regexes_use_the_same_python_dialect_that_validates_them(tmp_path):
+    """``\\d`` is a digit in Python and a literal ``d`` in POSIX ERE: one dialect, or the gate lies."""
+    repo = _repo(tmp_path, {"a.txt": b"token-1234\n"})
+    result = _run(repo, "re:token-\\d{4}\n", tmp_path=tmp_path)
+
+    assert result.returncode == 1
+    assert "a.txt:1" in result.stderr
+
+
+def test_inline_flags_are_rejected_at_parse_time(tmp_path):
+    """Matching is always case-insensitive; an inline global flag cannot sit inside the combined
+    alternation, so it must fail during parsing instead of during the scan."""
+    repo = _repo(tmp_path, {"a.txt": b"anything\n"})
+    result = _run(repo, "re:(?i)corp-internal\n", tmp_path=tmp_path)
+
+    assert result.returncode == 2
+    assert "do not combine" in result.stderr

@@ -624,7 +624,8 @@ from hermes_cli.config_providers import (
     get_compatible_custom_providers, get_custom_provider_api_mode, get_custom_provider_context_length,
     get_custom_provider_extra_headers, get_custom_provider_model_capability,
     get_custom_provider_session_affinity_header,
-    get_custom_provider_tls_settings, is_provider_enabled, normalize_extra_headers,
+    get_custom_provider_tls_settings, is_provider_enabled, merge_headers_case_insensitive,
+    normalize_extra_headers,
     normalize_proxy_headers, providers_dict_to_custom_providers, resolve_provider_extra_headers,
     stringify_provider_map)
 # Back-compat re-exports — :mod:`hermes_cli.personality` owns personality/overlay semantics.

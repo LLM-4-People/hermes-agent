@@ -16,7 +16,7 @@ PYTHON="${HERMES_PYTHON:-python3}"
 
 # Static guards + lint. All Python-only, so no Node toolchain is needed.
 "$PYTHON" scripts/check --only \
-  footguns,detached-spawns,install-root,config-writers,config-readers,public-pii,ruff
+  footguns,detached-spawns,install-root,config-writers,config-readers,ruff
 
 # Downstream regression suite: provider routing + footer identity + Signal media, plus every
 # consumer that resolves route metadata (main client, Anthropic wire, auxiliary, /model,

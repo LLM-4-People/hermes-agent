@@ -92,18 +92,20 @@ patch is present in the image.
 
 This repository is public, so operator infrastructure is never committed: internal hostnames, IP
 addresses, phone numbers, provider slugs and account-specific model ids are all identifying
-details. `scripts/ci/check_public_pii.py` (wired into `scripts/check` as `public-pii` and therefore
-into the downstream gate) rejects any tracked file that contains one.
+details. `scripts/ci/check_public_pii.py` (also available locally as
+`scripts/check --only public-pii`) rejects any tracked file that contains one.
 
 The identifiers themselves are **not** in the tree — publishing the denylist would defeat it. They
-live in the repository secret `PII_DENYLIST` (newline-separated literals, or `re:` patterns).
-`downstream-ci.yml` exposes it to the gate and sets `HERMES_PUBLIC_PII_REQUIRE=1`, so a missing
-secret fails the lane instead of silently skipping the scan. The sync workflow runs merged upstream
-code with no secret and therefore skips the literal scan; the merged branch is scanned with the
-secret when its pull request triggers `downstream-ci.yml`.
+live in the repository secret `PII_DENYLIST` (newline-separated literals or Python regular
+expressions prefixed with `re:`; matching is case-insensitive). `.github/workflows/pii-guard.yml`
+runs on `pull_request_target` and on pushes to `main`: the workflow and checker come from the
+trusted base commit, the candidate is checked out only as data, and the scan runs with
+`HERMES_PUBLIC_PII_REQUIRE=1`. No pull-request code executes in that job, so neither a same-repo PR
+nor the automation branch (which may contain merged upstream code) can read the denylist. The
+regular downstream gate deliberately does not receive the secret.
 
 Locally, put the same newline-separated list in `~/.config/hermes/pii-denylist` (or point
-`HERMES_PUBLIC_PII_DENYLIST` at another file) and run `scripts/downstream-verify.sh`. Findings
+`HERMES_PUBLIC_PII_DENYLIST` at another file) and run `scripts/check --only public-pii`. Findings
 report `path:line` with the matched text redacted; generated base64 lines (inline source maps) are
 counted and skipped.
 

@@ -213,7 +213,7 @@ def normalize_proxy_headers(proxy: Any, *, provider_key: str = "") -> dict[str, 
         _warn_once_per_provider(provider_key, "proxy:headers",
                                 "providers.%s: proxy.headers must be a mapping — ignored", provider_key or "?")
     else:
-        _merge_headers_case_insensitive(headers, normalize_extra_headers(extra))
+        merge_headers_case_insensitive(headers, normalize_extra_headers(extra))
     return headers
 
 
@@ -228,7 +228,7 @@ def resolve_provider_extra_headers(entry: Any, *, provider_key: str = "") -> dic
         return {}
     headers = normalize_proxy_headers(
         entry.get("proxy"), provider_key=provider_key or coerce_provider_id(entry.get("provider_key")))
-    return _merge_headers_case_insensitive(headers, normalize_extra_headers(entry.get("extra_headers")))
+    return merge_headers_case_insensitive(headers, normalize_extra_headers(entry.get("extra_headers")))
 
 
 def _normalize_provider_models(models: Any) -> tuple[dict[str, Any], bool]:
@@ -556,16 +556,18 @@ def _route_model_cfgs(
     custom_providers: Optional[list[dict[str, Any]]],
     config: Optional[dict[str, Any]],
     *,
-    provider: Optional[str] = None) -> Iterator[dict[str, Any]]:
+    provider: Optional[str] = None,
+    unmatched: str = "route") -> Iterator[dict[str, Any]]:
     """Yield the ``models.<model>`` mapping of every entry matching *base_url* and *provider*.
 
     Capability declarations are route-scoped: an identity that names no entry keeps the URL-only
     scan (upstream contract, so a declaration still applies when the caller has no usable
     identity), unlike routing metadata, which fails closed because headers and TLS belong to one
-    provider.
+    provider. Callers that enforce a route policy (per-model ``context_length``) pass
+    ``unmatched="fail"`` so a renamed entry cannot size a session from a sibling's window.
     """
     for entry in _entries_for_route(
-            base_url, custom_providers, config, provider=provider, unmatched="route"):
+            base_url, custom_providers, config, provider=provider, unmatched=unmatched):
         model_cfg = _route_model_cfg(entry, model)
         if model_cfg is not None:
             yield model_cfg
@@ -627,7 +629,7 @@ def normalize_extra_headers(extra_headers: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in extra_headers.items() if v is not None}
 
 
-def _merge_headers_case_insensitive(target: dict[str, str], extra: dict[str, str]) -> dict[str, str]:
+def merge_headers_case_insensitive(target: dict[str, str], extra: dict[str, str]) -> dict[str, str]:
     """Merge *extra* into *target* using HTTP's case-insensitive header namespace.
 
     A lower-case override must replace the derived header, not become a second wire header that a
@@ -675,7 +677,7 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
     merged = dict(client_kwargs.get("default_headers") or {})
     # HTTP header names are case-insensitive: an override spelled with different casing must
     # replace the existing header, not become a second wire header the proxy may read first.
-    _merge_headers_case_insensitive(merged, extra_headers)
+    merge_headers_case_insensitive(merged, extra_headers)
     client_kwargs["default_headers"] = merged
 
 
@@ -730,7 +732,8 @@ def get_custom_provider_context_length(
             return None
         return ctx if ctx > 0 else None
 
-    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config, provider=provider):
+    for model_cfg in _route_model_cfgs(
+            model, base_url, custom_providers, config, provider=provider, unmatched="fail"):
         ctx = _positive_int(model_cfg.get("context_length"))
         if ctx is not None:
             return ctx

@@ -625,6 +625,23 @@ class TestAuxOnSharedProxyFollowsTheRequestedEntry:
         assert captured["provider"] == requested
         assert captured["default_headers"] == {"X-Proxy-Base-URL": "https://upstream-b.example.com/v1"}
 
+    def test_wire_client_header_merge_is_case_insensitive(self):
+        from agent import auxiliary_client as aux
+
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch.object(aux, "_apply_user_default_headers",
+                          return_value={"x-upstream": "user", "X-SDK": "1"}), patch.object(
+                aux, "_create_openai_client", side_effect=fake_create):
+            aux._named_custom_openai_wire_client(
+                self._ROUTE, "beta-key", {"X-Upstream": "beta"}, provider="custom:beta")
+
+        assert captured["default_headers"] == {"X-SDK": "1", "X-Upstream": "beta"}
+
     def test_auto_main_provider_is_still_skipped(self):
         from agent import auxiliary_client as aux
 

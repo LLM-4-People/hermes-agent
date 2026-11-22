@@ -40,12 +40,6 @@ jobs:
           prune-python-cache: true
 
       - name: Verify downstream patch
-        env:
-          # Operator identifiers stay out of the public tree: the denylist lives only in the
-          # repository secret, and CI fails rather than skipping when it is missing. Fork pull
-          # requests do not receive secrets and are not accepted here (this is a downstream fork).
-          HERMES_PUBLIC_PII_DENYLIST: ${{ secrets.PII_DENYLIST }}
-          HERMES_PUBLIC_PII_REQUIRE: '1'
         run: ./scripts/downstream-verify.sh
 
   workflow-lint:

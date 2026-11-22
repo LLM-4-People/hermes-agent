@@ -92,6 +92,17 @@ def test_a_deleted_bare_entry_identity_does_not_borrow_a_sibling():
     assert get_custom_provider_tls_settings(_ROUTE, _entries(), provider="beta-removed") == {}
 
 
+def test_per_model_context_length_does_not_fall_back_for_a_deleted_identity():
+    """Per-model context sizing is routing metadata, not a capability: an unknown bare name must
+    not size a session from a sibling's window."""
+    entries = [{"name": "alpha", "base_url": _ROUTE,
+                "models": {"m": {"context_length": 333}}}]
+    assert get_custom_provider_context_length(
+        "m", _ROUTE, entries, provider="unknown-alias") is None
+    assert get_custom_provider_context_length(
+        "m", _ROUTE, entries, provider="alpha") == 333
+
+
 def test_capability_declarations_keep_the_route_scoped_fallback():
     """Capabilities are route/model-scoped: an identity that names no entry still reads the
     declaration serving this endpoint, while an explicit missing ``custom:<slug>`` does not."""

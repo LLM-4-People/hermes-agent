@@ -4,11 +4,14 @@
 The identifiers are deliberately **not** committed: publishing the denylist would leak exactly
 what it protects. They are supplied at the lowest choke point, by ``--denylist-file`` or the
 ``HERMES_PUBLIC_PII_DENYLIST`` environment variable (newline-separated). Each non-blank,
-non-comment entry is a case-insensitive literal, or a regular expression prefixed with ``re:``.
+non-comment entry is a literal or a Python regular expression prefixed with ``re:``. Matching is
+case-insensitive; patterns are combined into one alternation, so they must not use backreferences
+(the error names the constraint).
 
-The scan runs over tracked files through ``git grep``, so it is fast on the whole tree and skips
-binary content. Exit codes: 0 clean (or no denylist configured, with a visible notice), 1 findings,
-2 misuse. Findings never echo the matched text: the log itself must not become the leak.
+The scan reads tracked files directly, so it has exactly one regex dialect (Python's) and works
+the same on every platform. Exit codes: 0 clean (or no denylist configured, with a visible
+notice), 1 findings, 2 misuse. Findings never echo the matched text: the log itself must not
+become the leak.
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,7 @@ _REQUIRE_ENV = "HERMES_PUBLIC_PII_REQUIRE"
 # Generated blobs (inline source maps, data URIs) are not reviewable text and produce random
 # substring hits for short identifiers; a long base64 line is skipped and counted, never silent.
 _GENERATED_LINE_MIN = 2000
+_BINARY_PROBE = 8192
 
 
 @dataclass(frozen=True)
@@ -39,10 +42,8 @@ class Rule:
     pattern: str
     regex: bool
 
-    def describe(self) -> str:
-        kind = "regex" if self.regex else "literal"
-        # The pattern is the secret; only its position and shape are reportable.
-        return f"rule #{self.index} ({kind}, {len(self.pattern)} chars)"
+    def expression(self) -> str:
+        return f"(?:{self.pattern})" if self.regex else re.escape(self.pattern)
 
 
 def parse_denylist(text: str) -> list[Rule]:
@@ -58,10 +59,19 @@ def parse_denylist(text: str) -> list[Rule]:
             raise ValueError("empty denylist entry")
         if regex:
             try:
-                re.compile(pattern)
+                re.compile(pattern, re.IGNORECASE)
             except re.error as exc:
                 raise ValueError(f"invalid denylist regex at entry {len(rules) + 1}: {exc}") from exc
         rules.append(Rule(len(rules) + 1, pattern, regex))
+    if rules:
+        try:
+            re.compile("|".join(rule.expression() for rule in rules), re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(
+                f"denylist entries do not combine into one expression ({exc}); "
+                "backreferences and inline flags are not supported, matching is always "
+                "case-insensitive"
+            ) from exc
     return rules
 
 
@@ -76,51 +86,39 @@ def load_denylist(path: Path | None, env_value: str | None) -> tuple[list[Rule],
         return [], str(candidate)
 
 
-def _grep(repo: Path, rule_file: Path, fixed: bool) -> list[str]:
+def _tracked_files(repo: Path) -> list[str]:
     proc = subprocess.run(
-        ["git", "-C", str(repo), "grep", "-I", "-i", "-n", "--no-color", "--no-textconv",
-         "-F" if fixed else "-E", "-f", str(rule_file), "--", "."],
+        ["git", "-C", str(repo), "ls-files", "-z"],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
     )
-    if proc.returncode not in (0, 1):
-        raise RuntimeError(f"git grep failed: {proc.stderr.strip()}")
-    return [line for line in proc.stdout.splitlines() if line]
-
-
-def _is_generated_payload(line: str) -> bool:
-    """A ``path:line:content`` grep hit whose content is a generated base64 blob."""
-    _, _, content = line.partition(":")
-    _, _, content = content.partition(":")
-    return len(content) > _GENERATED_LINE_MIN and "base64," in content
+    if proc.returncode != 0:
+        raise RuntimeError(f"git ls-files failed: {proc.stderr.strip()}")
+    return [name for name in proc.stdout.split("\0") if name]
 
 
 def scan(repo: Path, rules: Sequence[Rule]) -> tuple[list[str], int]:
-    """``(path:line hits, generated lines skipped)``, deduplicated and ordered."""
-    hits: set[str] = set()
+    """``(matches sorted by path/line, generated lines skipped)``."""
+    pattern = re.compile("|".join(rule.expression() for rule in rules), re.IGNORECASE)
+    hits: list[str] = []
     skipped = 0
-    for regex in (False, True):
-        selected = [rule.pattern for rule in rules if rule.regex is regex]
-        if not selected:
+    for rel in _tracked_files(repo):
+        path = repo / rel
+        if path.is_symlink():  # git stores the link target, not the target's content
             continue
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt") as handle:
-            handle.write("\n".join(selected) + "\n")
-            handle.flush()
-            for line in _grep(repo, Path(handle.name), fixed=not regex):
-                if _is_generated_payload(line):
-                    skipped += 1
-                    continue
-                path, _, rest = line.partition(":")
-                lineno, _, _content = rest.partition(":")
-                hits.add(f"{path}:{lineno}")
-    return sorted(hits, key=_position), skipped
-
-
-def _position(hit: str) -> tuple[str, int]:
-    path, _, lineno = hit.rpartition(":")
-    try:
-        return path, int(lineno)
-    except ValueError:
-        return path, 0
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in data[:_BINARY_PROBE]:
+            continue
+        for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+            if not pattern.search(line):
+                continue
+            if len(line) > _GENERATED_LINE_MIN and "base64," in line:
+                skipped += 1
+                continue
+            hits.append(f"{rel}:{lineno}")
+    return hits, skipped
 
 
 def _report(hits: Iterable[str], source: str, rule_count: int) -> None:
