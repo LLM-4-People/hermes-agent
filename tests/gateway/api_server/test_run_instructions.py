@@ -80,7 +80,7 @@ async def test_run_http_prompt_and_idempotent_execution(monkeypatch):
     app = _create_runs_app(adapter)
     app.router.add_get('/v1/capabilities', adapter._handle_capabilities)
     headers = {'Authorization':'Bearer owner-test', 'Idempotency-Key':'test-run'}
-    body = {'input':'question', 'instructions':'durable', 'run_instructions':'one send'}
+    body = {'input':'question', 'session_id':'standalone-session', 'instructions':'durable', 'run_instructions':'one send'}
     async with TestClient(TestServer(app)) as client:
         assert (await client.post('/v1/runs', json=body)).status == 401
         caps = await (await client.get('/v1/capabilities', headers=headers)).json()
@@ -94,8 +94,14 @@ async def test_run_http_prompt_and_idempotent_execution(monkeypatch):
             await events.read()
         assert (await (await client.post('/v1/runs', json=body, headers=headers)).json())['run_id'] == ident
         assert (await client.post('/v1/runs', json={**body, 'run_instructions':'changed'}, headers=headers)).status == 409
-    assert calls == ['system\n\ndurable\n\none send']
-    assert _codex_developer_instructions(agent) == 'system\n\ndurable'
+        next_body = {'session_id': body['session_id'], 'input': 'another question', 'run_instructions': 'only this'}
+        reply = await client.post('/v1/runs', json=next_body, headers={**headers, 'Idempotency-Key': 'test-followup'})
+        assert reply.status == 202
+        next_id = (await reply.json())['run_id']
+        async with client.get(f'/v1/runs/{next_id}/events', headers=headers) as events:
+            await events.read()
+    assert calls == ['system\n\ndurable\n\none send', 'system\n\nonly this']
+    assert _codex_developer_instructions(agent) == 'system'
 
 
 
