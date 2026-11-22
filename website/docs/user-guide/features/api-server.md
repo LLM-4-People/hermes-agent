@@ -478,10 +478,11 @@ In addition to `/v1/chat/completions` and `/v1/responses`, the server exposes a 
 Create a new agent run. Returns a `run_id` that can be used to subscribe to progress events.
 
 When `features.run_scoped_instructions` is true, a run can include the optional UTF-8 string `run_instructions`.
-The model receives it after the persistent `instructions` for this admission. A scoped-only run reuses the
-session's durable instructions. Background inputs and later runs receive only their own instructions. Use the
-same body and idempotency key to recover the original admission after a lost response.
-
+The model receives `run_instructions` after the ordinary `instructions` for that run. A gateway with a
+session authority can reuse the session's saved ordinary instructions when a request supplies only
+`run_instructions`. A standalone API server creates an agent for each run. Include both fields on that
+server when the model needs both. Later runs and background inputs do not inherit the one-time text.
+Use the same body and idempotency key to recover the original admission after a lost response.
 
 A client can restrict a run to selected toolsets when `features.run_toolset_selection` is true in
 `GET /v1/capabilities`. Submit `allowed_toolsets` as an array of distinct, enabled toolset names
