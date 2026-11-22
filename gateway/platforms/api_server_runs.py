@@ -323,12 +323,13 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, 
         current.setdefault("shutdown_requested_at", shutdown_requested_at)
     if status != "waiting_for_approval":
         current.pop("approval", None)
+        current.pop("pending_approvals", None)
     self._run_statuses[run_id] = current
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {
-            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at"}))
+            "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "session_id", "shutdown_requested_at"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -484,6 +485,8 @@ def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, An
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
             last_event="run.interrupted", updated_at=time.time())
+        status.pop("approval", None)
+        status.pop("pending_approvals", None)
         self._run_idempotency_store.update_status(run_id, status)
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
@@ -595,6 +598,22 @@ class _RunLaunch:
     def approval_session_key(self) -> str:
         # Isolated per run: session ids are conversation scopes, not authorization namespaces.
         return self.run_id
+
+    def put_control(self, event: dict) -> None:
+        """Persist the identity of each pending authority approval before publishing it on SSE."""
+        kind, prompt_id = event["event"], event.get("prompt_id")
+        current = self.owner._run_statuses.get(self.run_id, {})
+        if (kind in {"approval.request", "approval.settled"} and prompt_id
+                and current.get("status") in {"running", "waiting_for_approval"}):
+            pending = dict(current.get("pending_approvals", {}))
+            if kind == "approval.request":
+                pending.setdefault(prompt_id, event["timestamp"])
+            else:
+                pending.pop(prompt_id, None)
+            if pending != current.get("pending_approvals", {}):
+                self.owner._set_run_status(self.run_id, "waiting_for_approval" if pending else "running",
+                                           pending_approvals=pending, last_event=kind)
+        self.put_event(event)
 
     def put_event(self, event: Optional[dict]) -> None:
         """Enqueue only while this run still owns live transport state."""
@@ -1117,7 +1136,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 # Same authority prompt the WS viewer and GET pending_controls expose, on the
                 # run's own stream so a streaming-only client learns it must respond.
                 with suppress(Exception):
-                    loop.call_soon_threadsafe(run.put_event, _run_event(run_id, event_type, **prompt))
+                    loop.call_soon_threadsafe(run.put_control, _run_event(run_id, event_type, **prompt))
 
             def _tool_start(call_id, name, args):
                 from agent.display import build_tool_preview

@@ -166,3 +166,43 @@ async def test_exact_streamed_retry_replays_the_already_pending_approval(api, ow
     with raw_holder(owner.persistence)._read_ctx() as conn:
         rows = conn.execute("SELECT status FROM session_admissions WHERE principal_id='api'").fetchall()
     assert [r[0] for r in rows] == ["terminal"]
+
+
+@pytest.mark.asyncio
+async def test_canonical_approval_identity_is_durable_until_the_turn_settles(api, owner, monkeypatch):
+    from gateway.platforms.api_server_authority_runs import run_projection
+    from tests.gateway.test_api_server_runs import _create_runs_app
+    from tests.waiting import async_wait_until
+
+    monkeypatch.setattr("tools.approval_context._get_approval_timeout", lambda: 10)
+    decisions = []
+    owner.runner._handle_message = _canonical_approval_turn(owner, decisions)
+    api._api_key = "isolated-approval-test-key"
+    headers = {"Authorization": "Bearer " + api._api_key, "Idempotency-Key": "unique-turn"}
+    async with TestClient(TestServer(_create_runs_app(api))) as client:
+        accepted = await client.post("/v1/runs", json={"input": "request approval", "session_id": "durable"},
+                                     headers=headers)
+        assert accepted.status == 202, await accepted.text()
+        run_id = (await accepted.json())["run_id"]
+        endpoint = f"/v1/runs/{run_id}"
+        prompts = await async_wait_until(lambda: (run_projection(api, run_id) or {}).get("pending_controls"),
+                                         what="a canonical approval")
+        prompt = prompts[0]
+        scope = api._run_owners[run_id]
+        def persisted():
+            return api._run_idempotency_store.status_for_run(scope, run_id)["status"]
+        try:
+            await async_wait_until(lambda: persisted().get("pending_approvals"), timeout=2,
+                                   what="the durable pending approval identity")
+            projection = persisted()
+            assert projection["status"] == "waiting_for_approval"
+            assert list(projection["pending_approvals"]) == [prompt["prompt_id"]]
+            assert prompt["command"] not in json.dumps(projection)
+        finally:
+            denied = await client.post(endpoint + "/approval", headers=headers,
+                                       json={"request_id": prompt["prompt_id"], "choice": "deny",
+                                             "execution_generation": prompt["execution_generation"]})
+            assert denied.status == 200, await denied.text()
+            await async_wait_until(lambda: persisted()["status"] == "completed", what="durable completion")
+        assert "pending_approvals" not in persisted()
+        assert decisions[0]["choice"] == "deny"
