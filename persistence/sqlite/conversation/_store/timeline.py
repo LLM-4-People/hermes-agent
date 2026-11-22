@@ -50,6 +50,20 @@ def _snapshot(db):
                 conn.execute("ROLLBACK")
 
 
+def _indexed_display_rows_sql(filters=DISPLAY_VISIBLE_SQL):
+    """The representative IDs and stable order of complete display-index slots."""
+    return f"""WITH display_rows AS (
+        SELECT (SELECT candidate.id FROM messages candidate
+                WHERE candidate.session_id = :sid
+                  AND candidate.display_order = m.display_order
+                  AND (candidate.active = 1 OR candidate.compacted = 1){DISPLAY_VISIBLE_SQL}{not_a_later_tool_copy_sql('candidate')}
+                ORDER BY candidate.active DESC, candidate.id DESC LIMIT 1) AS row_id,
+               m.display_order AS sort_id
+        FROM messages m WHERE session_id = :sid AND (active = 1 OR compacted = 1){filters}{not_a_later_tool_copy_sql('m')}
+        GROUP BY m.display_order
+    )"""
+
+
 def _display_rows_sql(conn, session_id, *, users_only=False):
     """Return only representative ids and their stable first-row order, never bodies.
 
@@ -64,16 +78,7 @@ def _display_rows_sql(conn, session_id, *, users_only=False):
         (session_id,),
     ).fetchone() is None
     if indexed:
-        return f"""WITH display_rows AS (
-            SELECT (SELECT candidate.id FROM messages candidate
-                    WHERE candidate.session_id = :sid
-                      AND candidate.display_order = m.display_order
-                      AND (candidate.active = 1 OR candidate.compacted = 1){DISPLAY_VISIBLE_SQL}{not_a_later_tool_copy_sql('candidate')}
-                    ORDER BY candidate.active DESC, candidate.id DESC LIMIT 1) AS row_id,
-                   m.display_order AS sort_id
-            FROM messages m WHERE session_id = :sid AND (active = 1 OR compacted = 1){filters}{not_a_later_tool_copy_sql('m')}
-            GROUP BY m.display_order
-        )"""
+        return _indexed_display_rows_sql(filters)
     return f"""WITH ranked AS (
         SELECT id, MIN(id) OVER identity AS sort_id,
                ROW_NUMBER() OVER (identity ORDER BY active DESC, id DESC) AS preference

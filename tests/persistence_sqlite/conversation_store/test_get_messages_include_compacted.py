@@ -183,6 +183,37 @@ class TestDisplayDedupe:
 
         db._execute_write(_do)
 
+    def test_read_only_transcript_page_before_display_index_columns(self, tmp_path):
+        from persistence.conversation.messages import TranscriptRead, TranscriptView
+        from persistence.sqlite.conversation._store.transcript_pages import get_transcript_page
+        from persistence.sqlite.conversation._store.sessions import end_session
+
+        path = tmp_path / "pre-index.db"
+        writer = StoreHolder(path)
+        try:
+            create_session(writer, "parent", source="api_server")
+            append_messages_batch(writer, "parent", [{"role": "user", "content": "before"}])
+            end_session(writer, "parent", "compression")
+            create_session(writer, "child", source="api_server", parent_session_id="parent")
+            append_messages_batch(writer, "child", [{"role": "assistant", "content": "after"}])
+        finally:
+            writer.close()
+        with sqlite3.connect(path) as conn:
+            columns = ", ".join(row[1] for row in conn.execute("PRAGMA table_info(messages)")
+                                if row[1] not in {"display_order", "display_identity"})
+            conn.execute("CREATE TABLE original_messages AS SELECT " + columns + " FROM messages")
+            conn.execute("DROP TABLE messages")
+            conn.execute("PRAGMA legacy_alter_table = ON")
+            conn.execute("ALTER TABLE original_messages RENAME TO messages")
+        reader = StoreHolder(path, read_only=True)
+        try:
+            for lineage, texts in ((False, ["after"]), (True, ["before", "after"])):
+                request = TranscriptRead(view=TranscriptView.DISPLAY, include_lineage=lineage)
+                page, total, _ = get_transcript_page(reader, "child", request, True)
+                assert (total, [row["content"] for row in page]) == (len(texts), texts)
+        finally:
+            reader.close()
+
     def test_paged_transcript_counts_large_legacy_lineage_without_retaining_bodies(self, tmp_path):
         from persistence.conversation.messages import TranscriptRead, TranscriptView
         from persistence.sqlite.conversation._store.transcript_pages import get_transcript_page

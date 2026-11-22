@@ -8,11 +8,11 @@ from persistence.conversation.messages import TranscriptView
 from session_rules.turns import transcript_message_visible
 from .messages import (
     _active_clause, _decode_content, _decode_display_metadata, _dedupe_display_generations, _display_dedupe_key, _display_identity,
-    _legacy_display_ids, _resume_lineage_ids, _row_to_message_dict,
+    _legacy_display_ids, _message_column_names, _resume_lineage_ids, _row_to_message_dict,
 )
 from .messages_sql import _DISPLAY_ACTIVE_CLAUSE, _DISPLAY_INDEX_MISSING_SQL
 from .sql_common import _in_one_read, _placeholders
-from .timeline import _display_rows_sql
+from .timeline import _indexed_display_rows_sql
 
 
 def _visible(role, kind, metadata, summary, content):
@@ -33,11 +33,12 @@ _VISIBLE = """CASE WHEN role = 'session_meta' THEN 0
 def _segment_page(holder, conn, sid, request, visible_only):
     params = {"sid": sid, "after": request.after_id, "limit": request.limit, "offset": request.offset}
     if request.view is TranscriptView.DISPLAY:
-        if conn.execute(_DISPLAY_INDEX_MISSING_SQL, (sid,)).fetchone():
+        columns = _message_column_names(holder, conn)
+        if not {"display_order", "display_identity"}.issubset(columns) or conn.execute(_DISPLAY_INDEX_MISSING_SQL, (sid,)).fetchone():
             params["legacy"] = json.dumps(_legacy_display_ids(holder, conn, sid, _DISPLAY_ACTIVE_CLAUSE))
             source = "WITH display_rows AS (SELECT value AS row_id, key AS sort_id FROM json_each(:legacy))"
         else:
-            source = _display_rows_sql(conn, sid)
+            source = _indexed_display_rows_sql()
     else:
         active = " AND active = 1" if request.view is TranscriptView.ACTIVE else ""
         after = " AND id > :after" if request.after_id is not None else ""
@@ -77,11 +78,14 @@ def _lineage_page(holder, conn, segments, request, visible_only):
     display = request.view is TranscriptView.DISPLAY
     active = _active_clause(request.view is TranscriptView.ALL or display, False)
     shown = _VISIBLE if visible_only else "1"
+    columns = _message_column_names(holder, conn)
+    identity = "display_identity" if "display_identity" in columns else "NULL"
+    order = "display_order" if "display_order" in columns else "NULL"
     rows = conn.execute(f"""
         SELECT id, session_id, active, compacted, role, timestamp, message_uid, absorbed_message_uids,
-               display_order, display_identity, display_kind, display_metadata, _compressed_summary,
-               CASE WHEN display_identity IS NULL OR _compressed_summary THEN content END AS content,
-               CASE WHEN display_identity IS NULL OR _compressed_summary THEN tool_calls END AS tool_calls, tool_name, tool_call_id,
+               {order} AS display_order, {identity} AS display_identity, display_kind, display_metadata, _compressed_summary,
+               CASE WHEN {identity} IS NULL OR _compressed_summary THEN content END AS content,
+               CASE WHEN {identity} IS NULL OR _compressed_summary THEN tool_calls END AS tool_calls, tool_name, tool_call_id,
                {shown} AS shown
           FROM messages WHERE session_id IN ({_placeholders(segments)}){active} ORDER BY id""", segments)
     kept = _dedupe_display_generations(holder, _identity_rows(holder, rows), drop_removed=display, indexed_keys=True)
