@@ -19,6 +19,13 @@ def _read(store, session_id, page_request, visible_only):
     return None
 
 
+def _public_message(adapter, row):
+    message = adapter._message_response(row.as_wire_row())
+    if row.api_admission_id is not None and message["role"] == "user" and message.get("display_kind") != "hidden":
+        message["api_admission_id"] = row.api_admission_id
+    return message
+
+
 async def session_messages(adapter, request):
     from gateway.platforms.api_server import _coerce_request_bool, _error_response
 
@@ -49,7 +56,7 @@ async def session_messages(adapter, request):
     sid, title, page = result
     return web.json_response({
         "object": "list", "session_id": sid, "thread_id": page.root_id, "thread_title": title,
-        "data": [adapter._message_response(row.as_wire_row()) for row in page.rows],
+        "data": [_public_message(adapter, row) for row in page.rows],
         "pagination": {"limit": limit, "offset": offset, "order": order, "returned": len(page.rows),
                        "total": page.total, "visible_only": visible_only},
     })

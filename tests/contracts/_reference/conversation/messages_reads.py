@@ -101,7 +101,22 @@ class MessageReadsMixin(MessageBase):
             rows = tuple(row for row in rows if transcript_message_visible(row.as_wire_row()))
         page = _page(rows, limit=request.limit, offset=request.offset, latest=request.latest)
         root = self._ids(self._backend.scope, session_id, request.include_lineage)[0]
+        if visible_only:
+            page = [self._api_input(row) for row in page]
         return TranscriptPage(tuple(page), len(rows), SessionId(root))
+
+    def _api_input(self, row):
+        if row.role != "user" or not row.platform_message_id or row.observed:
+            return row
+        entries = self._backend.admissions.match(admission_id=row.platform_message_id, principal_id="api",
+                                                 session_id=str(row.session_id))
+        if not entries or entries[0].generation is None or self._backend.sessions.get(row.session_id).source != "api_server":
+            return row
+        segment = self.read_transcript(row.session_id, TranscriptRead(view=TranscriptView.ALL))
+        duplicate = any(other.id != row.id and other.role == "user" and not other.observed
+                        and other.visibility is not RowVisibility.REWOUND and other.display_kind != "hidden"
+                        and other.platform_message_id == row.platform_message_id for other in segment)
+        return row if duplicate else replace(row, api_admission_id=row.platform_message_id)
 
     def active_message_ids(self, session_id: SessionId) -> tuple[MessageId, ...]:
         scope = self._backend.scope

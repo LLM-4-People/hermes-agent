@@ -106,7 +106,19 @@ def get_transcript_page(holder, sid, request, visible_only):
             ids, total = _segment_page(holder, conn, sid, request, visible_only)
         else:
             ids, total = _lineage_page(holder, conn, segments, request, visible_only)
-        rows = conn.execute("SELECT m.* FROM json_each(?) p JOIN messages m ON m.id = p.value ORDER BY p.key",
+        # Inspect only this page's selected human inputs. The gateway records the canonical
+        # admission as their inbound platform id; other platforms use that column for their own ids.
+        evidence = """, CASE WHEN m.role='user' AND m.platform_message_id IS NOT NULL AND m.observed=0
+                              THEN (SELECT a.admission_id FROM session_admissions a
+                                    JOIN sessions s ON s.id=a.target_session_id
+                                    WHERE a.admission_id=m.platform_message_id AND a.target_session_id=m.session_id
+                                      AND a.principal_id='api' AND a.generation IS NOT NULL AND s.source='api_server'
+                                      AND NOT EXISTS (SELECT 1 FROM messages twin
+                                          WHERE twin.session_id=m.session_id AND twin.platform_message_id=m.platform_message_id
+                                            AND twin.id!=m.id AND twin.role='user' AND twin.observed=0
+                                            AND (twin.active=1 OR twin.compacted=1) AND twin.display_kind IS NOT 'hidden'))
+                         END AS api_admission_id""" if visible_only else ""
+        rows = conn.execute(f"SELECT m.*{evidence} FROM json_each(?) p JOIN messages m ON m.id = p.value ORDER BY p.key",
                             (json.dumps(ids),))
         return [_row_to_message_dict(holder, row, warn_context="transcript page", summary_flag=True)
                 for row in rows], total, segments[0]
