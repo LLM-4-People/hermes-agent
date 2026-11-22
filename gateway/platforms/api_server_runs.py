@@ -334,12 +334,14 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, 
     if status != "waiting_for_approval":
         current.pop("approval", None)
         current.pop("pending_approvals", None)
+    if status not in {"waiting_for_approval", "waiting_for_input"} or not current.get("pending_questions"):
+        current.pop("pending_questions", None)
     self._run_statuses[run_id] = current
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {
-            "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "session_id", "shutdown_requested_at"}))
+            "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "pending_questions", "session_id", "shutdown_requested_at"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -497,6 +499,7 @@ def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, An
             last_event="run.interrupted", updated_at=time.time())
         status.pop("approval", None)
         status.pop("pending_approvals", None)
+        status.pop("pending_questions", None)
         self._run_idempotency_store.update_status(run_id, status)
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
@@ -611,19 +614,23 @@ class _RunLaunch:
         return self.run_id
 
     def put_control(self, event: dict) -> None:
-        """Persist the identity of each pending authority approval before publishing it on SSE."""
-        kind, prompt_id = event["event"], event.get("prompt_id")
+        """Record only prompt IDs and arrival times before publishing the full authenticated SSE."""
+        from gateway.platforms.api_server_authority_runs import control_wait_status
+        family, _, action = event["event"].partition(".")
+        key = {"approval": "pending_approvals", "clarify": "pending_questions"}.get(family)
         current = self.owner._run_statuses.get(self.run_id, {})
-        if (kind in {"approval.request", "approval.settled"} and prompt_id
-                and current.get("status") in {"running", "waiting_for_approval"}):
-            pending = dict(current.get("pending_approvals", {}))
-            if kind == "approval.request":
+        prompt_id = event.get("prompt_id")
+        if (key and prompt_id and action in {"request", "settled"}
+                and current.get("status") in {"running", "waiting_for_approval", "waiting_for_input"}):
+            pending = dict(current.get(key, {}))
+            if action == "request":
                 pending.setdefault(prompt_id, event["timestamp"])
             else:
                 pending.pop(prompt_id, None)
-            if pending != current.get("pending_approvals", {}):
-                self.owner._set_run_status(self.run_id, "waiting_for_approval" if pending else "running",
-                                           pending_approvals=pending, last_event=kind)
+            if pending != current.get(key, {}):
+                updated = {**current, key: pending}
+                status = control_wait_status(updated.get("pending_approvals"), updated.get("pending_questions"))
+                self.owner._set_run_status(self.run_id, status, last_event=event["event"], **{key: pending})
         self.put_event(event)
 
     def put_event(self, event: Optional[dict]) -> None:

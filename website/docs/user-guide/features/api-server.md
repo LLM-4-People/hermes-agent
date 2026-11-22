@@ -684,16 +684,45 @@ attached WebSocket viewers. Respond with the exact current identity:
 {"request_id": "<prompt_id>", "execution_generation": 3, "choice": "once"}
 ```
 
+Render the approval's own `choices` array. MCP trust-gate consent for a write-capable
+tool on an untrusted server uses this approval endpoint with `once` or `deny`.
+
 Canonical controls do not accept identityless or bulk responses. Stale generations,
 foreign prompt IDs, and settled runs return HTTP 409. Existing run authentication
 and hosted-room approval restrictions still apply.
 
 ### POST /v1/runs/\{run_id\}/clarify
 
-Answer a canonical clarification with `request_id`, `execution_generation`, and
-`answer` (a string). This authenticated endpoint and WebSocket `clarify.respond`
-resolve the same waiting tool; answering does not submit another inference turn.
-MCP trust-gate consent — a write-capable tool on a server configured `trust: untrusted` — surfaces the same way: the run emits an `approval.request` event and parks in `waiting_for_approval` until this endpoint resolves it (`once` runs the tool, `deny` blocks it).
+The authenticated endpoint resolves a question in the current run. Check
+`features.run_clarify_response` and `endpoints.run_clarify` on `GET /v1/capabilities`.
+The profile must also enable the `clarify` toolset in `GET /v1/toolsets`, and the
+run's tool selection must allow it. An operator can extend the usual API toolset
+with `platform_toolsets.api_server: [hermes-api-server, clarify]` in the profile config.
+
+On reconnect, read `pending_controls` from `GET /v1/runs/{run_id}`. Each
+`kind: "clarify"` entry contains the question, choices, `multi_select`, an opaque
+`prompt_id` and the `execution_generation`. A run waits in `waiting_for_input`
+while it has open questions. When an approval is also pending, the status is
+`waiting_for_approval` and both controls are visible. Streaming clients can watch
+`clarify.request` and `clarify.settled` and fetch the current snapshot after a disconnect.
+
+```json
+{"request_id": "<prompt_id>", "execution_generation": 3, "answer": "Montréal"}
+```
+
+Send selected or free-form text as a string. For multiple selections, encode the
+selected choices as a JSON array inside that string, for example
+`"answer": "[\"Red (Recommended)\",\"Green\"]"`. An empty answer skips the current
+question. A model tool call can ask up to five questions. The API presents them
+in order, with a new prompt ID for each. Refresh pending controls after each
+response. A stale generation or a previously answered prompt returns HTTP 409.
+While the run is waiting, use `/clarify` to answer or `/stop` to cancel it.
+The running-only `/steer` endpoint returns HTTP 409 until the question is settled.
+The WebSocket `clarify.respond` command resolves the same waiting tool.
+
+For keyed runs, the scoped idempotency ledger records each pending question's
+opaque ID and its arrival time in `pending_questions`. It clears each entry on
+settlement. Question text, options and answers are excluded from those hints.
 
 ## Jobs API (background scheduled work)
 

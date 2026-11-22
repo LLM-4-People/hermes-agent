@@ -65,6 +65,7 @@ _CAPABILITY_ENDPOINTS = (
     ("run_status", ("GET", "/v1/runs/{run_id}")),
     ("run_events", ("GET", "/v1/runs/{run_id}/events")),
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
+    ("run_clarify", ("POST", "/v1/runs/{run_id}/clarify", "run_clarify_response")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
     ("run_unknown_resolution", ("POST", "/v1/runs/{run_id}/resolve-unknown", "run_unknown_resolution")),
     ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
@@ -1211,9 +1212,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """Count structured runs that still have executable work."""
         # "stopping" is not terminal: executor work continues until the agent notices.
         return sum(
-            1
-            for status in self._run_statuses.values()
-            if status.get("status") in {"queued", "running", "waiting_for_approval", "stopping"}
+            1 for status in self._run_statuses.values()
+            if status.get("status") in {"queued", "running", "waiting_for_approval", "waiting_for_input", "stopping"}
         )
 
     @staticmethod
@@ -2356,13 +2356,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_capabilities(self, request: web.Request) -> web.Response:
         """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
-        runner = getattr(self, "gateway_runner", None)
+        from gateway.session_authorities import active_authority
+        canonical = active_authority(self.gateway_runner) is not None
         features = {
             "chat_completions": True, "chat_completions_streaming": True,
             "responses_api": True, "responses_streaming": True, "run_submission": True,
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
-            **_STATIC_FEATURE_FLAGS,
-            "run_unknown_resolution": getattr(runner, "session_authority", None) is not None,
+            **_STATIC_FEATURE_FLAGS, "run_unknown_resolution": canonical, "run_clarify_response": canonical,
             "cors": bool(self._cors_origins)}
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",

@@ -72,6 +72,13 @@ def canonical_run_usage(usage):
     return usage
 
 
+def control_wait_status(approvals, questions):
+    """Approvals take precedence while both kinds of human input are pending."""
+    if approvals:
+        return 'waiting_for_approval'
+    return 'waiting_for_input' if questions else 'running'
+
+
 def run_projection(adapter, run_id):
     owned = run_admission(adapter, run_id)
     if owned is None:
@@ -99,8 +106,10 @@ def run_projection(adapter, run_id):
     if live is not None and row['status'] == 'started':
         progress = live.event_stream.progress_for(row['generation'])
         pending = list(live.controls.snapshot(row['target_session_id'], row['generation']))
-        if any(prompt.get('kind') == 'approval' for prompt in pending):
-            status = 'waiting_for_approval'  # the documented run state main's run store reports
+        kinds = {prompt['kind'] for prompt in pending}
+        status = control_wait_status('approval' in kinds, 'clarify' in kinds)
+    if row['status'] == 'started' and run_id in adapter._stopping_run_ids:
+        status, pending = 'stopping', []
     if status in {'failed', 'cancelled'}:
         from gateway.platforms.api_server_runs import _terminal_diagnostics
         progress.update(_terminal_diagnostics(status, result))
@@ -133,7 +142,8 @@ async def respond_run(adapter, run_id, body, *, kind):
     field = 'choice' if kind == 'approval' else 'answer'
     if set(body) != {'request_id', 'execution_generation', field}:
         raise AuthorityRefusal('invalid_params')
-    if row['status'] != 'started' or type(generation) is not int or generation != row['generation']:
+    if (row['status'] != 'started' or run_id in adapter._stopping_run_ids
+            or type(generation) is not int or generation != row['generation']):
         raise AuthorityRefusal('stale_generation')
     ref = SessionRef(authority.profile_id, row['target_session_id'])
     actor = SessionActor('api', authority.profile_id,
@@ -173,6 +183,7 @@ async def stop_run(adapter, run_id):
     if row['status'] == 'started':
         await authority.interrupt(actor, ref, row['generation'])
         adapter._stopping_run_ids.add(run_id)
+        adapter._set_run_status(run_id, 'stopping', last_event='run.stopping')
         return {'run_id': run_id, 'status': 'stopping', 'admission_id': row['admission_id']}
     elif row['status'] == 'unknown':
         raise AuthorityRefusal('unknown_execution')
