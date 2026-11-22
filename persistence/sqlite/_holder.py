@@ -381,6 +381,9 @@ class StoreHolder:
                 if not _close_time_checkpoint_configurable():
                     self._retire_connection = _prepare_connection_retirement()
                 self._open_writer()
+            # A read-only profile may predate the runtime ledger; opening it never migrates.
+            self.has_session_admissions = not read_only or self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_admissions'").fetchone() is not None
             self._record_db_file_identity()
             initialization_complete = True
         except Exception as exc:

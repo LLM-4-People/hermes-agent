@@ -117,7 +117,7 @@ def get_transcript_page(holder, sid, request, visible_only):
                                           WHERE twin.session_id=m.session_id AND twin.platform_message_id=m.platform_message_id
                                             AND twin.id!=m.id AND twin.role='user' AND twin.observed=0
                                             AND (twin.active=1 OR twin.compacted=1) AND twin.display_kind IS NOT 'hidden'))
-                         END AS api_admission_id""" if visible_only else ""
+                         END AS api_admission_id""" if visible_only and holder.has_session_admissions else ""
         rows = conn.execute(f"SELECT m.*{evidence} FROM json_each(?) p JOIN messages m ON m.id = p.value ORDER BY p.key",
                             (json.dumps(ids),))
         return [_row_to_message_dict(holder, row, warn_context="transcript page", summary_flag=True)

@@ -51,3 +51,27 @@ async def test_visible_input_admission_requires_matching_session_and_origin(api,
         assert all("api_admission_id" not in row for row in raw)
         foreign = await read(f"/api/sessions/{local}/messages", {"visible_only": "true"})
         assert "api_admission_id" not in foreign[0]
+
+
+def test_read_only_profile_from_before_the_admission_ledger(tmp_path):
+    import sqlite3
+    from contextlib import closing
+    from persistence.conversation.messages import TranscriptRead
+    from persistence.sqlite._holder import StoreHolder
+    from persistence.sqlite.conversation._store.messages import append_messages_batch
+    from persistence.sqlite.conversation._store.sessions import create_session
+    from persistence.sqlite.conversation._store.transcript_pages import get_transcript_page
+
+    path = tmp_path / "legacy.db"
+    with closing(StoreHolder(path)) as writer:
+        create_session(writer, "thread", source="api_server")
+        append_messages_batch(writer, "thread", [{"role": "user", "content": "Historic message."}])
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("DROP TABLE session_admissions")
+        conn.commit()
+    with closing(StoreHolder(path, read_only=True)) as reader:
+        rows, total, _ = get_transcript_page(reader, "thread", TranscriptRead(), visible_only=True)
+        assert total == 1 and rows[0]["content"] == "Historic message."
+        assert "api_admission_id" not in rows[0]
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='session_admissions'").fetchone() is None
