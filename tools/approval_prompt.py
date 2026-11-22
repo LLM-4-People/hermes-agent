@@ -12,6 +12,7 @@ import sys
 import threading
 from tools import approval_context as _ctx, approval_gateway_wait as _gw
 from tools.approval_human_wait import activity_heartbeat, human_wait_window
+from tools.approval_preview import attach_approval_preview, build_approval_preview, build_diff_preview, infer_language
 from tools.interrupt import is_interrupted
 
 logger = logging.getLogger("tools.approval")

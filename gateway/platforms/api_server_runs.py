@@ -6,12 +6,14 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -148,13 +150,73 @@ def _call_id(kw: dict[str, Any]) -> dict[str, Any]:
     return {"tool_call_id": kw["tool_call_id"]} if kw.get("tool_call_id") else {}
 
 
+def _duration_ms(raw: Any) -> Optional[int]:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    val = float(raw)
+    return round(val * 1000.0) if math.isfinite(val) and val >= 0.0 else None
+
+
 _FIXED_EVENT_FIELDS = {
     "tool.started": lambda tool, preview, kw: {"tool": tool, "preview": preview, **_call_id(kw)},
     "tool.completed": lambda tool, preview, kw: {
-        "tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False),
+        "tool": tool, "duration": round(kw.get("duration", 0), 3),
+        "duration_ms": _duration_ms(kw.get("duration")),
+        "error": bool(kw.get("is_error", False)),
+        "is_error": bool(kw.get("is_error", False)),
         **_call_id(kw)},
     "reasoning.available": lambda tool, preview, kw: {"text": preview or ""}}
 _TOOL_COMPLETED_PREVIEW_MAX_CHARS = 500
+_STREAM_STANDARD_CHANNELS = frozenset({"standard"})
+_STREAM_FULL_CHANNELS = frozenset({"standard", "reasoning", "subagent_tools", "metrics"})
+_DETAIL_FLAG_CHANNELS = (
+    ("include_reasoning", "reasoning"),
+    ("include_subagent_tools", "subagent_tools"),
+    ("include_metrics", "metrics"),
+)
+_QUERY_TRUE = frozenset({"1", "true", "yes"})
+_QUERY_FALSE = frozenset({"0", "false", "no"})
+
+
+def _parse_stream_channels(
+    source: Any, *, base: Optional[frozenset[str]] = None, is_query: bool = False,
+) -> tuple[frozenset[str], Optional[str]]:
+    """Resolve SSE detail channels from request body or query params; returns ``(channels, error)``."""
+    channels = set(base if base is not None else _STREAM_STANDARD_CHANNELS)
+    if not isinstance(source, Mapping) or not source:
+        return frozenset(channels), None
+
+    raw_detail = source.get("detail")
+    if raw_detail is not None:
+        if not isinstance(raw_detail, str):
+            return frozenset(), "'detail' must be 'standard' or 'full'"
+        mode = raw_detail.strip().lower()
+        if mode in ("", "standard"):
+            channels = set(_STREAM_STANDARD_CHANNELS)
+        elif mode == "full":
+            channels = set(_STREAM_FULL_CHANNELS)
+        else:
+            return frozenset(), "'detail' must be 'standard' or 'full'"
+
+    for key, channel in _DETAIL_FLAG_CHANNELS:
+        if key not in source:
+            continue
+        raw = source.get(key)
+        if is_query:
+            if not isinstance(raw, str) or raw.strip().lower() not in (_QUERY_TRUE | _QUERY_FALSE):
+                return frozenset(), f"'{key}' must be a boolean ('true' or 'false')"
+            enabled = raw.strip().lower() in _QUERY_TRUE
+        else:
+            if not isinstance(raw, bool):
+                return frozenset(), f"'{key}' must be a boolean"
+            enabled = raw
+        if enabled:
+            channels.add(channel)
+        else:
+            channels.discard(channel)
+
+    channels.add("standard")
+    return frozenset(channels), None
 
 
 def _tool_completed_preview(result: Any, redact_sensitive_text: Callable[..., str]) -> str:
@@ -176,25 +238,52 @@ class _RunStream:
     """Sequence and retain one run's events while fanning out to SSE clients."""
 
     BACKLOG_LIMIT = 1000
+    FULL_BACKLOG_LIMIT = 4000
     SUBSCRIBER_QUEUE_LIMIT = 256
 
-    def __init__(self) -> None:
+    def __init__(self, *, default_channels: Optional[frozenset[str]] = None) -> None:
         self.subscribers: set[asyncio.Queue] = set()
+        self._subscriber_meta: dict[asyncio.Queue, tuple[frozenset[str], bool]] = {}
+        self.default_channels: frozenset[str] = (
+            default_channels if default_channels is not None else _STREAM_STANDARD_CHANNELS
+        )
         self.backlog: deque[tuple[int, Optional[dict[str, Any]]]] = deque(
             maxlen=self.BACKLOG_LIMIT
         )
+        self.full_backlog: deque[tuple[int, str, Optional[dict[str, Any]]]] = deque(
+            maxlen=self.FULL_BACKLOG_LIMIT
+        )
         self.next_seq = 0
+        self._full_next_seq = 0
+        self._full_evicted_before = -1
         self.terminal = False
 
-    def put_nowait(self, event: Optional[dict[str, Any]]) -> None:
+    def put_nowait(self, event: Optional[dict[str, Any]], *, channel: str = "standard") -> None:
         if self.terminal:
             return
-        seq = self.next_seq
-        self.next_seq += 1
-        self.backlog.append((seq, event))
+        is_standard = event is None or channel == "standard"
+        std_seq: Optional[int] = None
+        if is_standard:
+            std_seq = self.next_seq
+            self.next_seq += 1
+            self.backlog.append((std_seq, event))
+
+        full_seq = self._full_next_seq
+        self._full_next_seq += 1
+        if len(self.full_backlog) == self.full_backlog.maxlen:
+            self._full_evicted_before = self.full_backlog[0][0]
+        self.full_backlog.append((full_seq, channel, event))
+
         if event is None:
             self.terminal = True
+
         for queue in list(self.subscribers):
+            channels, use_full = self._subscriber_meta.get(queue, (_STREAM_STANDARD_CHANNELS, False))
+            if event is not None and channel not in channels:
+                continue
+            seq = full_seq if use_full else std_seq
+            if seq is None:
+                continue
             try:
                 queue.put_nowait((seq, event))
             except asyncio.QueueFull:
@@ -204,16 +293,34 @@ class _RunStream:
                 queue.put_nowait((seq, _RUN_STREAM_SUBSCRIBER_OVERFLOW))
 
     def attach(
-        self, last_seq: int = -1
+        self, last_seq: int = -1, *, channels: Optional[frozenset[str]] = None,
     ) -> tuple[asyncio.Queue, list[tuple[int, Optional[dict[str, Any]]]]]:
-        replay = [(seq, event) for seq, event in self.backlog if seq > last_seq]
+        active = self.default_channels if channels is None else channels
+        use_full = active != _STREAM_STANDARD_CHANNELS
+        if use_full:
+            replay = [
+                (seq, event)
+                for seq, ch, event in self.full_backlog
+                if seq > last_seq and (event is None or ch in active)
+            ]
+        else:
+            replay = [(seq, event) for seq, event in self.backlog if seq > last_seq]
         # Headroom for events produced while the replay is still being written.
         queue: asyncio.Queue = asyncio.Queue(maxsize=self.SUBSCRIBER_QUEUE_LIMIT + len(replay))
         self.subscribers.add(queue)
+        self._subscriber_meta[queue] = (active, use_full)
         return queue, replay
+
+    def is_replay_truncated(
+        self, last_seq: int, replay: list[tuple[int, Optional[dict[str, Any]]]], *, use_full: bool = False,
+    ) -> bool:
+        if use_full:
+            return self._full_evicted_before > last_seq
+        return bool(replay and replay[0][0] > last_seq + 1)
 
     def detach(self, queue: asyncio.Queue) -> None:
         self.subscribers.discard(queue)
+        self._subscriber_meta.pop(queue, None)
 
 
 def _remember_room_retention(request: web.Request, claims: dict[str, Any]) -> None:
@@ -396,25 +503,42 @@ def _mark_shutdown_requested(self) -> int:
     return marked
 
 
+def _enqueue_stream_event(q: Any, event: Optional[dict[str, Any]], *, channel: str = "standard") -> None:
+    """Enqueue into ``_RunStream`` (channel-aware) or a plain ``asyncio.Queue`` test double."""
+    if isinstance(q, _RunStream):
+        q.put_nowait(event, channel=channel)
+    elif event is None or channel == "standard":
+        q.put_nowait(event)
+
+
 def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop, *, _api_server):
     """Return a callback that pushes structured events to the run SSE queue."""
+    from gateway.run_turn_progress import build_subagent_tool_event, format_tool_args_preview
+
     redact_sensitive_text = _api_server.redact_sensitive_text
 
-    def _push(event: dict[str, Any]) -> None:
-        self._set_run_status(
-            run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
+    def _push(event: dict[str, Any], *, channel: str = "standard") -> None:
+        if channel == "standard":
+            self._set_run_status(
+                run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
         q = self._run_streams.get(run_id)
         if q is not None:
             with suppress(Exception):
-                loop.call_soon_threadsafe(q.put_nowait, event)
+                loop.call_soon_threadsafe(functools.partial(_enqueue_stream_event, q, event, channel=channel))
 
     def _callback(event_type: str, tool_name: str | None = None, preview: str | None = None, args=None, **kwargs):
-        # _thinking / subagent.tool / subagent_progress are deliberately dropped (UI noise);
-        # lifecycle boundaries must land so clients can observe delegate_task failures.
+        # _thinking / subagent_progress stay off the wire; subagent tool lifecycle events ride the
+        # opt-in ``subagent_tools`` channel (?detail=full / include_subagent_tools).
         fields = _FIXED_EVENT_FIELDS.get(event_type)
         if fields is not None:
             event_fields = fields(tool_name, preview, kwargs)
-            if event_type == "tool.completed":
+            if event_type == "tool.started":
+                if isinstance(event_fields.get("preview"), str):
+                    event_fields["preview"] = redact_sensitive_text(event_fields["preview"], force=True)
+                args_preview = format_tool_args_preview(args, redact_sensitive_text=redact_sensitive_text)
+                if args_preview:
+                    event_fields["args_preview"] = args_preview
+            elif event_type == "tool.completed":
                 event_fields["preview"] = _tool_completed_preview(
                     kwargs.get("result"), redact_sensitive_text)
             _push(_run_event(run_id, event_type, **event_fields))
@@ -439,6 +563,13 @@ def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop,
                     redact = key in _SUBAGENT_TEXT_KEYS and isinstance(value, str)
                     event[key] = redact_sensitive_text(value, force=True) if redact else value
             _push(event)
+        elif event_type in {"subagent.tool", "subagent.tool.started", "subagent.tool.completed"}:
+            built = build_subagent_tool_event(
+                event_type, tool_name, preview, args, kwargs, redact_sensitive_text=redact_sensitive_text,
+            )
+            if built is not None:
+                wire_name, sub_fields = built
+                _push(_run_event(run_id, wire_name, **sub_fields), channel="subagent_tools")
 
     return _callback
 
@@ -667,10 +798,10 @@ class _RunLaunch:
                 self.owner._set_run_status(self.run_id, status, last_event=event["event"], **{key: pending})
         self.put_event(event)
 
-    def put_event(self, event: Optional[dict]) -> None:
+    def put_event(self, event: Optional[dict], *, channel: str = "standard") -> None:
         """Enqueue only while this run still owns live transport state."""
         if self.owner._run_streams.get(self.run_id) is self.queue:
-            self.queue.put_nowait(event)
+            _enqueue_stream_event(self.queue, event, channel=channel)
 
 
 def _forget_run(self, run_id: str, *tables) -> None:
@@ -784,6 +915,19 @@ def _run_idempotency_identity(self, request, body, gateway_session_key, idempote
         {"body": body, "gateway_session_key": gateway_session_key or ""},
         sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode()).hexdigest()
+
+
+def _parse_run_inputs(body, _openai_error) -> tuple:
+    """Validate ``input``, ``run_instructions``, and SSE detail flags -> ``(user_message, channels, error)``."""
+    user_message, input_err = _run_user_message(body, _openai_error)
+    if input_err is not None:
+        return None, _STREAM_STANDARD_CHANNELS, input_err
+    default_channels, detail_err = _parse_stream_channels(body, is_query=False)
+    if detail_err is not None:
+        return None, _STREAM_STANDARD_CHANNELS, _json_error(
+            _openai_error, detail_err, code="invalid_detail_mode", status=400,
+        )
+    return user_message, default_channels, None
 
 
 def _run_user_message(body, _openai_error) -> tuple:
@@ -905,7 +1049,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             _openai_error, "Idempotency-Key must be 1-255 visible ASCII characters",
             code="invalid_idempotency_key", status=400)
     raw_input = body.get("input")
-    user_message, input_err = _run_user_message(body, _openai_error)
+    user_message, default_channels, input_err = _parse_run_inputs(body, _openai_error)
     if input_err is not None:
         return input_err
     idempotency_scope, idempotency_fingerprint = _run_idempotency_identity(
@@ -969,7 +1113,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     session_history_delivery = not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
-    q = self._run_streams[run_id] = _RunStream()
+    q = self._run_streams[run_id] = _RunStream(default_channels=default_channels)
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
@@ -1030,14 +1174,12 @@ def _retarget_to_delivered_chat(self, launch: _RunLaunch, admitted) -> None:
         self._set_run_status(launch.run_id, "queued", session_id=delivered)
 
 
-def _run_usage(agent) -> dict[str, int]:
-    """Terminal ``usage`` payload from the agent's session counters; a missing or non-numeric
-    counter (test doubles, agents without cache accounting) reads as ``0``."""
-    usage = {}
-    for key, attr in _USAGE_FIELDS:
-        value = getattr(agent, attr, 0)
-        usage[key] = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
-    return usage
+def _run_usage(
+    agent, *, duration_s: Optional[float] = None, first_token_s: Optional[float] = None,
+) -> dict[str, Any]:
+    """Terminal per-run ``usage`` payload built from the SSoT telemetry helper."""
+    from agent.turn_usage import build_run_usage_metrics
+    return build_run_usage_metrics(agent, duration_s=duration_s, first_token_s=first_token_s)
 
 
 def _served_runtime(agent) -> dict[str, str]:
@@ -1207,14 +1349,32 @@ async def _execute_run_via_live_owner(self, run: _RunLaunch, home, record: dict[
 async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
     """Drive one admitted run, publish its terminal event/status, release live state."""
     _redact_api_error_text = _api_server._redact_api_error_text
+    redact_sensitive_text = _api_server.redact_sensitive_text
     run_id, loop = run.run_id, asyncio.get_running_loop()
     _run_started_at = time.perf_counter()
+    _first_token_at: list[Optional[float]] = [None]
+
+    def _note_first_token() -> None:
+        if _first_token_at[0] is None:
+            _first_token_at[0] = time.perf_counter()
 
     def _text_cb(delta: Optional[str]) -> None:
         if delta is None or run_id not in self._run_streams:
             return
+        if delta:
+            _note_first_token()
         with suppress(Exception):
             loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
+
+    def _reasoning_cb(text: Optional[str]) -> None:
+        if not isinstance(text, str) or not text or run_id not in self._run_streams:
+            return
+        _note_first_token()
+        redacted = redact_sensitive_text(text)
+        with suppress(Exception):
+            loop.call_soon_threadsafe(
+                functools.partial(run.put_event, _run_event(run_id, "reasoning.delta", text=redacted), channel="reasoning")
+            )
 
     def _interim_cb(text: str, *, already_streamed: bool = False) -> None:
         # Mid-turn assistant commentary (Codex ``phase="commentary"``, text beside tool calls),
@@ -1329,12 +1489,13 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             def _tool_complete(call_id, name, args, result):
                 from agent.display import _detect_tool_failure
                 is_error, _ = _detect_tool_failure(name, result)
-                tool_cb("tool.completed", name, None, args, tool_call_id=call_id, is_error=bool(is_error))
+                tool_cb("tool.completed", name, None, args, tool_call_id=call_id, is_error=bool(is_error), result=result)
 
             with observe_api_controls(run.admission, _control_cb):
                 result, usage = await observe_api_turn(
-                    run.admission, stream_delta_callback=_text_cb,
+                    run.admission, stream_delta_callback=_text_cb, reasoning_callback=_reasoning_cb,
                     tool_start_callback=_tool_start, tool_complete_callback=_tool_complete,
+                    subagent_progress_callback=tool_cb,
                     run_id=run_id, ui_patch_callback=_emit_ui, delivery_callback=_emit_delivery)
             from gateway.platforms.api_server_authority_runs import canonical_run_usage
             usage = canonical_run_usage(usage)
@@ -1347,11 +1508,12 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             with self._profile_scope(run.request_profile), await prepare_run_tool_scope(run.tool_options):
                 run_context = contextvars.copy_context()
                 agent = self._create_agent(
-                    stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                    stream_delta_callback=_text_cb, reasoning_callback=_reasoning_cb,
+                    tool_progress_callback=self._make_run_event_callback(run_id, loop),
                     interim_assistant_callback=_interim_cb, **run.agent_kwargs)
             self._active_run_agents[run_id] = agent
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
-            result, usage, served_runtime = await _submit_api_worker(
+            result, _, served_runtime = await _submit_api_worker(
                 loop,
                 lambda: run_context.run(
                     _run_agent_sync,
@@ -1364,6 +1526,11 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                     emit_delivery=_emit_delivery,
                 ),
             )
+            run_elapsed = max(0.0, time.perf_counter() - _run_started_at)
+            first_token_s = (
+                max(0.0, _first_token_at[0] - _run_started_at) if _first_token_at[0] is not None else None
+            )
+            usage = _run_usage(agent, duration_s=run_elapsed, first_token_s=first_token_s)
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):
@@ -1384,6 +1551,10 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 runtime=served_runtime, requested_runtime=requested if any(requested.values()) else None,
                 route_source=("model_routes" if run.agent_kwargs.get("route")
                               else "raw_request" if any(requested.values()) else "global"))
+            if isinstance(usage, dict) and usage and run_id not in self._shutdown_interrupted_run_ids:
+                with suppress(Exception):
+                    metrics_event = _run_event(run_id, "turn.metrics", **usage, usage=dict(usage))
+                    loop.call_soon(functools.partial(run.put_event, metrics_event, channel="metrics"))
             suggestions = self._run_statuses.get(run_id, {}).get("suggested_actions")
             _finish(
                 status,
@@ -1512,8 +1683,11 @@ def _standalone_approval_status(self, request, run_id, status, *, project):
             permitted = {"once", "deny"} if self._check_run_auth(request, permission="approve") is None else set()
         for data in pending:
             # Native entries also carry private tool context. Publish only client-facing prompt fields.
-            prompt = project(run_id, {k: data[k] for k in ("request_id", "command", "description", "allow_session",
-                                                          "allow_permanent", "smart_denied") if k in data})
+            # ``edit`` is consumed by ``project`` to build redacted ``preview.diff`` and then dropped.
+            prompt = project(run_id, {k: data[k] for k in (
+                "request_id", "command", "description", "allow_session",
+                "allow_permanent", "smart_denied", "pattern_key", "preview", "edit",
+            ) if k in data})
             # This snapshot is not a new request event. Only retain a known publication time.
             prompt.pop("timestamp")
             if previous.get("request_id") == prompt["request_id"] and "timestamp" in previous:
@@ -1550,12 +1724,18 @@ async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.
     else:
         return _run_not_found(_api_server._openai_error, run_id)
     stream = self._run_streams[run_id]
+    channels, detail_err = _parse_stream_channels(
+        request.query, base=stream.default_channels, is_query=True,
+    )
+    if detail_err is not None:
+        return _json_error(_api_server._openai_error, detail_err, code="invalid_detail_mode", status=400)
     raw_last_seq = request.headers.get("Last-Event-ID") or request.query.get("last_seq")
     try:
         last_seq = max(-1, int(str(raw_last_seq).strip())) if raw_last_seq is not None else -1
     except (TypeError, ValueError):
         last_seq = -1
-    q, replay = stream.attach(last_seq)
+    use_full = channels != _STREAM_STANDARD_CHANNELS
+    q, replay = stream.attach(last_seq, channels=channels)
     response = web.StreamResponse(status=200, headers=self._sse_headers(request))
 
     async def _write(data: bytes) -> None:
@@ -1581,11 +1761,11 @@ async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.
         # event (e.g. before `approval.request`) sees no bytes and fetch()/EventSource never
         # resolve. A comment frame is ignored by every conforming SSE consumer.
         await _write(b": open\n\n")
-        if replay and replay[0][0] > last_seq + 1:
+        if stream.is_replay_truncated(last_seq, replay, use_full=use_full):
             truncation = _run_event(
                 run_id,
                 "replay.truncated",
-                oldest_retained_seq=replay[0][0],
+                oldest_retained_seq=replay[0][0] if replay else stream._full_evicted_before + 1,
             )
             if raw_last_seq is not None:
                 truncation["requested_seq"] = last_seq

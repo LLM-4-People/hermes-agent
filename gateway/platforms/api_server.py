@@ -51,6 +51,7 @@ _STATIC_FEATURE_FLAGS = {
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
     "reasoning_streaming": True, "run_toolset_selection": True, "run_tool_exclusions": True, "run_scoped_instructions": True,
+    "run_metrics_v2": True, "structured_approval_diffs": True, "live_coding_stream": True, "model_capability_metadata": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
@@ -88,12 +89,11 @@ def _approval_event_choices(*, smart_denied: bool, allow_session: bool, allow_pe
 
 
 def _approval_request_event(run_id: str, approval_data: Optional[dict[str, Any]], **fields: Any) -> dict[str, Any]:
-    """The ``approval.request`` payload every approval surface emits (runs bridge, session stream,
-    chat completions): the flagged command redacted before egress (#48456), the ``_run_event``
-    envelope, and the ``choices`` the client may send back to ``POST /v1/runs/{id}/approval``."""
+    """Redacted ``approval.request`` payload with structured ``preview`` and valid ``choices``."""
     from gateway.platforms.api_server_runs import _run_event
     from gateway.run import _redact_approval_command
-    event = dict(approval_data or {})  # consent prompts (MCP, vault) carry server/model text in the description
+    from tools.approval_prompt import attach_approval_preview
+    event = attach_approval_preview(dict(approval_data or {}))
     event.update({k: _redact_approval_command(event[k]) for k in ("command", "description") if k in event})
     event.update(_run_event(run_id, "approval.request", **fields, choices=_approval_event_choices(
         smart_denied=bool(event.get("smart_denied")),
