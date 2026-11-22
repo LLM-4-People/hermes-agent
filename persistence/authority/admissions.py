@@ -191,6 +191,7 @@ class ApiTargetClaim:
 
     settings: Mapping[str, Any]
     client_key: bool
+    inherit_api_prompt: bool = False
 
 
 @dataclass(frozen=True, slots=True)
