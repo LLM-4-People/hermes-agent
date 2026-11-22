@@ -51,6 +51,7 @@ scripts/run_tests.sh \
   tests/gateway/test_hygiene_provider_identity.py \
   tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_signal.py \
+  tests/gateway/test_signal_format.py \
   tests/gateway/test_signal_inbound_attachments.py \
   tests/gateway/test_signal_rate_limit.py \
   tests/gateway/test_native_producer_owner_matrix.py \

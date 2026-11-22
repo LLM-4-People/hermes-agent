@@ -1,8 +1,8 @@
 """Tests for Signal markdown_to_signal() formatting.
 
 Covers the markdown-to-bodyRanges conversion pipeline: bold, italic,
-strikethrough, monospace, code blocks, headings, and — critically — the
-false-positive regressions that caused spurious italics in production.
+strikethrough, monospace, code blocks, headings, links, and — critically —
+the false-positive regressions that caused spurious italics in production.
 """
 
 import pytest
@@ -185,12 +185,50 @@ class TestMarkdownStripPatch:
         assert "line3" in text
         assert "```" not in text
 
-    def test_links_preserved(self):
-        """[text](url) links are kept as-is — Signal auto-linkifies."""
+    def test_markdown_link_becomes_label_and_bare_url(self):
+        """Signal has no link text range; the raw Markdown must not reach the client."""
         md = "Check [this link](https://example.com) for details"
-        text, _styles = _m2s(md)
-        # Links should pass through — either as markdown or just preserved
-        assert "https://example.com" in text
+        text, styles = _m2s(md)
+        assert text == "Check this link (https://example.com) for details"
+        assert styles == []
+
+    def test_bare_url_unchanged(self):
+        text, _styles = _m2s("Voir https://example.com/a-b pour les détails")
+        assert text == "Voir https://example.com/a-b pour les détails"
+
+    def test_domain_label_is_not_repeated(self):
+        text, _styles = _m2s("[marchedelagare.com](https://www.marchedelagare.com/)")
+        assert text == "https://www.marchedelagare.com/"
+
+    def test_multiple_links(self):
+        text, _styles = _m2s("[A](https://a.example/x) et [B](https://b.example/y).")
+        assert text == "A (https://a.example/x) et B (https://b.example/y)."
+
+    def test_non_http_link_keeps_label_only(self):
+        text, _styles = _m2s("Écris à [Marie](mailto:marie@example.com).")
+        assert text == "Écris à Marie."
+
+    def test_link_inside_inline_code_is_untouched(self):
+        text, styles = _m2s("Code: `[pas un lien](https://example.com)` ici.")
+        assert text == "Code: [pas un lien](https://example.com) ici."
+        assert len(styles) == 1 and styles[0].endswith(":MONOSPACE")
+
+    def test_link_inside_fenced_code_is_untouched(self):
+        md = "```\n[doc](https://example.com)\n```"
+        text, styles = _m2s(md)
+        assert text == "[doc](https://example.com)"
+        assert len(styles) == 1 and styles[0].endswith(":MONOSPACE")
+
+    def test_image_syntax_is_not_rewritten(self):
+        text, _styles = _m2s("![alt](https://example.com/i.png)")
+        assert text == "![alt](https://example.com/i.png)"
+
+    def test_link_label_keeps_inline_style(self):
+        text, styles = _m2s("[**important**](https://example.com)")
+        assert text == "important (https://example.com)"
+        assert len(styles) == 1
+        start, length, kind = styles[0].split(":")
+        assert kind == "BOLD" and text[int(start):int(start) + int(length)] == "important"
 
     def test_heading_h1(self):
         """# H1 becomes bold text."""

@@ -26,6 +26,11 @@ def _split_fenced(source: str) -> list[str]:
         last = match.end()
     return parts + [source[last:]]
 _HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+# Signal has no hyperlink text range: bodyRanges styles only bold/italic/strike/mono, and the client
+# auto-links bare URLs. A Markdown link therefore becomes ``label (url)`` so the label stays readable
+# and the target stays tappable.
+_HTTP_TARGET_RE = re.compile(r"https?://", re.IGNORECASE)
+_INLINE_CODE_SPAN_RE = re.compile(r"(`[^`\n]*`)")
 _INLINE_PATTERNS = [
     # First match wins and spans never nest. Inline code goes first so its text stays verbatim; an
     # enclosing pair then loses ("**run `x`**" keeps its asterisks, where main kept the backticks).
@@ -40,6 +45,80 @@ _INLINE_PATTERNS = [
 def _utf16_len(s: str) -> int:
     """Length of *s* in UTF-16 code units."""
     return len(s.encode("utf-16-le")) // 2
+
+
+def _display_url(url: str) -> str:
+    """Comparable form: scheme, ``www.`` and a trailing slash do not make two URLs different."""
+    value = url.strip().lower()
+    for prefix in ("https://", "http://", "www."):
+        value = value.removeprefix(prefix)
+    return value.rstrip("/")
+
+
+def _link_replacement(label: str, target: str) -> str:
+    label, target = label.strip(), target.strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1].strip()
+    elif target:
+        target = target.split()[0]  # drop an optional Markdown title
+    if not _HTTP_TARGET_RE.match(target):
+        return label
+    if _display_url(label) == _display_url(target):
+        return target
+    return f"{label} ({target})"
+
+
+def _unwrap_links_inline(text: str) -> str:
+    """Rewrite ``[label](url)``, matching the target's parentheses by nesting depth."""
+    out: list[str] = []
+    pos = 0
+    while (start := text.find("[", pos)) != -1:
+        label_end = text.find("]", start + 1)
+        if (
+            label_end == -1
+            or label_end + 1 >= len(text)
+            or text[label_end + 1] != "("
+            or (start > 0 and text[start - 1] == "!")  # image syntax is not a link
+        ):
+            out.append(text[pos : start + 1])
+            pos = start + 1
+            continue
+        depth, end = 0, label_end + 1
+        while end < len(text):
+            if text[end] == "(":
+                depth += 1
+            elif text[end] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            end += 1
+        if end >= len(text):  # unbalanced: leave the rest untouched
+            out.append(text[pos:])
+            break
+        out.append(text[pos:start])
+        out.append(_link_replacement(text[start + 1 : label_end], text[label_end + 2 : end]))
+        pos = end + 1
+    else:
+        out.append(text[pos:])
+    return "".join(out)
+
+
+def _unwrap_links(source: str) -> str:
+    """Rewrite ``[label](https://url)`` outside fenced and inline code.
+
+    Signal renders raw Markdown link syntax literally; only a bare http(s) URL becomes a tap target.
+    Non-http targets (``mailto:``, relative paths) are not auto-linked, so they keep the label only.
+    """
+    parts = _split_fenced(source)
+    for idx, part in enumerate(parts):
+        if idx % 2:  # fenced block: link-looking text is code
+            continue
+        pieces = _INLINE_CODE_SPAN_RE.split(part)
+        parts[idx] = "".join(
+            piece if pos % 2 else _unwrap_links_inline(piece)
+            for pos, piece in enumerate(pieces)
+        )
+    return "".join(parts)
 
 
 def _normalize_bullet_markers(source: str) -> str:
@@ -81,7 +160,9 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
     """Convert markdown to plain text + Signal textStyles list. Signal uses ``bodyRanges`` (signal-cli
     ``textStyle`` / ``textStyles`` params) as ``start:length:STYLE`` with positions in UTF-16 code units.
     Supported styles: BOLD, ITALIC, STRIKETHROUGH, MONOSPACE."""
-    text = _fence_tables(_normalize_bullet_markers(re.sub(r"\n{3,}", "\n\n", text).strip()))
+    text = _fence_tables(
+        _normalize_bullet_markers(_unwrap_links(re.sub(r"\n{3,}", "\n\n", text).strip()))
+    )
     styles: list[tuple[int, int, str]] = []
     code_blocks: list[tuple[int, int]] = []
     # One pass over the original text: code a longer fence kept may hold ``` runs, never re-parsed.
