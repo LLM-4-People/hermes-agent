@@ -475,7 +475,10 @@ def _catalog_legacy_candidates(roots, aliases):
     Collect only aliases a directory skill could advertise, in one pass over the roots."""
     from collections import defaultdict
     candidates = defaultdict(list)
+    if not aliases:
+        return candidates
     filenames = {Path(alias).name + ".md" for alias in aliases}
+    filenames.update(Path(alias).name for alias in aliases if alias.endswith(".md"))
     for tier, root in roots:
         for parent, subdirs, files in os.walk(root):
             directory = Path(parent)
@@ -487,11 +490,15 @@ def _catalog_legacy_candidates(roots, aliases):
                 if filename == "SKILL.md" or filename not in filenames:
                     continue
                 path = directory / filename
-                parts = path.relative_to(root).with_suffix("").parts
+                relative = path.relative_to(root)
+                candidate = (tier, str(root), skill_candidate_rank(path, root), path)
+                if relative.as_posix() in aliases:  # explicit path including its .md extension
+                    candidates[relative.as_posix()].append(candidate)
+                parts = relative.with_suffix("").parts
                 for start in range(len(parts)):
                     alias = "/".join(parts[start:])
                     if alias in aliases:
-                        candidates[alias].append((tier, str(root), skill_candidate_rank(path, root), path))
+                        candidates[alias].append(candidate)
     return candidates
 
 

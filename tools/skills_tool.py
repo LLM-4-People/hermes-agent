@@ -5,6 +5,7 @@ scripts/. `skills_list` returns name/description only; `skill_view` returns full
 linked files. Sibling modules (skills_tool_setup / _plugin / _dedup) re-export here."""
 
 import contextvars
+import glob
 import json
 import logging
 import os
@@ -74,15 +75,16 @@ def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
             _dir_tree_signature(os.path.join(root, name), sig, depth - 1)
 
 
-def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
+def _skills_scan_signature(roots, disabled) -> tuple:
     """Stat-based change signature over every directory the catalog walks; platform is read via
     ``agent.skill_utils.sys`` so test patches are honored."""
     from agent import skill_utils as _skill_utils
     platform = getattr(getattr(_skill_utils, "sys", None), "platform", "")
     sig: list = []
-    for d in dirs_to_scan:
-        _dir_tree_signature(str(d), sig)
-    return (tuple(sig), frozenset(disabled), platform)
+    for _tier, directory in roots:
+        _dir_tree_signature(str(directory), sig)
+    root_policy = tuple((tier, os.path.realpath(directory)) for tier, directory in roots)
+    return (tuple(sig), frozenset(disabled), platform, root_policy)
 
 
 HERMES_HOME = get_hermes_home()  # all skills live in ~/.hermes/skills/ (seeded from bundled)
@@ -238,7 +240,7 @@ def _skill_catalog(
     cache_key = ("with_disabled" if skip_disabled else "filtered", include_hidden)
     disabled = set() if skip_disabled else _get_disabled_skill_names(platform)
     roots, _ = skill_search_dirs()
-    signature = _skills_scan_signature([d for _t, d in roots], disabled)
+    signature = _skills_scan_signature(roots, disabled)
     now = time.monotonic()
     cached = _SKILLS_CACHE.get(cache_key)
     if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILLS_CACHE_TTL_SECONDS:
@@ -439,7 +441,7 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
             candidates.append((sd, smd))
 
     def _record_direct(direct_path: Path, search_root: Path) -> None:  # "mlops/axolotl" / "axolotl" or its flat .md sibling
-        flat = direct_path.with_suffix(".md")
+        flat = direct_path if direct_path.suffix == ".md" else direct_path.parent / (direct_path.name + ".md")
         if not _is_skill_support_path(direct_path) and direct_path.is_dir() and (direct_path / "SKILL.md").exists():
             _record(direct_path, direct_path / "SKILL.md")
         elif (flat.exists() and not _is_skill_support_path(flat)
@@ -457,7 +459,7 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
                 _record(found_skill_md.parent, found_skill_md)
         # Legacy flat <name>.md anywhere under the dir. Markdown owned by an ancestor
         # directory skill loads through file_path and must not shadow a real skill.
-        for found_md in search_dir.rglob(f"{name}.md"):
+        for found_md in search_dir.rglob(glob.escape(name) + ".md"):
             if (found_md.name != "SKILL.md" and not _is_skill_support_path(found_md)
                     and not _is_package_owned_markdown(found_md, search_dir)):
                 _record(None, found_md)
