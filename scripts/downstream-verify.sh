@@ -18,8 +18,8 @@ PYTHON="${HERMES_PYTHON:-python3}"
 "$PYTHON" scripts/check --only \
   footguns,detached-spawns,install-root,config-writers,config-readers,ruff
 
-# Downstream regression suite: provider routing + footer identity + Signal media, plus every
-# consumer that resolves route metadata (main client, Anthropic wire, auxiliary, /model,
+# Downstream regression suite: provider routing + footer identity + Signal media and formatting,
+# plus every consumer that resolves route metadata (main client, Anthropic wire, auxiliary, /model,
 # gateway overrides).
 scripts/run_tests.sh \
   tests/hermes_cli/test_provider_route_identity.py \

@@ -215,7 +215,7 @@ Attachment size limit: **100 MB** (both directions).
 
 ### Native Formatting, Reply Quotes, and Reactions
 
-Signal messages render with **native formatting** instead of literal markdown characters. The adapter converts markdown (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `||spoiler||`, headings) into Signal `bodyRanges` so the text shows up with real styling on the recipient's client rather than as visible `**` / `` ` `` characters. Links become `label (url)` instead of `[label](url)`: Signal has no hyperlink text style, so the label stays readable and the bare URL stays tappable. Link-looking text inside fenced or inline code is left untouched.
+Signal messages render with **native formatting** instead of literal markdown characters. The adapter converts markdown (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `||spoiler||`, headings) into Signal `bodyRanges` so the text shows up with real styling on the recipient's client rather than as visible `**` / `` ` `` characters. Links become `label (url)` instead of `[label](url)`: Signal has no hyperlink text style, so the label stays readable and the bare URL stays tappable. Link-looking text inside backtick- or tilde-fenced code and inline code is left untouched.
 
 **Reply quotes.** When Hermes replies to a specific message, it now posts a native reply that quotes the original — same UI affordance Signal users see when they use "Reply" themselves. This is automatic for replies generated in response to an inbound message.
 

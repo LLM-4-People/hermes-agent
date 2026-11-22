@@ -171,9 +171,10 @@ class TestEdgeCases:
 class TestMarkdownStripPatch:
     """Tests for the original signal-markdown-strip-patch.
 
-    Covers: fenced code blocks with language tags, links preserved,
-    headings converted to bold, multiple headings, UTF-16 correctness
-    for multi-byte characters, and marker stripping completeness.
+    Covers: fenced code blocks with language tags, links rewritten to a
+    readable label plus a tappable bare URL, headings converted to bold,
+    multiple headings, UTF-16 correctness for multi-byte characters, and
+    marker stripping completeness.
     """
 
     def test_fenced_code_block_multiline(self):
@@ -200,9 +201,63 @@ class TestMarkdownStripPatch:
         text, _styles = _m2s("[marchedelagare.com](https://www.marchedelagare.com/)")
         assert text == "https://www.marchedelagare.com/"
 
+    def test_domain_label_path_case_is_not_collapsed(self):
+        text, _styles = _m2s("[example.com/A](https://example.com/a)")
+        assert text == "example.com/A (https://example.com/a)"
+
     def test_multiple_links(self):
         text, _styles = _m2s("[A](https://a.example/x) et [B](https://b.example/y).")
         assert text == "A (https://a.example/x) et B (https://b.example/y)."
+
+    def test_escaped_paren_does_not_swallow_prose(self):
+        text, _styles = _m2s(r"[x](https://e.com/a\(b) and (note) tail)")
+        assert text == "x (https://e.com/a%28b) and (note) tail)"
+
+    def test_title_with_paren_does_not_swallow_prose(self):
+        text, _styles = _m2s('[x](https://e.com "see ) below") and tail')
+        assert text == "x (https://e.com) and tail"
+
+    def test_angle_destination_with_title(self):
+        text, _styles = _m2s('[x](<https://example.com/a> "title")')
+        assert text == "x (https://example.com/a)"
+
+    def test_angle_destination_space_is_encoded(self):
+        text, _styles = _m2s("[x](<https://example.com/a b>)")
+        assert text == "x (https://example.com/a%20b)"
+
+    def test_balanced_paren_url(self):
+        text, _styles = _m2s("[x](https://example.com/a_(b))")
+        assert text == "x (https://example.com/a_(b))"
+
+    def test_link_label_with_inline_code(self):
+        text, styles = _m2s("[use `--flag`](https://example.com)")
+        assert text == "use --flag (https://example.com)"
+        [style] = _find_style(styles, "MONOSPACE")
+        start, length, _kind = style.split(":")
+        assert text[int(start) : int(start) + int(length)] == "--flag"
+
+    def test_tilde_fence_link_is_not_rewritten(self):
+        text, styles = _m2s("~~~\n[doc](https://example.com)\n~~~")
+        assert text == "[doc](https://example.com)"
+        assert len(styles) == 1 and styles[0].endswith(":MONOSPACE")
+
+    def test_escaped_bracket_is_not_a_link(self):
+        text, _styles = _m2s(r"\[label](https://example.com)")
+        assert text == r"\[label](https://example.com)"
+
+    @pytest.mark.parametrize("label", ["# 1 issue", "- item"])
+    def test_block_marker_label_stays_prose(self, label):
+        text, styles = _m2s(f"[{label}](https://example.com)")
+        assert text == f"\u200b{label} (https://example.com)"
+        assert _find_style(styles, "BOLD") == []
+
+    def test_image_link_is_not_rewritten(self):
+        text, _styles = _m2s("[![alt](https://example.com/i.png)](https://example.com)")
+        assert text == "[![alt](https://example.com/i.png)](https://example.com)"
+
+    def test_nested_bracket_label(self):
+        text, _styles = _m2s("[a [b] c](https://example.com)")
+        assert text == "a [b] c (https://example.com)"
 
     def test_non_http_link_keeps_label_only(self):
         text, _styles = _m2s("Écris à [Marie](mailto:marie@example.com).")

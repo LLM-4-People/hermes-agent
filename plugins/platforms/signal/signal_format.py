@@ -14,8 +14,10 @@ _TABLE_WIDTH = 40
 
 # Any fence length (CommonMark): code_fence() wraps a command that contains ``` in a longer run,
 # and a ``` inside it must not close the block.
-_CODE_BLOCK_RE = re.compile(r"(`{3,})[a-zA-Z0-9_+-]*\n?(.*?)\1(?!`)", re.DOTALL)
-_FENCE_SPLIT_RE = re.compile(r"((`{3,}).*?\2(?!`))", re.DOTALL)
+_CODE_BLOCK_RE = re.compile(
+    r"(?P<fence>`{3,}|~{3,})[a-zA-Z0-9_+-]*\n?(?P<body>.*?)(?P=fence)(?![`~])", re.DOTALL
+)
+_FENCE_SPLIT_RE = re.compile(r"((`{3,}|~{3,}).*?\2(?![`~]))", re.DOTALL)
 
 
 def _split_fenced(source: str) -> list[str]:
@@ -31,6 +33,7 @@ _HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 # and the target stays tappable.
 _HTTP_TARGET_RE = re.compile(r"https?://", re.IGNORECASE)
 _INLINE_CODE_SPAN_RE = re.compile(r"(`[^`\n]*`)")
+_BLOCK_MARKER_RE = re.compile(r"^(?:#{1,6}\s+|[-*+]\s+)")
 _INLINE_PATTERNS = [
     # First match wins and spans never nest. Inline code goes first so its text stays verbatim; an
     # enclosing pair then loses ("**run `x`**" keeps its asterisks, where main kept the backticks).
@@ -48,19 +51,102 @@ def _utf16_len(s: str) -> int:
 
 
 def _display_url(url: str) -> str:
-    """Comparable form: scheme, ``www.`` and a trailing slash do not make two URLs different."""
-    value = url.strip().lower()
+    """Comparable form: scheme, ``www.`` and a trailing slash do not make two URLs different.
+
+    The path stays case-sensitive; only the scheme/www prefix is compared case-insensitively.
+    """
+    value = url.strip()
     for prefix in ("https://", "http://", "www."):
-        value = value.removeprefix(prefix)
+        if value[: len(prefix)].lower() == prefix:
+            value = value[len(prefix) :]
     return value.rstrip("/")
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    """True when ``text[index]`` is preceded by an odd number of backslashes."""
+    backslashes = 0
+    while index - backslashes - 1 >= 0 and text[index - backslashes - 1] == "\\":
+        backslashes += 1
+    return backslashes % 2 == 1
+
+
+def _unescape_markdown(text: str) -> str:
+    return re.sub(r"\\([\\`*{}\[\]()#+\-.!_>~|])", r"\1", text)
+
+
+def _parse_link_target(text: str, start: int) -> tuple[str, int] | None:
+    """Parse ``destination [title]`` starting just after ``](``.
+
+    Returns ``(target, index_of_closing_paren)`` or ``None`` for an invalid construct. A bare
+    destination ends at whitespace or an unescaped ``)`` at depth 0; an angle destination ends at
+    ``>`` and may contain spaces. An optional title may follow, quoted or parenthesized.
+    """
+    n, i = len(text), start
+    while i < n and text[i].isspace():
+        i += 1
+    if i < n and text[i] == "<":
+        i += 1
+        target_start = i
+        while i < n:
+            if text[i] == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if text[i] == ">":
+                break
+            i += 1
+        if i >= n:
+            return None
+        target = text[target_start:i]
+        i += 1
+    else:
+        target_start = i
+        depth = 0
+        while i < n:
+            ch = text[i]
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif ch.isspace():
+                break
+            i += 1
+        if depth != 0:
+            return None
+        target = text[target_start:i]
+    while i < n and text[i].isspace():
+        i += 1
+    if i < n and text[i] in "\"'(":
+        quote = text[i]
+        closing = ")" if quote == "(" else quote
+        i += 1
+        while i < n:
+            if text[i] == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if text[i] == closing:
+                i += 1
+                break
+            i += 1
+        else:
+            return None
+        while i < n and text[i].isspace():
+            i += 1
+    if i >= n or text[i] != ")":
+        return None
+    target = _unescape_markdown(target).replace(" ", "%20")
+    if target.count("(") != target.count(")"):
+        # An escaped literal paren would otherwise make the bare URL ambiguous in Signal.
+        target = target.replace("(", "%28").replace(")", "%29")
+    return target, i
+
+
 def _link_replacement(label: str, target: str) -> str:
-    label, target = label.strip(), target.strip()
-    if target.startswith("<") and target.endswith(">"):
-        target = target[1:-1].strip()
-    elif target:
-        target = target.split()[0]  # drop an optional Markdown title
+    label = label.strip()
     if not _HTTP_TARGET_RE.match(target):
         return label
     if _display_url(label) == _display_url(target):
@@ -68,12 +154,40 @@ def _link_replacement(label: str, target: str) -> str:
     return f"{label} ({target})"
 
 
+def _starts_block(replacement: str) -> bool:
+    return _BLOCK_MARKER_RE.match(replacement) is not None
+
+
+def _at_line_start(text: str, index: int) -> bool:
+    line_start = text.rfind("\n", 0, index) + 1
+    indent = text[line_start:index]
+    return not indent.strip() and len(indent) <= 3
+
+
 def _unwrap_links_inline(text: str) -> str:
-    """Rewrite ``[label](url)``, matching the target's parentheses by nesting depth."""
+    """Rewrite ``[label](url)``, honoring escapes, nested brackets and CommonMark destinations."""
     out: list[str] = []
     pos = 0
-    while (start := text.find("[", pos)) != -1:
-        label_end = text.find("]", start + 1)
+    while True:
+        start = text.find("[", pos)
+        while start != -1 and _is_escaped(text, start):
+            start = text.find("[", start + 1)
+        if start == -1:
+            out.append(text[pos:])
+            break
+        depth, label_end, i = 0, -1, start + 1
+        while i < len(text):
+            if text[i] == "\\" and i + 1 < len(text):
+                i += 2
+                continue
+            if text[i] == "[":
+                depth += 1
+            elif text[i] == "]":
+                if depth == 0:
+                    label_end = i
+                    break
+                depth -= 1
+            i += 1
         if (
             label_end == -1
             or label_end + 1 >= len(text)
@@ -83,23 +197,25 @@ def _unwrap_links_inline(text: str) -> str:
             out.append(text[pos : start + 1])
             pos = start + 1
             continue
-        depth, end = 0, label_end + 1
-        while end < len(text):
-            if text[end] == "(":
-                depth += 1
-            elif text[end] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            end += 1
-        if end >= len(text):  # unbalanced: leave the rest untouched
-            out.append(text[pos:])
-            break
+        parsed = _parse_link_target(text, label_end + 2)
+        if parsed is None:
+            out.append(text[pos : start + 1])
+            pos = start + 1
+            continue
+        target, end = parsed
+        label = text[start + 1 : label_end]
+        if "](" in label or "![" in label:
+            # A nested link or image is not a plain label; leave the outer construct raw.
+            out.append(text[pos : start + 1])
+            pos = start + 1
+            continue
+        replacement = _link_replacement(label, target)
+        if _starts_block(replacement) and _at_line_start(text, start):
+            # Keep the label from turning into a heading or bullet after the rewrite.
+            replacement = "\u200b" + replacement
         out.append(text[pos:start])
-        out.append(_link_replacement(text[start + 1 : label_end], text[label_end + 2 : end]))
+        out.append(replacement)
         pos = end + 1
-    else:
-        out.append(text[pos:])
     return "".join(out)
 
 
@@ -108,16 +224,21 @@ def _unwrap_links(source: str) -> str:
 
     Signal renders raw Markdown link syntax literally; only a bare http(s) URL becomes a tap target.
     Non-http targets (``mailto:``, relative paths) are not auto-linked, so they keep the label only.
+    Inline code spans are parked behind placeholders so a link label may contain one.
     """
     parts = _split_fenced(source)
     for idx, part in enumerate(parts):
         if idx % 2:  # fenced block: link-looking text is code
             continue
-        pieces = _INLINE_CODE_SPAN_RE.split(part)
-        parts[idx] = "".join(
-            piece if pos % 2 else _unwrap_links_inline(piece)
-            for pos, piece in enumerate(pieces)
-        )
+        spans: list[str] = []
+
+        def hold(match: re.Match[str]) -> str:
+            spans.append(match.group(0))
+            return f"\x00{len(spans) - 1}\x00"
+
+        masked = _INLINE_CODE_SPAN_RE.sub(hold, part)
+        masked = _unwrap_links_inline(masked)
+        parts[idx] = re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], masked)
     return "".join(parts)
 
 
@@ -168,7 +289,7 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
     # One pass over the original text: code a longer fence kept may hold ``` runs, never re-parsed.
     unwrapped, last = "", 0
     for match in _CODE_BLOCK_RE.finditer(text):
-        inner = match.group(2).rstrip("\n")
+        inner = match.group("body").rstrip("\n")
         unwrapped += text[last : match.start()]
         styles.append((len(unwrapped), len(inner), "MONOSPACE"))
         code_blocks.append((len(unwrapped), len(unwrapped) + len(inner)))
