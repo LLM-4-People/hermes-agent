@@ -148,9 +148,21 @@ TOOLSETS = {
         platforms=frozenset({"desktop"}),
     ),
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
-    "mobile_ui": _ts("Propose or apply validated, reversible declarative UI patches to Hermes Mobile", ["mobile_ui_patch"]),
-    "mobile_deliver": _ts("Deliver structured notices, cards, files, UI patches, and briefings to Hermes Mobile", ["mobile_deliver"]),
-    "mobile_device": _ts("Request explicitly user-approved Android device capabilities for the active run", ["request_device_action"]),
+    "mobile_ui": _ts(
+        "Propose or apply validated, reversible declarative UI patches to Hermes Mobile",
+        ["mobile_ui_patch"],
+        platforms=frozenset({"api_server"}),
+    ),
+    "mobile_deliver": _ts(
+        "Deliver structured notices, cards, files, UI patches, and briefings to Hermes Mobile",
+        ["mobile_deliver"],
+        platforms=frozenset({"api_server", "cron"}),
+    ),
+    "mobile_device": _ts(
+        "Request explicitly user-approved Android device capabilities for the active run",
+        ["request_device_action"],
+        platforms=frozenset({"api_server"}),
+    ),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "kanban": _ts(
