@@ -52,7 +52,7 @@ _STATIC_FEATURE_FLAGS = {
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
     "reasoning_streaming": True, "run_toolset_selection": True, "run_tool_exclusions": True, "run_scoped_instructions": True,
     "run_metrics_v2": True, "structured_approval_diffs": True, "live_coding_stream": True, "model_capability_metadata": True,
-    "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
+    "admin_config_rw": False, "jobs_admin": False, "memory_write_api": True,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
     "session_key_header": "X-Hermes-Session-Key"}
@@ -111,9 +111,17 @@ except ImportError:
 
 from gateway.config import Platform, PlatformConfig
 from gateway.display_config import resolve_display_setting
+from gateway.platforms import api_server_habits as _api_habits
+from gateway.platforms import api_server_memory as _api_memory
+from gateway.platforms import api_server_notes as _api_notes
+from gateway.platforms import api_server_profile as _api_profile
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms import api_server_sharing as _api_sharing
+from gateway.platforms import api_server_skills as _api_skills
+from gateway.platforms import api_server_workspace as _api_workspace
+from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES as _MAX_ARTIFACT_BYTES
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.api_server_bot_chat import reset_local_title_owner
@@ -146,7 +154,7 @@ def _session_row(session, entry=None) -> dict[str, Any]:
         "source", "user_id", "model", "title", "started_at", "ended_at", "end_reason", "message_count",
         "tool_call_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
         "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd", "cost_source", "cost_status", "api_call_count", "parent_session_id", "pinned",
-        "archived", "hidden", "system_prompt")} | {"id": session.session_id, "model_config": dict(session.model_config)}
+        "archived", "hidden", "system_prompt", "cwd")} | {"id": session.session_id, "model_config": dict(session.model_config)}
     if entry is not None:
         row.update(last_active=entry.last_active, preview=entry.preview)
         row.update({"_lineage_root_id": entry.lineage_root_id} if entry.lineage_root_id is not None else {})
@@ -646,9 +654,10 @@ def check_api_server_requirements() -> bool:
 
 
 _CORS_HEADERS = {
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id"}
 _SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
@@ -683,8 +692,9 @@ if AIOHTTP_AVAILABLE:
         if request.method in {"POST", "PUT", "PATCH"}:
             cl = request.headers.get("Content-Length")
             if cl is not None:
+                body_cap = _MAX_ARTIFACT_BYTES + 65_536 if request.path.endswith("/uploads") else MAX_REQUEST_BYTES
                 try:
-                    if int(cl) > MAX_REQUEST_BYTES:
+                    if int(cl) > body_cap:
                         return _error_response("Request body too large.", 413, code="body_too_large")
                 except ValueError:
                     return _error_response("Invalid Content-Length header.", 400, code="invalid_content_length")
@@ -1572,8 +1582,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("GET", "/v1/models", self._handle_models),
             ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
-            ("GET", "/v1/skills", self._handle_skills),
+            *_api_skills._http_routes(self),
             ("GET", "/v1/toolsets", self._handle_toolsets),
+            *_api_memory._http_routes(self),
             ("GET", "/api/sessions", self._handle_list_sessions),
             ("POST", "/api/sessions", self._handle_create_session),
             ("GET", "/api/sessions/{session_id}", self._handle_get_session),
@@ -1601,6 +1612,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
+        routes.extend(_api_workspace._http_routes(self))
+        routes.extend(_api_profile._http_routes(self))
+        routes.extend(_api_notes._http_routes(self))
+        routes.extend(_api_sharing._http_routes(self))
+        routes.extend(_api_habits._http_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -2362,11 +2378,21 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "chat_completions": True, "chat_completions_streaming": True,
             "responses_api": True, "responses_streaming": True, "run_submission": True,
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
-            **_STATIC_FEATURE_FLAGS, "run_unknown_resolution": canonical, "run_clarify_response": canonical,
+            **_STATIC_FEATURE_FLAGS, **_api_memory.CAPABILITY_FEATURES, **_api_skills.CAPABILITY_FEATURES,
+            **_api_workspace.CAPABILITY_FEATURES, **_api_profile.CAPABILITY_FEATURES,
+            **_api_notes.CAPABILITY_FEATURES, **_api_sharing.CAPABILITY_FEATURES, **_api_habits.CAPABILITY_FEATURES,
+            "cron_run_history": _CRON_AVAILABLE,
+            "run_unknown_resolution": canonical, "run_clarify_response": canonical,
             "cors": bool(self._cors_origins)}
+        all_endpoints = (
+            *_CAPABILITY_ENDPOINTS, *_api_memory.CAPABILITY_ENDPOINTS, *_api_skills.CAPABILITY_ENDPOINTS,
+            *_api_workspace.CAPABILITY_ENDPOINTS, *_api_profile.CAPABILITY_ENDPOINTS,
+            *_api_notes.CAPABILITY_ENDPOINTS, *_api_sharing.CAPABILITY_ENDPOINTS, *_api_habits.CAPABILITY_ENDPOINTS)
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
             "model": self._model_name,
+            "max_artifact_bytes": _MAX_ARTIFACT_BYTES,
+            "limits": {"max_artifact_bytes": _MAX_ARTIFACT_BYTES},
             "auth": {"type": "bearer", "required": bool(self._api_key)},
             "runtime": {
                 "mode": "server_agent", "tool_execution": "server", "split_runtime": False,
@@ -2377,20 +2403,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "features": features,
             "endpoints": {
                 name: {"method": entry[0], "path": entry[1]}
-                for name, entry in _CAPABILITY_ENDPOINTS
+                for name, entry in all_endpoints
                 if len(entry) < 3 or features[entry[2]]},
         })
 
     @_require_auth
     async def _handle_skills(self, request: web.Request) -> web.Response:
         """List enabled, loadable skills for the API server."""
-        try:
-            from tools.skills_tool import find_all_skills, sort_skills
-            skills = sort_skills(await asyncio.to_thread(find_all_skills, platform="api_server"))
-        except Exception:
-            logger.exception("GET /v1/skills failed")
-            return _error_response("Failed to enumerate skills", 500, err_type="server_error")
-        return web.json_response({"object": "list", "data": skills})
+        return await _api_skills.handle_list_skills(self, request)
 
     @_require_auth
     async def _handle_toolsets(self, request: web.Request) -> web.Response:
@@ -2702,45 +2722,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_fork_session(self, request: web.Request) -> web.Response:
         """POST /api/sessions/{session_id}/fork: branch through the storage interface."""
-        source_id = request.match_info["session_id"]
-        source, err = await self._get_existing_session_or_404(source_id)
-        if err:
-            return err
-        body, err = await self._read_json_body(request)
-        if err:
-            return err
-        sessions = (store := self._store_beside(await self._ensure_store_async())).aio.sessions
-        fork_id = str(body.get("id") or body.get("session_id") or f"api_{int(time.time())}_{uuid.uuid4().hex[:8]}").strip()
-        if not fork_id or re.search(r'[\r\n\x00]', fork_id):
-            return _error_response("Invalid session ID", 400, code="invalid_session_id")
-        if await sessions.get(fork_id) is not None:
-            return _error_response(f"Session already exists: {fork_id}", 409, code="session_exists")
-
-        # CLI /branch semantics: create the child, then end the original as branched (child first, so
-        # a failed create never leaves the source ended with no fork, #11030).
-        # ``_branched_from`` is the durable branch marker (same as CLI /branch): with the child created
-        # first, the timestamp fallback in _BRANCH_CHILD_SQL (child.started_at >= parent.ended_at) no
-        # longer holds, and an unmarked child would vanish from default session listings.
-        await sessions.create(NewSession(
-            session_id=fork_id, source="api_server", model=source.get("model"),
-            system_prompt=source.get("system_prompt"), parent_session_id=source_id,
-            lineage_kind=SessionLineageKind.BRANCH))
-        await sessions.end(source_id, "branched")
-        rows = await store.aio.messages.read_transcript(source_id)
-        await store.aio.messages.replace_transcript(
-            fork_id, [NewMessage.from_live(row.as_wire_row()) for row in rows], ReplaceMode.DESTRUCTIVE)
-        title = body.get("title")
-        if title is None:
-            base = source.get("title") or "fork"
-            title = f"{base} fork"
-            with suppress(Exception):
-                title = await sessions.next_title_in_lineage(base)
-        try:
-            await sessions.set_title(fork_id, str(title))
-        except ValueError as exc:
-            return _error_response(str(exc), 400, code="invalid_title")
-        fork = _session_row(f) if (f := await sessions.get(fork_id)) else {"id": fork_id, "parent_session_id": source_id}
-        return web.json_response({"object": "hermes.session", "session": self._session_response(fork)}, status=201)
+        return await _api_memory.handle_fork_session(self, request)
 
     async def _prepare_session_chat(self, request: web.Request) -> tuple:
         """Shared prelude for /api/sessions/{id}/chat[/stream]: header/body validation, then
