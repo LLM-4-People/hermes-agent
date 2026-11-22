@@ -1336,9 +1336,13 @@ def _ensure_plugins_discovered(force: bool = False) -> PluginManager:
     return manager
 
 
-def get_plugin_context_engine():
-    """Return the plugin-registered context engine, or None."""
-    return _ensure_plugins_discovered()._context_engine
+def get_plugin_context_engine(*, discover: bool = True):
+    """Return the profile's registered engine; metadata reads can skip discovery and activation."""
+    if discover:
+        return _ensure_plugins_discovered()._context_engine
+    with _plugin_managers_lock:
+        manager = _plugin_managers_by_home.get(_plugin_home_key())
+    return manager._context_engine if manager is not None else None
 
 
 def get_plugin_command_handler(name: str) -> Optional[Callable]:

@@ -219,10 +219,12 @@ def persist_agent_tool_names(agent) -> None:
     interface, else through its store. The full definitions, keyed by the code that built them: another
     process or surface derives different bytes."""
     from agent.agent_init_session import agent_interface
+    from tools.hosted_tool_policy import run_tool_names
 
     db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", None)
-    if not db or not session_id:
+    if not db or not session_id or run_tool_names() is not None:
+        # This pin belongs to the session across callers. A per-run selection lives for one admission.
         return
     try:
         pin = {"version": tool_pin_version(), "tools": _agent_tool_defs(agent)}
@@ -366,6 +368,9 @@ def restore_agent_tool_prefix(agent, saved) -> bool:
     process that wrote the pin a pinned Tool Search bridge tool keeps its slot (it is synthesized, never
     registered, exactly as the between-turns refresh keeps it) and a tool new only because its ``check_fn``
     flipped stays out (``_pin_restore_held``)."""
+    from tools.hosted_tool_policy import run_tool_names
+    if run_tool_names() is not None:
+        return False  # A restricted run uses its own selection, including tools re-enabled since the last turn.
     pinned, same_code, pinned_defs = _pinned_tool_defs(saved, {_def_name(t): t for t in _agent_tool_defs(agent)})
     if not pinned:
         return False

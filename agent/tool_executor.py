@@ -710,10 +710,10 @@ def _dispatch_authorized_once(
     # Deny-by-default for a hosted scope, before plugin hooks, guardrails or any executor: every
     # sequential, concurrent and batched call reaches its executor (inline, memory provider, context
     # engine, registry) only through here.
-    from tools.hosted_tool_policy import hosted_tool_refusal
+    from tools.hosted_tool_policy import hosted_tool_refusal, run_tool_refusal
     block_message, block_error_type = hosted_tool_refusal(ref.name), "hosted_tool_refused"
     if block_message is None:
-        block_message, block_error_type = scope_block, "tool_scope_block"
+        block_message, block_error_type = run_tool_refusal(ref.name, agent) or scope_block, "tool_scope_block"
     if block_message is None:
         block_error_type = "plugin_block"
         resolve = lambda: _pre_tool_block(agent, ref)
@@ -790,8 +790,8 @@ def _run_agent_tool_execution_middleware(
 
     trace = middleware_trace if middleware_trace is not None else []
     state = _ManagedToolResult(result=None, args=function_args, middleware_trace=trace, blocked=False, dispatched=False)
-    from tools.hosted_tool_policy import hosted_tool_refusal
-    if hosted_tool_refusal(function_name) is not None:
+    from tools.hosted_tool_policy import tool_execution_refusal
+    if tool_execution_refusal(function_name, agent) is not None:
         # Refused in a hosted scope before Relay and every request/execution middleware: no
         # host-side callback sees, rewrites or acts on a call that will not run.
         state.dispatched = True

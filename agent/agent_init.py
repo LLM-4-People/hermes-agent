@@ -995,8 +995,7 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     # are in this snapshot; outcomes wait for a turn someone sees (deliver_kept_startup_notices), maybe not ours.
     from hermes_cli.left_core_migration import recover_at_startup
     recover_at_startup()
-    # A multiplexed gateway may have switched HERMES_HOME since model_tools was imported;
-    # make sure this profile's plugins are discovered before the tool snapshot.
+    # The served profile may have changed since model_tools was imported.
     try:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()
@@ -2087,7 +2086,8 @@ def init_agent(
         prefill_messages = []
         fallback_model = {}
     _install_safe_stdio()
-
+    from tools.hosted_tool_policy import scoped_toolsets
+    enabled_toolsets = scoped_toolsets(enabled_toolsets)
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:
         setattr(agent, _name, _params[_name])

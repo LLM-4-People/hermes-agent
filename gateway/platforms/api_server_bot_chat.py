@@ -128,7 +128,12 @@ def bot_chat_tip(authority, session_id):
     return None if record is None else record.as_session_row()
 
 
-async def admit_peer_turn(runner, session_id, message, author):
+def require_peer_delivery(allow_delivery):
+    if not allow_delivery:
+        raise AuthorityRefusal("bot_chat_parameters_unsupported")
+
+
+async def admit_peer_turn(runner, session_id, message, author, *, allow_delivery=True):
     """``(profile home, receipt)`` when *session_id* is the Bot Chat and the turn was admitted to its
     FIFO; None when the target is any other session (the caller runs it as an API turn)."""
     from gateway.session_authorities import served_profile_name
@@ -141,6 +146,7 @@ async def admit_peer_turn(runner, session_id, message, author):
         return None
     store = authority_store(authority)
     home = store.scope.profile_dir
+    require_peer_delivery(allow_delivery)
     from gateway.session_bot import displaceable_bot_chat
     if displaceable_bot_chat(authority, store.sessions.get_by_title('Bot Chat') or tip) is not None:
         # The title is held by an API conversation no FIFO can own (#140769, MSG-21): the owner

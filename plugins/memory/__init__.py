@@ -215,35 +215,38 @@ def discover_memory_providers() -> list[tuple[str, str, bool]]:
 
 
 def load_memory_provider(name: str, *, register_skills: Optional[bool] = None,
-                         manager=None) -> Optional[MemoryProvider]:
+                         manager=None, inspection=None) -> Optional[MemoryProvider]:
     """Load a MemoryProvider by name (bundled, user, project, then pip entry point);
     None if not found or failing to load. Skills register only for the configured
-    active provider unless ``register_skills`` is explicit, so inspecting inactive
-    providers leaves no registry side effects. ``manager``: a hosted provider loads into that
-    plugin manager and its host, not the active profile's (``transient_plugin_host``)."""
+    active provider unless ``register_skills`` is explicit. ``manager`` selects a transient
+    plugin manager for hosted lifecycle hooks. ``inspection`` collects the schema provider
+    without forwarding any plugin registrations."""
     if register_skills is None:
-        register_skills = name == _get_active_memory_provider()
+        register_skills = inspection is None and name == _get_active_memory_provider()
 
     provider_dir = find_provider_dir(name)
     entry_point = None if provider_dir else find_provider_entry_point(name)
     if not provider_dir and entry_point is None:
         logger.debug("Memory provider '%s' not found in bundled, user plugins, or entry points", name)
         return None
-    if provider_dir is not None and _explicitly_disabled(name, provider_dir):
+    config = inspection.config if inspection is not None else None
+    if provider_dir is not None and _explicitly_disabled(name, provider_dir, config=config):
         # The Plugins hub / `hermes plugins disable` (or an update that could not install it) park a
         # user-installed provider in ``plugins.disabled``; the loader must honour it or "disabled" is a lie.
-        logger.warning("%s", parked_provider_notice(name))
+        if inspection is None:
+            logger.warning("%s", parked_provider_notice(name))
         return None
 
     def _load(_dir):
         if provider_dir:
-            return _load_provider_from_dir(provider_dir, register_skills=register_skills, manager=manager)
+            return _load_provider_from_dir(provider_dir, register_skills=register_skills, manager=manager,
+                                           inspection=inspection)
         from hermes_cli.plugin_isolation import in_process_import_refusal
-        refusal = in_process_import_refusal(f"pip-installed memory provider {name!r}")
+        refusal = in_process_import_refusal(f"pip-installed memory provider {name!r}", config=config)
         if refusal:
             logger.warning("%s", refusal)
             return None
-        return _load_provider_from_entry_point(entry_point, register_skills=register_skills)
+        return _load_provider_from_entry_point(entry_point, register_skills=register_skills, inspection=inspection)
 
     return _loader.load_named(name, provider_dir, _load, kind="Memory provider", noun="provider", logger=logger)
 
@@ -331,7 +334,14 @@ def _instantiate_subclass(namespace) -> Optional[MemoryProvider]:
     return None
 
 
-def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True) -> Optional[MemoryProvider]:
+def _provider_collector(name, register_skills, inspection):
+    if inspection is not None:
+        return _loader.SchemaInspectionContext()
+    return _ProviderCollector(name, register_skills=register_skills)
+
+
+def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True,
+                                    inspection=None) -> Optional[MemoryProvider]:
     """Import a provider entry point and extract the MemoryProvider instance: an
     instance, a subclass, a module with ``register(ctx)``, a factory / ``register``
     callable, or a namespace holding a subclass — in that order."""
@@ -347,7 +357,7 @@ def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True
             pass
     collector = None
     if hasattr(loaded, "register"):
-        collector = _ProviderCollector(entry_point.name, register_skills=register_skills)
+        collector = _provider_collector(entry_point.name, register_skills, inspection)
         collector.collect(loaded.register, source=getattr(loaded, "__file__", None))
         if collector.provider:
             return collector.provider
@@ -358,7 +368,7 @@ def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True
                 return provider
         except TypeError:
             pass
-        collector = _ProviderCollector(entry_point.name, register_skills=register_skills)
+        collector = _provider_collector(entry_point.name, register_skills, inspection)
         collector.collect(loaded)
         return collector.provider
 
@@ -370,23 +380,36 @@ def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True
     return provider
 
 
+def _load_hosted_provider(host, provider_dir: Path, register_skills: bool, manager, inspection):
+    name = provider_dir.name
+    module = _module_name(provider_dir, name)
+    if inspection is not None:
+        return host.load_instance(provider_dir, module_name=module, capture="register_memory_provider",
+                                  base_ref="agent.memory_provider:MemoryProvider")
+    return _ProviderCollector(name, register_skills=register_skills, manager=manager).collect_in_host(
+        host, provider_dir, module)
+
+
 def _load_provider_from_dir(provider_dir: Path, *, register_skills: bool = True,
-                            manager=None) -> Optional[MemoryProvider]:
+                            manager=None, inspection=None) -> Optional[MemoryProvider]:
     """Import a provider module; ``register(ctx)`` first, else a top-level subclass."""
     name = provider_dir.name
     from hermes_cli.plugin_isolation import user_plugin_host
-    host = None if _is_bundled(provider_dir) else (
-        manager._plugin_host() if manager is not None else user_plugin_host())
+    host = None
+    if not _is_bundled(provider_dir):
+        if inspection is not None:
+            host = inspection.host
+        else:
+            host = manager._plugin_host() if manager is not None else user_plugin_host()
     if host is not None:
-        return _ProviderCollector(name, register_skills=register_skills, manager=manager).collect_in_host(
-            host, provider_dir, _module_name(provider_dir, name))
+        return _load_hosted_provider(host, provider_dir, register_skills, manager, inspection)
     mod = _load_package(provider_dir, name)
     if mod is None:
         return None
 
     collector = None
     if hasattr(mod, "register"):
-        collector = _ProviderCollector(name, register_skills=register_skills)
+        collector = _provider_collector(name, register_skills, inspection)
         try:
             collector.collect(mod.register, source=mod.__file__)
         except Exception as e:
@@ -608,14 +631,14 @@ def _enable_command(name: str) -> str:
     return f"`hermes {selector}plugins enable {name}` with HERMES_HOME set to {home}"
 
 
-def _explicitly_disabled(name: str, provider_dir: Path) -> bool:
+def _explicitly_disabled(name: str, provider_dir: Path, *, config=None) -> bool:
     """True when a NON-bundled provider is parked in ``plugins.disabled`` under any spelling the
     plugin commands write: the provider name, its directory name or its manifest ``name:``."""
     if _is_bundled(provider_dir):
         return False
     try:
         from hermes_cli.config import load_config
-        disabled = cfg_get(load_config(), "plugins", "disabled")
+        disabled = cfg_get(load_config() if config is None else config, "plugins", "disabled")
     except Exception:
         return False
     if not isinstance(disabled, list):

@@ -121,6 +121,8 @@ class GatewayAgentCacheMixin:
         # Fingerprint the FULL credential, not a short prefix: OAuth/JWT-style tokens often share a
         # common prefix (e.g. "eyJhbGci"), so a prefix would give false cache hits across auth switches.
         _api_key = str(runtime.get("api_key", "") or "")
+        from tools.hosted_tool_policy import run_policy_key
+        run_policy = run_policy_key()
         blob = _j.dumps(
             [
                 model,
@@ -129,6 +131,7 @@ class GatewayAgentCacheMixin:
                 runtime.get("requested_provider", ""), runtime.get("api_mode", ""),
                 sorted((runtime.get("capabilities") or {}).items()),
                 sorted(enabled_toolsets) if enabled_toolsets else [],
+                *([run_policy] if run_policy is not None else []),
                 # reasoning_config excluded — set per-message on the cached agent; no prompt/tool effect.
                 ephemeral_prompt or "",
                 sorted((cache_keys or {}).items()),

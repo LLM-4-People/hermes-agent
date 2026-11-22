@@ -15,7 +15,7 @@ import threading
 import time
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 _log = logging.getLogger(__name__)
 
@@ -269,6 +269,66 @@ class NoopPluginContext:
         pass
 
     register_tool = register_hook = register_cli_command = register_memory_provider = _noop
+
+
+class SchemaInspectionContext(NoopPluginContext):
+    """Capture the category instance without publishing registrations into a live profile."""
+
+    def __init__(self):
+        self.provider = None
+        self.engine = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_context_engine(self, engine):
+        self.engine = engine
+
+    def collect(self, register, *, source=None):
+        register(self)
+
+    def __getattr__(self, name):
+        if name.startswith("register_") or name == "subscribe":
+            return self._noop
+        raise AttributeError(name)
+
+
+class ProviderInspection(NamedTuple):
+    config: dict
+    host: Optional[Any]
+
+
+def inspect_provider_tool_names(config: dict, name: str) -> set[str]:
+    """Read the configured provider's uninitialized tool schemas in the caller's profile scope."""
+    from agent.memory_manager_tools import normalize_tool_schema
+    from agent.safe_worker_policy import safe_worker_enabled
+    from hermes_cli.plugin_isolation import transient_plugin_host
+
+    if safe_worker_enabled():
+        return set()
+    if name == "memory":
+        from hermes_cli.profile_memory_config import active_memory_provider
+        from plugins.memory import load_memory_provider
+        from tools.hosted_tool_policy import host_feature_enabled
+        provider_name = active_memory_provider(config)
+        if not provider_name or not host_feature_enabled("builtin_memory"):
+            return set()
+        load = load_memory_provider
+    elif name == "context_engine":
+        from plugins.context_engine import inspect_context_engine
+        provider_name = (config.get("context") or {}).get("engine")
+        if not provider_name or provider_name == "compressor":
+            return set()
+        load = inspect_context_engine
+    else:
+        raise ValueError("Expected a memory or context-engine toolset")
+
+    with transient_plugin_host(config) as manager:
+        host = manager._plugin_host() if manager is not None else None
+        instance = load(provider_name, inspection=ProviderInspection(config, host))
+        if instance is None:
+            return set()
+        return {schema["name"] for raw in instance.get_tool_schemas() if (schema := normalize_tool_schema(raw))}
 
 
 def instance_from_module(mod: Any, *, collector: Any, collected_attr: str, base_cls: type, name: str,

@@ -253,7 +253,12 @@ What the host guarantees:
 
 ## Engine tools
 
-Context engines can expose tools the agent calls directly. Return schemas from `get_tool_schemas()` and handle calls in `handle_tool_call()`:
+Context engines can expose tools the agent calls directly. The API tool catalogue can read
+`get_tool_schemas()` before a session starts. Directory engines support this read before
+activation. Engines supplied by a general plugin become visible after the profile activates
+that plugin. Keep tool definitions independent of model and session state.
+
+Return schemas from `get_tool_schemas()` and handle calls in `handle_tool_call()`:
 
 ```python
 def get_tool_schemas(self):

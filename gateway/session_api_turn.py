@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 
+from gateway.platforms.api_server_request_options import RUN_TOOL_FIELDS, parse_run_tool_options, run_tool_scope
 from gateway.config import Platform
 from gateway.session_api import bind_api_steps, restore_api_session, run_steps, run_steps_off_loop
 from gateway.session_authority import admission_row
@@ -65,7 +66,7 @@ def check_api_turn(authority, ref, payload):
                 or (data['history'] is not None and not isinstance(data['history'], list))
                 or ('run_owner_scope' in data and not _valid_owner_scope(data['run_owner_scope']))):
             raise AuthorityRefusal('invalid_params')
-        if set(data['settings']) - set(_SETTING_KEYS):
+        if set(data['settings']) - set(_SETTING_KEYS) - set(RUN_TOOL_FIELDS):
             raise AuthorityRefusal('invalid_params')
     settings = payload.get('api_turn_v1', {}).get('settings') or api_settings(authority, ref)
     check_api_settings(adapter, settings)
@@ -86,6 +87,10 @@ def api_session_vars():
 
 
 def check_api_settings(adapter, settings):
+    try:
+        parse_run_tool_options(settings)
+    except ValueError as exc:
+        raise AuthorityRefusal('invalid_params') from exc
     dispatch = settings.get('room_dispatch')
     # A room policy is only ever issued with the dispatch it was verified for; a policy-only
     # blob (e.g. queued by an older build) would otherwise widen the operator's API config.
@@ -115,7 +120,9 @@ def api_policy_scope():
         from gateway.hosted_room_execution_policy import RoomExecutionPolicy, bind_room_execution_policy
         token = bind_room_execution_policy(RoomExecutionPolicy.from_mapping(policy))
     try:
-        yield
+        settings = current['settings'] if current else {}
+        with run_tool_scope({key: settings[key] for key in RUN_TOOL_FIELDS if key in settings}):
+            yield
     finally:
         if token is not None:
             from gateway.hosted_room_execution_policy import reset_room_execution_policy
@@ -157,6 +164,7 @@ def admit_api_steps(adapter, **kwargs):
     sid = authority.logical_owner(sid)
     authority._require_admission_open()
     settings = {key: kwargs.get(key) for key in _SETTING_KEYS}
+    settings.update({key: kwargs[key] for key in RUN_TOOL_FIELDS if key in kwargs})
     # Route credentials remain in the server's configuration, never admission JSON.
     route = settings.get('route')
     if route and route.get('api_key'):
@@ -231,7 +239,9 @@ def _admit_api_payload(authority, adapter, sid, request_id, payload, settings, d
     # In the admission's own off-loop transaction: one target per request id (an Idempotency-Key; a
     # deleted session's tombstone still spends a client key), and the session's settings for its later
     # payload-less (internal) turns, committed with the admitted turn rather than by the drain (N50).
-    target = ApiTargetClaim(settings=payload['api_turn_v1']['settings'], client_key=bool(kwargs.get('request_id')))
+    session_settings = payload['api_turn_v1']['settings']
+    target = ApiTargetClaim(settings={k: v for k, v in session_settings.items() if k not in RUN_TOOL_FIELDS},
+                            client_key=bool(kwargs.get('request_id')))
     row, _created = yield lambda: store.admissions.admit(
         epoch=authority.epoch, principal_id='api', session_id=sid, request_id=request_id, payload=payload,
         gate=authority.gate_refusal(), api_target=target)

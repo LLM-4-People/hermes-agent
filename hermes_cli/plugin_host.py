@@ -73,8 +73,9 @@ def _hosted_ambient_credentials(home: Path) -> dict[str, str]:
 class PluginHost:
     """One host process for one :class:`~hermes_cli.plugins.PluginManager` (one profile home)."""
 
-    def __init__(self, manager: Any):
+    def __init__(self, manager: Any, *, launcher: Optional[list[str]] = None):
         self._manager = manager
+        self._launcher = launcher
         self._home = Path(manager.home_path)
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
@@ -127,7 +128,8 @@ class PluginHost:
 
     def _argv(self) -> list:
         from hermes_cli.plugin_isolation import host_launcher
-        return [*host_launcher(), sys.executable, "-m", _HOST_MODULE]
+        launcher = self._launcher if self._launcher is not None else host_launcher()
+        return [*launcher, sys.executable, "-m", _HOST_MODULE]
 
     def _env(self) -> dict[str, str]:
         from tools.environments.local import served_profile_child_env

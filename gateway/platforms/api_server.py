@@ -50,7 +50,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
-    "reasoning_streaming": True,
+    "reasoning_streaming": True, "run_toolset_selection": True, "run_tool_exclusions": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
@@ -144,7 +144,7 @@ def _session_row(session, entry=None) -> dict[str, Any]:
     row = {key: getattr(session, key) for key in (
         "source", "user_id", "model", "title", "started_at", "ended_at", "end_reason", "message_count",
         "tool_call_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-        "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd", "api_call_count", "parent_session_id", "pinned",
+        "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd", "cost_source", "cost_status", "api_call_count", "parent_session_id", "pinned",
         "archived", "hidden", "system_prompt")} | {"id": session.session_id, "model_config": dict(session.model_config)}
     if entry is not None:
         row.update(last_active=entry.last_active, preview=entry.preview)
@@ -2401,29 +2401,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_toolsets(self, request: web.Request) -> web.Response:
         """GET /v1/toolsets — each toolset the api_server agent exposes: enabled/configured state
         plus the concrete tool names it expands to."""
+        from gateway.platforms.api_server_request_options import RunToolPolicyUnavailable, run_tool_rows
         try:
-            from hermes_cli.config import load_config
-            from hermes_cli.tools_config import (
-                _get_effective_configurable_toolsets, _get_platform_tools, _toolset_has_keys,
-                get_nous_subscription_features)
-            from toolsets import resolve_toolset
-            config = load_config()
-            enabled_toolsets = _get_platform_tools(config, "api_server", include_default_mcp_servers=False)
-            features = get_nous_subscription_features(config)
-            data: list[dict[str, Any]] = []
-            for name, label, desc in _get_effective_configurable_toolsets():
-                try:
-                    tools = sorted(set(resolve_toolset(name)))
-                except Exception:
-                    tools = []
-                data.append({
-                    "name": name, "label": label, "description": desc,
-                    "enabled": name in enabled_toolsets,
-                    "configured": _toolset_has_keys(name, config, features=features),
-                    "tools": tools})
-        except Exception:
-            logger.exception("GET /v1/toolsets failed")
-            return _error_response("Failed to enumerate toolsets", 500, err_type="server_error")
+            data = await asyncio.to_thread(run_tool_rows)
+        except RunToolPolicyUnavailable as exc:
+            return _error_response(str(exc), 503, err_type="server_error", code="tool_policy_unavailable")
         return web.json_response({"object": "list", "platform": "api_server", "data": data})
 
     # -- /api/sessions: thin client/session resource API -------------------------------
@@ -2447,7 +2429,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "id", "source", "user_id", "model", "title", "started_at", "ended_at", "end_reason",
             "message_count", "tool_call_count", "input_tokens", "output_tokens",
             "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd",
-            "actual_cost_usd", "api_call_count", "parent_session_id", "last_active", "preview",
+            "actual_cost_usd", "cost_source", "cost_status", "api_call_count", "parent_session_id", "last_active", "preview",
             "_lineage_root_id", "pinned", "archived", "hidden")
         payload = {key: session.get(key) for key in safe_keys if key in session}
         # SQLite stores the flags as 0/1.
@@ -2905,15 +2887,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return "confirmed" if runtime else "accepted"
 
     async def _admit_to_live_bot_chat(
-        self, session_id: str, message: Any, author: Optional[dict[str, Any]],
+        self, session_id: str, message: Any, author: Optional[dict[str, Any]], *, allow_delivery: bool = True,
     ) -> Optional[tuple[Path, dict[str, Any]]]:
-        """Admit a turn aimed at the canonical Bot Chat to the Desktop session that holds it live.
-
-        ``(profile home, mailbox record)`` when a live owner took it; None when this process should
-        run the turn itself — the session is not the canonical Bot Chat's own lineage, or nobody
-        holds that chat. Both peer transports (``/api/sessions/{id}/chat`` for ``peer dm``,
-        ``/v1/runs`` for ``peer run``) go through here, so the two lanes cannot drift.
-        """
+        """Deliver a canonical Bot Chat turn only through the current owner."""
         if not isinstance(message, str):
             return None
         # Under session authority the Bot Chat is a LOCAL session whose only writer is the
@@ -2921,7 +2897,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # through the same door as ``bot_relay.deliver`` and the receipt is its admission's.
         if getattr(self.gateway_runner, "session_authority", None) is not None:
             from gateway.platforms.api_server_bot_chat import admit_peer_turn
-            return await admit_peer_turn(self.gateway_runner, session_id, message, author)
+            return await admit_peer_turn(self.gateway_runner, session_id, message, author, allow_delivery=allow_delivery)
         store = self._store_beside(await self._ensure_store_async())
         if store is None:
             return None
@@ -2937,6 +2913,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Only the canonical Bot Chat's own lineage: a peer turn into any other session runs here.
             if owner is None or store.lineage.tip(session_id) != owner["session_id"]:
                 return None
+            from gateway.platforms.api_server_bot_chat import require_peer_delivery
+            require_peer_delivery(allow_delivery)
             return deliver_to_live_owner(home, owner, message, author=author)
 
         record = await asyncio.to_thread(_admit)

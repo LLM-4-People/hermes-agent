@@ -64,6 +64,14 @@ def run_admission(adapter, run_id):
     return (authority, asdict(rows[0])) if rows else None
 
 
+def canonical_run_usage(usage):
+    """The canonical turn runner captures token deltas across this individual admission."""
+    count = usage.get('output_tokens') if isinstance(usage, dict) else None
+    if type(count) is int and count >= 0:
+        return {**usage, 'scope': 'run'}
+    return usage
+
+
 def run_projection(adapter, run_id):
     owned = run_admission(adapter, run_id)
     if owned is None:
@@ -93,9 +101,12 @@ def run_projection(adapter, run_id):
         pending = list(live.controls.snapshot(row['target_session_id'], row['generation']))
         if any(prompt.get('kind') == 'approval' for prompt in pending):
             status = 'waiting_for_approval'  # the documented run state main's run store reports
+    if status in {'failed', 'cancelled'}:
+        from gateway.platforms.api_server_runs import _terminal_diagnostics
+        progress.update(_terminal_diagnostics(status, result))
     return {**progress, 'pending_controls': pending, 'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
             'admission_id': row['admission_id'], 'execution_generation': row['generation'],
-            'output': result.get('final_response', ''), 'usage': saved.get('usage', {}) if saved else {}}
+            'output': result.get('final_response', ''), 'usage': canonical_run_usage(saved.get('usage', {})) if saved else {}}
 
 
 async def send_clarify(adapter, *, chat_id, **kwargs):

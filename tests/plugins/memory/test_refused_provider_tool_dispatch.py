@@ -120,6 +120,28 @@ def _registry_call(home):
         return json.loads(registry.dispatch(_TOOL, {}))
 
 
+def test_schema_inspection_preserves_live_registry_handlers(homes):
+    from gateway.run import _profile_runtime_scope
+    from plugins.plugin_loader import inspect_provider_tool_names
+    from tools.registry import registry
+
+    alpha, _ = homes
+    config = {"memory": {"provider": "sharedmem"}}
+    with _profile_runtime_scope(alpha):
+        assert registry.get_entry(_TOOL) is None
+        assert inspect_provider_tool_names(config, "memory") == {_TOOL}
+        disabled = {**config, "plugins": {"disabled": ["sharedmem"]}}
+        assert inspect_provider_tool_names(disabled, "memory") == set()
+        assert registry.get_entry(_TOOL) is None
+
+    _build_manager(alpha)
+    with _profile_runtime_scope(alpha):
+        entry = registry.get_entry(_TOOL)
+        assert entry is not None
+        assert inspect_provider_tool_names(config, "memory") == {_TOOL}
+        assert registry.get_entry(_TOOL) is entry
+
+
 def test_refused_profile_cannot_read_the_owning_profiles_store_through_registry_tools(homes):
     alpha_home, beta_home = homes
     owner, _ = _build_manager(beta_home)

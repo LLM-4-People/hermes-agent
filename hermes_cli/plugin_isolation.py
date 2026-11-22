@@ -171,12 +171,12 @@ def user_plugin_host() -> Any:
 
 
 @contextlib.contextmanager
-def transient_plugin_host() -> Iterator[Any]:
+def transient_plugin_host(config: Optional[Mapping[str, Any]] = None) -> Iterator[Any]:
     """A throwaway plugin manager for a one-shot load in the active profile (a profile lifecycle
     hook), or ``None`` when ``plugins.isolation`` is not ``host``. Its own scope key and host
     process keep it apart from the profile's shared manager, so the teardown on exit (dispose its
     registrations, stop its host) cannot touch a concurrent user of that profile's shared host."""
-    if isolation_mode() != ISOLATION_HOST:
+    if isolation_mode(config) != ISOLATION_HOST:
         yield None
         return
     import uuid
@@ -186,6 +186,10 @@ def transient_plugin_host() -> Iterator[Any]:
     # One scope per manager, so two overlapping hook loads never share registry slots; home_path stays
     # the profile's home.
     manager.scope_key = f"{manager.scope_key}#transient-{uuid.uuid4().hex}"
+    if config is not None:
+        from hermes_cli.plugin_host import PluginHost
+        # The launcher and isolation mode must come from the same profile policy snapshot.
+        manager._plugin_host_instance = PluginHost(manager, launcher=host_launcher(config))
     try:
         yield manager
     finally:
