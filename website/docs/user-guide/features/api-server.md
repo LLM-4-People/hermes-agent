@@ -696,8 +696,9 @@ For a standalone run, poll its owning gateway for `pending_controls`. Each
 text and the choices available to the caller. Send that ID with the chosen
 answer. Concurrent approvals have separate IDs. An empty array means there
 are no current controls for this run. The legacy `approval` field shows the
-oldest pending entry. A gateway serving a retained, active run owned by another
-process omits both fields because it cannot inspect that process's waiters.
+oldest pending entry. Stopping, unknown and terminal runs return an empty
+array. A gateway serving a retained queued, running or waiting run owned by
+another process omits both fields because it cannot inspect that process's waiters.
 
 ### POST /v1/runs/\{run_id\}/clarify
 
