@@ -240,6 +240,12 @@ class TestMessagesEndpointProjection:
             assert response.status == 200
             payload = await response.json()
 
+            response = await client.get(f"/api/sessions/{session_id}/messages?visible_only=true&limit=1")
+            assert response.status == 200
+            visible = await response.json()
+
+        assert visible["pagination"]["total"] == 2
+        assert visible["data"][0]["content"] == "Refactor complete."
         messages = payload["data"]
         assert len(messages) == 3
         assert messages[0]["content"] == ""

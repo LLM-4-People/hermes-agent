@@ -1,4 +1,7 @@
 """API run controls resolve durable claims, never adapter agent/task ownership."""
+import asyncio
+import logging
+import sqlite3
 from dataclasses import asdict
 
 from gateway.session_contract import SessionActor, SessionRef
@@ -72,11 +75,21 @@ def canonical_run_usage(usage):
     return usage
 
 
+def control_wait_status(approvals, questions):
+    """Approvals take precedence while both kinds of human input are pending."""
+    if approvals:
+        return 'waiting_for_approval'
+    return 'waiting_for_input' if questions else 'running'
+
+
 def run_projection(adapter, run_id):
     owned = run_admission(adapter, run_id)
     if owned is None:
         return None
-    authority, row = owned
+    return _project_admission(adapter, run_id, *owned)
+
+
+def _project_admission(adapter, run_id, authority, row):
     # ``unknown`` is not terminal: later turns wait for POST /v1/runs/{id}/resolve-unknown, and
     # ``interrupted`` is in TERMINAL_STATUSES, so a poller would stop at a paused head.
     status = {'queued': 'queued', 'started': 'running', 'unknown': 'unknown', 'terminal': row['outcome']}.get(row['status'])
@@ -99,14 +112,39 @@ def run_projection(adapter, run_id):
     if live is not None and row['status'] == 'started':
         progress = live.event_stream.progress_for(row['generation'])
         pending = list(live.controls.snapshot(row['target_session_id'], row['generation']))
-        if any(prompt.get('kind') == 'approval' for prompt in pending):
-            status = 'waiting_for_approval'  # the documented run state main's run store reports
+        kinds = {prompt['kind'] for prompt in pending}
+        status = control_wait_status('approval' in kinds, 'clarify' in kinds)
+    if row['status'] == 'started' and run_id in adapter._stopping_run_ids:
+        status, pending = 'stopping', []
     if status in {'failed', 'cancelled'}:
         from gateway.platforms.api_server_runs import _terminal_diagnostics
         progress.update(_terminal_diagnostics(status, result))
     return {**progress, 'pending_controls': pending, 'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
             'admission_id': row['admission_id'], 'execution_generation': row['generation'],
             'output': result.get('final_response', ''), 'usage': canonical_run_usage(saved.get('usage', {})) if saved else {}}
+
+
+def refresh_recovered_controls(adapter, authorities, owner_alive):
+    """A terminal canonical receipt may predate the crash or be acknowledged later over another transport."""
+    from gateway.platforms.api_server_store import authority_store
+    from gateway.session_authorities import owner_scope
+    ledger = adapter._run_idempotency_store
+    ledger.recover_dead_controls(owner_alive)
+    outstanding = ledger.recovered_control_ids()
+    if not outstanding:
+        return
+    for authority in authorities:
+        with owner_scope(authority):
+            for scope, run_id in outstanding:
+                try:
+                    rows = authority_store(authority).admissions.match(principal_id='api', request_id=run_id)
+                    if len(rows) == 1 and rows[0].status == 'terminal':
+                        row = rows[0]
+                        if row.payload.get('api_turn_v1', {}).get('run_owner_scope') == scope:
+                            terminal = _project_admission(adapter, run_id, authority, asdict(row))
+                            ledger.settle_recovered_control(scope, run_id, terminal)
+                except (OSError, sqlite3.Error, *STORE_FAILURES):
+                    logging.getLogger(__name__).exception("Deferred recovered run receipt until the next sweep")
 
 
 async def send_clarify(adapter, *, chat_id, **kwargs):
@@ -140,6 +178,9 @@ async def respond_run(adapter, run_id, body, *, kind):
         frozenset({'session:read', 'session:approve', 'session:respond'}), 'api-control:' + uuid.uuid4().hex)
     snapshot = await authority.attach(actor, ref, history=False)  # prompts only
     try:
+        # Attaching can yield: Stop may have been accepted while the native waiter is winding down.
+        if run_id in adapter._stopping_run_ids:
+            raise AuthorityRefusal('stale_generation')
         if not any(p['prompt_id'] == prompt_id and p['kind'] == kind for p in snapshot.prompts):
             raise AuthorityRefusal('approval_not_pending')
         return await authority.respond(actor, ref, generation, prompt_id, {field: body[field]}, kind=kind)
@@ -173,13 +214,14 @@ async def stop_run(adapter, run_id):
     if row['status'] == 'started':
         await authority.interrupt(actor, ref, row['generation'])
         adapter._stopping_run_ids.add(run_id)
+        adapter._set_run_status(run_id, 'stopping', last_event='run.stopping')
         return {'run_id': run_id, 'status': 'stopping', 'admission_id': row['admission_id']}
     elif row['status'] == 'unknown':
         raise AuthorityRefusal('unknown_execution')
     return run_projection(adapter, run_id)
 
 
-async def resolve_unknown_run(adapter, run_id, body):
+async def resolve_unknown_run(adapter, run_id, body, scope):
     """Resolve only the exact unknown admission durably bound to an owned API run."""
     owned = run_admission(adapter, run_id)
     if owned is None:
@@ -198,4 +240,10 @@ async def resolve_unknown_run(adapter, run_id, body):
     receipt = await authority.resolve_unknown(
         actor, SessionRef(authority.profile_id, row['target_session_id']),
         row['admission_id'], generation)
+    def settle():
+        adapter._run_idempotency_store.settle_recovered_control(scope, run_id, run_projection(adapter, run_id))
+    try:
+        await asyncio.to_thread(settle)
+    except (OSError, sqlite3.Error, *STORE_FAILURES):
+        logging.getLogger(__name__).exception("Deferred recovered run receipt until the next sweep")
     return asdict(receipt)

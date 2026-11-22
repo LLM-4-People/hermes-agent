@@ -145,6 +145,26 @@ def _non_continuation_child_sql(child: str = "", parent: str = "?") -> str:
     ) + f"  AND COALESCE({child}source, '') != 'tool'\n"
 
 
+_COMPRESSION_ANCESTORS_CTE = f"""WITH RECURSIVE ancestors(id) AS (
+    SELECT ?
+    UNION
+    SELECT parent.id FROM ancestors a
+    JOIN sessions child ON child.id = a.id
+    JOIN sessions parent ON parent.id = child.parent_session_id
+    WHERE parent.end_reason = 'compression' {_non_continuation_child_sql('child.', 'parent.id')}
+)"""
+
+
+def _ordered_links(rows, start):
+    """Follow a single chain of (id, next id) rows in order, stopping at an absent or repeated id."""
+    links = dict(rows)
+    chain = []
+    while start and start in links:
+        chain.append(start)
+        start = links.pop(start)
+    return chain
+
+
 # Picker-visible rows: roots + branch/reset children (not subagent runs or compression continuations).
 _LISTABLE_CHILD_SQL = (f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')}"
     f" OR {_RESET_CHILD_SQL.format(a='s')})")

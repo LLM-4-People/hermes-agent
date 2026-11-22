@@ -16,7 +16,7 @@ from persistence.conversation.messages import (
     HeldCoverage, HeldMessage, MarkerPurgeReport, MessageRecord, MessageStorageState, NewMessage, PagedMessage, PromptPage,
     PrUrlHit, PrunedRowChange, PruneRewriteResult, Reaction, ReadCheck, ReplaceMode, ReplaceResult, ResumeConversations,
     RewindPlan, RowDisposition, RowOutcome, RowStamp, RowUids, SegmentPage, SessionTimeline, TimelineEntry, TranscriptRead, TranscriptRow,
-    TranscriptView,
+    TranscriptPage, TranscriptView,
     UnseenReaction, UserTurnRewind, Watermark,
 )
 from persistence.core.identity import JsonValue, MessageId, SessionId
@@ -501,6 +501,13 @@ class SQLiteMessageRepository:
                 latest=request.latest, after_id=None if request.after_id is None else int(request.after_id),
                 include_ancestors=request.include_lineage)
         return tuple(_transcript_row(row) for row in rows)
+
+    def read_transcript_page(self, session_id: SessionId, request: TranscriptRead, *, visible_only: bool = False) -> TranscriptPage:
+        from ._store.transcript_pages import get_transcript_page
+        holder = self._store.holder()
+        with _refusals(holder, session_id):
+            rows, total, root = get_transcript_page(holder, session_id, request, visible_only)
+        return TranscriptPage(tuple(_transcript_row(row) for row in rows), total, SessionId(root))
 
     def active_message_ids(self, session_id: SessionId) -> tuple[MessageId, ...]:
         holder = self._store.holder()

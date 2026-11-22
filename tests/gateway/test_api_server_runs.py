@@ -1935,16 +1935,14 @@ class TestRunIdempotency:
         from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 
         path = tmp_path / "idem.db"
-        scope = hashlib.sha256(
-            b"default\0unauthenticated-test-listener"
-        ).hexdigest()
+        scope = hashlib.sha256(b"default\0unauthenticated-test-listener").hexdigest()
         store = RunIdempotencyStore(str(path))
         store.reserve(
             scope,
             "stale-run",
             "fingerprint",
             "run_stale",
-            {"run_id": "run_stale", "status": "running"},
+            {"run_id": "run_stale", "status": "waiting_for_input", "pending_questions": {"q-old": 10}},
             owner_pid=999_999_999,
             owner_started=1,
         )
@@ -1959,6 +1957,8 @@ class TestRunIdempotency:
         assert response.status == 200
         assert body["status"] == "interrupted"
         assert body["last_event"] == "run.interrupted"
+        assert "pending_questions" not in body
+        assert "pending_questions" not in restarted._run_idempotency_store.status_for_run(scope, "run_stale")["status"]
 
 
     def test_status_sweep_prunes_in_memory_ownership_mirrors(self, adapter):

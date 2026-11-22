@@ -679,10 +679,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         answers: dict[str, Any] = {}
         reply: dict[str, Any] = {"answers": answers, "outcome": "submitted"}
         last = len(questions) - 1
-        # The typed-"skip" hint is for messaging adapters, where a chat reply answers the card. A local
-        # viewer (TUI / Desktop / CLI) renders main's modal with its own skip control, unhinted.
+        # Messaging adapters use a chat reply to skip. Local and API clients submit a structured skip.
         platform = getattr(getattr(self._ctx, "source", None), "platform", None)
-        hint = "" if platform == Platform.LOCAL else f"\n{t('gateway.clarify.skip_hint')}"
+        hint = "" if platform in (Platform.LOCAL, Platform.API_SERVER) else f"\n{t('gateway.clarify.skip_hint')}"
         for index, entry in enumerate(questions):
             question = f"{entry['question']}{hint}"
             raw, answered = self._ask_clarify_question(

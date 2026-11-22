@@ -21,6 +21,7 @@ logger = logging.getLogger("gateway.platforms.api_server")
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 # A key closed by ``find_or_close``: no request body hashes to it, so it never replays as a run.
 _CLOSED_FINGERPRINT = "closed"
+_WAITING_CONTROL_ROWS = "json_extract(status_json,'$.status') IN ('waiting_for_input','waiting_for_approval')"
 
 _SELECT_BY_KEY = (
     "SELECT fingerprint, run_id, status_json, owner_pid, owner_started, updated_at "
@@ -112,6 +113,12 @@ class RunIdempotencyStore:
             "CREATE UNIQUE INDEX IF NOT EXISTS run_idempotency_run_id ON run_idempotency(run_id)")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS run_idempotency_changes ON run_idempotency(scope, updated_at)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS run_idempotency_waiting_controls ON run_idempotency(owner_pid,owner_started) "
+            f"WHERE {_WAITING_CONTROL_ROWS}")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS run_idempotency_unknown_controls ON run_idempotency(scope,run_id) "
+            "WHERE json_extract(status_json,'$.last_event')='run.unknown'")
         self._conn.commit()
         self._lock = threading.Lock()
         self._tighten_permissions()
@@ -253,6 +260,52 @@ class RunIdempotencyStore:
             self._conn.execute(
                 "UPDATE run_idempotency SET status_json=?, updated_at=? WHERE run_id=?",
                 (_encode_status(status), time.time(), run_id))
+            self._conn.commit()
+
+    def recover_dead_controls(self, owner_alive) -> None:
+        """Withdraw process-local waiters after their exact owner exits, even with no HTTP subscriber."""
+        with self._lock:
+            waiting = self._conn.execute("SELECT run_id, owner_pid, owner_started, status_json FROM run_idempotency "
+                                         f"WHERE {_WAITING_CONTROL_ROWS}").fetchall()
+        lost = {(pid, started) for pid, started in {(r[1], r[2]) for r in waiting} if not owner_alive(pid, started)}
+        if not lost:
+            return
+        now = time.time()
+        with self._immediate_txn():
+            for run_id, pid, started, original in waiting:
+                if (pid, started) not in lost:
+                    continue
+                status = json.loads(original)
+                # An authority waiter leaves its started admission unknown until the operator resolves it.
+                # A standalone approval belonged entirely to its lost executor.
+                state = "unknown" if "pending_questions" in status or "pending_approvals" in status else "interrupted"
+                for key in ("pending_questions", "pending_approvals", "approval"):
+                    status.pop(key, None)
+                if state == "interrupted":
+                    status["error"] = "The gateway restarted before this run settled."
+                status.update(status=state, last_event="run." + state, updated_at=now)
+                self._conn.execute("UPDATE run_idempotency SET status_json=?, updated_at=? "
+                                   "WHERE run_id=? AND owner_pid=? AND owner_started=? AND status_json=?",
+                                   (_encode_status(status), now, run_id, pid, started, original))
+            self._conn.commit()
+
+    def recovered_control_ids(self):
+        """Only canonical waiters whose executor is known to have died without a settled receipt."""
+        with self._lock:
+            return self._conn.execute("SELECT scope, run_id FROM run_idempotency "
+                                      "WHERE json_extract(status_json,'$.last_event')='run.unknown'").fetchall()
+
+    def settle_recovered_control(self, scope, run_id, terminal):
+        """Mirror a recovered canonical receipt after its authoritative execution settles."""
+        if terminal is None or terminal["status"] not in TERMINAL_STATUSES:
+            return
+        now = time.time()
+        fields = {key: terminal[key] for key in ("status", "output", "error", "usage", "turn_exit_reason") if key in terminal}
+        fields.update(updated_at=now, last_event="run." + terminal["status"])
+        with self._lock:
+            self._conn.execute("UPDATE run_idempotency SET status_json=json_patch(status_json,?), updated_at=? "
+                               "WHERE scope=? AND run_id=? AND json_extract(status_json,'$.last_event')='run.unknown'",
+                               (_encode_status(fields), now, scope, run_id))
             self._conn.commit()
 
     def forget(self, scope: str, key: str) -> None:

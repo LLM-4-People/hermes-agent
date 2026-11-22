@@ -183,6 +183,68 @@ class TestDisplayDedupe:
 
         db._execute_write(_do)
 
+    def test_read_only_transcript_page_before_display_index_columns(self, tmp_path):
+        from persistence.conversation.messages import TranscriptRead, TranscriptView
+        from persistence.sqlite.conversation._store.transcript_pages import get_transcript_page
+        from persistence.sqlite.conversation._store.sessions import end_session
+
+        path = tmp_path / "pre-index.db"
+        writer = StoreHolder(path)
+        try:
+            create_session(writer, "parent", source="api_server")
+            append_messages_batch(writer, "parent", [{"role": "user", "content": "before"}])
+            end_session(writer, "parent", "compression")
+            create_session(writer, "child", source="api_server", parent_session_id="parent")
+            append_messages_batch(writer, "child", [{"role": "assistant", "content": "after"}])
+        finally:
+            writer.close()
+        with sqlite3.connect(path) as conn:
+            columns = ", ".join(row[1] for row in conn.execute("PRAGMA table_info(messages)")
+                                if row[1] not in {"display_order", "display_identity"})
+            conn.execute("CREATE TABLE original_messages AS SELECT " + columns + " FROM messages")
+            conn.execute("DROP TABLE messages")
+            conn.execute("PRAGMA legacy_alter_table = ON")
+            conn.execute("ALTER TABLE original_messages RENAME TO messages")
+        reader = StoreHolder(path, read_only=True)
+        try:
+            for lineage, texts in ((False, ["after"]), (True, ["before", "after"])):
+                request = TranscriptRead(view=TranscriptView.DISPLAY, include_lineage=lineage)
+                page, total, _ = get_transcript_page(reader, "child", request, True)
+                assert (total, [row["content"] for row in page]) == (len(texts), texts)
+        finally:
+            reader.close()
+
+    def test_paged_transcript_counts_large_legacy_lineage_without_retaining_bodies(self, tmp_path):
+        from persistence.conversation.messages import TranscriptRead, TranscriptView
+        from persistence.sqlite.conversation._store.transcript_pages import get_transcript_page
+        from persistence.sqlite.conversation._store.sessions import end_session
+
+        path = tmp_path / "legacy-lineage.db"
+        root, child = "legacy-parent", "legacy-tip"
+        db = StoreHolder(path)
+        try:
+            create_session(db, root, source="api_server")
+            append_messages_batch(db, root, [{"role": "assistant", "content": str(i) * 1_000_000} for i in range(9)])
+            end_session(db, root, "compression")
+            create_session(db, child, source="api_server", parent_session_id=root)
+            append_messages_batch(db, child, [{"role": "user", "content": "latest"}])
+            db._execute_write(lambda conn: conn.execute("UPDATE messages SET display_order = NULL, display_identity = NULL"))
+        finally:
+            db.close()
+        reader = StoreHolder(path, read_only=True)
+        try:
+            tracemalloc.start()
+            try:
+                page, total, origin = get_transcript_page(reader, child, TranscriptRead(
+                    view=TranscriptView.DISPLAY, include_lineage=True, limit=1, latest=True), True)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            assert (origin, total, [r["content"] for r in page]) == (root, 10, ["latest"])
+            assert peak < 6_000_000
+        finally:
+            reader.close()
+
     @pytest.mark.parametrize("read_only", [False, True])
     def test_legacy_page_retains_only_bounded_payloads(self, tmp_path, read_only):
         """Benjamin Brumbaugh's PR #106838: backfill and fallback retain identities, not payloads."""

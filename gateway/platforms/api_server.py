@@ -65,6 +65,7 @@ _CAPABILITY_ENDPOINTS = (
     ("run_status", ("GET", "/v1/runs/{run_id}")),
     ("run_events", ("GET", "/v1/runs/{run_id}/events")),
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
+    ("run_clarify", ("POST", "/v1/runs/{run_id}/clarify", "run_clarify_response")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
     ("run_unknown_resolution", ("POST", "/v1/runs/{run_id}/resolve-unknown", "run_unknown_resolution")),
     ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
@@ -131,7 +132,7 @@ from gateway.platforms._shared import coerce_port as _coerce_port, get_scoped_se
 from gateway.platforms._shared import secrets_match
 from gateway.platforms.tcp_site import start_tcp_site
 from persistence import RetiredSessionError, SessionWriteGuarded
-from persistence.conversation.messages import NewMessage, ReplaceMode, TranscriptRead, TranscriptView
+from persistence.conversation.messages import NewMessage, ReplaceMode
 from persistence.conversation.sessions import CanonicalTitleLocked, NewSession, RuntimeLock, SessionExists, \
     SessionLineageKind, SessionOrder, SessionQuery, SessionWindow, TitleConflict
 
@@ -1211,9 +1212,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """Count structured runs that still have executable work."""
         # "stopping" is not terminal: executor work continues until the agent notices.
         return sum(
-            1
-            for status in self._run_statuses.values()
-            if status.get("status") in {"queued", "running", "waiting_for_approval", "stopping"}
+            1 for status in self._run_statuses.values()
+            if status.get("status") in {"queued", "running", "waiting_for_approval", "waiting_for_input", "stopping"}
         )
 
     @staticmethod
@@ -2356,13 +2356,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_capabilities(self, request: web.Request) -> web.Response:
         """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
-        runner = getattr(self, "gateway_runner", None)
+        from gateway.session_authorities import active_authority
+        canonical = active_authority(self.gateway_runner) is not None
         features = {
             "chat_completions": True, "chat_completions_streaming": True,
             "responses_api": True, "responses_streaming": True, "run_submission": True,
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
-            **_STATIC_FEATURE_FLAGS,
-            "run_unknown_resolution": getattr(runner, "session_authority", None) is not None,
+            **_STATIC_FEATURE_FLAGS, "run_unknown_resolution": canonical, "run_clarify_response": canonical,
             "cors": bool(self._cors_origins)}
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
@@ -2701,38 +2701,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_session_messages(self, request: web.Request) -> web.Response:
         """GET /api/sessions/{session_id}/messages."""
-        session_id = request.match_info["session_id"]
-        _, err = await self._get_existing_session_or_404(session_id)
-        if err:
-            return err
-        store = self._store_beside(await self._ensure_store_async())
-        resolved_id = await store.aio.lineage.resolve_resume_target(session_id)
-        raw_limit, raw_offset = request.query.get("limit"), request.query.get("offset", "0")
-        order = request.query.get("order")
-        if order not in (None, "oldest", "latest"):
-            return _error_response("order must be one of: oldest, latest", 400, code="invalid_pagination")
-        try:
-            offset = int(raw_offset)
-            requested_limit = None if raw_limit is None else int(raw_limit)
-        except (TypeError, ValueError):
-            offset = requested_limit = -1
-        if offset < 0 or (requested_limit is not None and requested_limit < 0):
-            return _error_response("limit and offset must be non-negative integers", 400, code="invalid_pagination")
-        default_page = requested_limit is None
-        latest_page = order == "latest" or (order is None and default_page)
-        limit = 500 if default_page else min(requested_limit, 500)
-        include_compacted = _coerce_request_bool(request.query.get("include_compacted"), default=False)
-        # Compression lineage: return root→tip messages, matching the REST router (#51058).
-        messages = await store.aio.messages.read_transcript(resolved_id, TranscriptRead(
-            view=TranscriptView.DISPLAY if include_compacted else TranscriptView.ACTIVE, limit=limit, offset=offset,
-            latest=latest_page, include_lineage=True))
-        return web.json_response({
-            "object": "list", "session_id": resolved_id,
-            "data": [self._message_response(m.as_wire_row()) for m in messages],
-            "pagination": {
-                "limit": limit, "offset": offset,
-                "order": order or ("latest" if default_page else "oldest"),
-                "returned": len(messages)}})
+        from gateway.platforms.api_server_transcript import session_messages
+        return await session_messages(self, request)
 
     @_require_auth
     async def _handle_fork_session(self, request: web.Request) -> web.Response:
@@ -3912,6 +3882,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             mws = [mw for mw in (  # the config guard outermost: entering a profile scope reads config
                 config_unavailable_middleware, self._make_profile_prefix_middleware(), cors_middleware,
                 body_limit_middleware, security_headers_middleware) if mw is not None]
+            await _api_runs.recover_run_controls(self)
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             assert self._app is not None
             # Native routes + multiplex /p/<profile>/ mirrors (the prefix middleware validates and

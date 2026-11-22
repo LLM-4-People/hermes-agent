@@ -888,6 +888,15 @@ class TranscriptRow:
 
 
 @dataclass(frozen=True, slots=True)
+class TranscriptPage:
+    """A chronological page, its pre-pagination row count and the root of its verified transcript lineage."""
+
+    rows: tuple[TranscriptRow, ...]
+    total: int
+    root_id: SessionId
+
+
+@dataclass(frozen=True, slots=True)
 class TimelineEntry:
     """One human prompt of the session timeline: its first row id, its preview and its stored timestamp."""
 
@@ -1053,6 +1062,10 @@ class MessageRepository(Protocol):
 
     def read_transcript(self, session_id: SessionId, request: TranscriptRead = TranscriptRead()) -> tuple[TranscriptRow, ...]:
         """The stored rows ``request`` selects, chronological; ``DISPLAY`` pages logical messages (one per display identity, the live row preferred, then the newest)."""
+        ...
+
+    def read_transcript_page(self, session_id: SessionId, request: TranscriptRead, *, visible_only: bool = False) -> TranscriptPage:
+        """Read the page and count from the same projection. Visible pages omit session metadata and projected hidden rows before paging."""
         ...
 
     def active_message_ids(self, session_id: SessionId) -> tuple[MessageId, ...]:

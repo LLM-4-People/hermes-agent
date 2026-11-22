@@ -42,7 +42,7 @@ _RECEIPT_SCOPE_FIELDS = (
     "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
     "member_id", "target_install_id", "target_profile")
 _TERMINAL_RUN_STATES = frozenset({"completed", "failed", "interrupted", "cancelled"})
-_ACTIVE_RUN_STATES = frozenset({"queued", "running", "waiting_for_approval", "stopping"})
+_ACTIVE_RUN_STATES = frozenset({"queued", "running", "waiting_for_approval", "waiting_for_input", "stopping"})
 _KNOWN_RUN_STATES = _TERMINAL_RUN_STATES | _ACTIVE_RUN_STATES
 _RUN_STATUS_KEYS = (
     "run_id", "status", "output", "error", "approval", "last_event", "tool", "progress_at",
