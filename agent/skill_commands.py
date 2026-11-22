@@ -520,7 +520,7 @@ def _skill_dirs_signature() -> Optional[tuple]:
     from tools.skills_tool import _get_disabled_skill_names, skill_search_dirs, _skills_scan_signature
     try:
         roots, _active = skill_search_dirs()
-        return _skills_scan_signature([d for _tier, d in roots], _get_disabled_skill_names())
+        return _skills_scan_signature(roots, _get_disabled_skill_names())
     except OSError:
         logger.debug("Skill dir signature failed", exc_info=True)
         return None
