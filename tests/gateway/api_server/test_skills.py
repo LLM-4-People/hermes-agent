@@ -180,3 +180,29 @@ async def test_markdown_directories_and_folded_names_load_as_packages(tmp_path, 
     for name, folder in expected.items():
         assert f"Package {folder}." in json.loads(skill_view(name, preprocess=False))["content"]
     assert "Package routine." in json.loads(skill_view("review\n", preprocess=False))["content"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_publishes_only_single_line_loadable_identifiers(tmp_path, monkeypatch):
+    from tools.skills_tool import skill_view
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    cases = {
+        "notes/multiline": "|\n  review\n  notes",
+        "notes/control": r'"draft\x7F\x80end"',
+        "notes/hide\nthis": r'"bad\x01name"',
+        "notes/保留": "Résumé 📌",
+    }
+    for folder, definition in cases.items():
+        skill = tmp_path / "skills" / folder
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {definition}\n---\nPackage {folder}.", encoding="utf-8")
+    async with TestClient(TestServer(_create_app(_make_adapter(api_key="sk-secret")))) as cli:
+        resp = await cli.get("/v1/skills", headers={"Authorization": "Bearer sk-secret"})
+        assert resp.status == 200
+        locators = {row["name"] for row in (await resp.json())["data"]}
+    expected = {"notes/multiline": "notes/multiline", "notes/control": "notes/control", "Résumé 📌": "notes/保留"}
+    assert locators == expected.keys()
+    for name, folder in expected.items():
+        assert f"Package {folder}." in json.loads(skill_view(name, preprocess=False))["content"]

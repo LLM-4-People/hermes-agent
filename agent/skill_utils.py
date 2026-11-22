@@ -504,12 +504,15 @@ def _catalog_legacy_candidates(roots, aliases):
     return candidates
 
 
+_LOCATOR_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
 def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[dict[str, Any]]:
     """Copies of scanned skills (each with ``name``, ``tier``, ``root`` and ``path`` = its SKILL.md)
     annotated with what skill_view() resolves, using its aliases (declared name, directory name, path
     relative to the root) and :func:`pick_skill_candidate`. Adds ``relative_path`` and ``status``:
-    ``unique`` (``load_name`` = name), ``ambiguous`` (``load_name`` = the exact relative path, or None
-    when even that is shared) or ``shadowed`` (a higher tier owns the name: hidden, warned once)."""
+    ``unique``, ``ambiguous`` or ``shadowed``. The load name is a single-line, uniquely owned
+    declared name or relative path. Entries without an offerable identifier have no load name."""
     out = [dict(e) for e in entries]
     owners: dict[str, list[int]] = {}
     for i, e in enumerate(out):
@@ -540,10 +543,12 @@ def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[di
                 if not any(provably_same_skill([e["path"], out[j]["path"]]) for j in higher):
                     logger.warning("Skill '%s' at %s is shadowed by a higher-precedence copy "
                                    "(project > local > create_dir > external_dirs)", name, e["path"])
-        elif winner[name] == i:
-            e.update(status="unique", load_name=name)
         else:
-            e.update(status="ambiguous", load_name=rel if winner[rel] == i else None)
+            # Locators are single-line identifiers. Fall back to the owned relative path
+            # when a YAML block scalar or directory name contains a control character.
+            load_name = next((alias for alias in (name, rel) if winner[alias] == i
+                              and not _LOCATOR_CONTROL.search(alias)), None)
+            e.update(status="unique" if winner[name] == i else "ambiguous", load_name=load_name)
     return out
 
 
