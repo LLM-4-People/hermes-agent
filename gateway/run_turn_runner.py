@@ -1170,6 +1170,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     effective_once = combine_run_instructions(
                         api.get("run_instructions") if api else None,
                         api_caps,
+                        user_language=api.get("user_language") if api else None,
                     )
                     with (
                         run_instruction_scope(agent, effective_once),

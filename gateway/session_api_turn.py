@@ -9,6 +9,7 @@ import re
 import uuid
 
 from gateway.platforms.api_server_request_options import RUN_TOOL_FIELDS, parse_run_tool_options, run_tool_scope
+from agent.mobile_companion_prompt import normalize_user_language
 from agent.run_instructions import valid_run_instructions
 from tools.mobile_device_bridge import validate_device_capabilities
 from gateway.config import Platform
@@ -62,9 +63,10 @@ def check_api_turn(authority, ref, payload):
         # 'browser_control' is accepted and ignored: admissions persisted while the removed
         # browser-extension control existed may carry it and must still recover.
         if (set(data) - {'history', 'settings', 'turn_author', 'media', 'run_owner_scope', 'browser_control',
-                         'relay_metadata', 'resume_unanswered', 'run_instructions', 'device_capabilities'}
+                         'relay_metadata', 'resume_unanswered', 'run_instructions', 'device_capabilities', 'user_language'}
                 or ('run_instructions' in data and not valid_run_instructions(data['run_instructions']))
                 or ('device_capabilities' in data and validate_device_capabilities(data['device_capabilities'])[1] is not None)
+                or ('user_language' in data and (data['user_language'] is None or normalize_user_language(data['user_language'])[1] is not None))
                 or data.get('resume_unanswered', True) is not True
                 or not {'history', 'settings'} <= set(data)
                 or not isinstance(data.get('relay_metadata', {}), dict)
@@ -188,6 +190,12 @@ def admit_api_steps(adapter, **kwargs):
             raise AuthorityRefusal('invalid_params')
         if caps:
             payload['api_turn_v1']['device_capabilities'] = caps
+    if kwargs.get('user_language'):
+        lang, lang_err = normalize_user_language(kwargs['user_language'])
+        if lang_err:
+            raise AuthorityRefusal('invalid_params')
+        if lang:
+            payload['api_turn_v1']['user_language'] = lang
     run_owner_scope = kwargs.get('run_owner_scope')
     if run_owner_scope is not None:
         if not _valid_owner_scope(run_owner_scope):
@@ -452,6 +460,7 @@ def prepare_api_execution(authority, ref, payload):
             'relay_metadata': data.get('relay_metadata') if data else None,
             'run_instructions': data.get('run_instructions') if data else None,
             'device_capabilities': data.get('device_capabilities') if data else None,
+            'user_language': data.get('user_language') if data else None,
             'resume_unanswered': bool(data and data.get('resume_unanswered'))}
 
 

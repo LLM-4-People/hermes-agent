@@ -28,7 +28,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response, room_run_claims
-from agent.mobile_companion_prompt import combine_run_instructions
+from agent.mobile_companion_prompt import combine_run_instructions, normalize_user_language
 from agent.run_instructions import run_instruction_scope, valid_run_instructions
 from tools.mobile_deliver import bind_delivery_emitter, emit_run_progress
 from tools.mobile_device_bridge import device_bridge_scope, validate_device_capabilities
@@ -632,6 +632,7 @@ class _RunLaunch:
 
     run_instructions: Optional[str] = None
     device_capabilities: Optional[list[str]] = None
+    user_language: Optional[str] = None
 
     @property
     def approval_session_key(self) -> str:
@@ -785,6 +786,10 @@ def _run_user_message(body, _openai_error) -> tuple:
         _, cap_err = validate_device_capabilities(body["device_capabilities"])
         if cap_err is not None:
             return None, _json_error(_openai_error, cap_err, code="invalid_device_capabilities", status=400)
+    if "user_language" in body:
+        _, lang_err = normalize_user_language(body["user_language"])
+        if lang_err is not None:
+            return None, _json_error(_openai_error, lang_err, code="invalid_user_language", status=400)
     raw_input = body.get("input")
     if not raw_input:
         return None, _json_error(_openai_error, "Missing 'input' field", status=400)
@@ -811,7 +816,7 @@ async def _admit_run_to_authority(
                 conversation_history=launch.conversation_history, active_run_id=run_id,
                 run_owner_scope=self._run_owners[run_id],
                 turn_author=launch.turn_author, run_instructions=launch.run_instructions,
-                device_capabilities=launch.device_capabilities, **(launch.tool_options or {}),
+                device_capabilities=launch.device_capabilities, user_language=launch.user_language, **(launch.tool_options or {}),
                 history_from_session=session_history_delivery,
                 session_history_delivery='1' if session_history_delivery else '',
                 bind_declared_conversation=_declared_selected, walked_from=launch.walked_from,
@@ -982,6 +987,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         request_profile=_api_server._api_request_profile.get(), tool_options=selection,
         run_instructions=body.get("run_instructions"),
         device_capabilities=validate_device_capabilities(body.get("device_capabilities"))[0],
+        user_language=normalize_user_language(
+            body.get("user_language"), accept_language=request.headers.get("Accept-Language")
+        )[0],
         turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None)
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -1089,7 +1097,9 @@ def _run_agent_sync(
             broker = ensure_device_bridge_broker(self)
             profile_key = resolve_device_profile_key(self, run.request_profile)
 
-            effective_once = combine_run_instructions(run.run_instructions, run.device_capabilities)
+            effective_once = combine_run_instructions(
+                run.run_instructions, run.device_capabilities, user_language=run.user_language
+            )
             with (
                 run_instruction_scope(agent, effective_once),
                 bind_ui_patch_emitter(emit_ui),

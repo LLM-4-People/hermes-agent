@@ -917,6 +917,7 @@ def test_gateway_authority_turn_runner_wires_device_bridge_and_live_emitters(tmp
         "relay_metadata": None,
         "run_instructions": None,
         "device_capabilities": ["alarm_timer", "ui_surfaces_v2"],
+        "user_language": "fr",
         "resume_unanswered": False,
     }
     token = api_execution.set(prepared)
@@ -935,6 +936,9 @@ def test_gateway_authority_turn_runner_wires_device_bridge_and_live_emitters(tmp
             outcomes = {}
 
             def _run(message, **kwargs):
+                from agent.run_instructions import effective_system_prompt
+
+                outcomes["prompt"] = effective_system_prompt(agent, "base")
                 outcomes["ui"] = json.loads(
                     mobile_ui_patch_tool(
                         ops={"op": "upsert_widget", "title": "Brief", "template": "metric", "accent": "teal"},
@@ -953,7 +957,109 @@ def test_gateway_authority_turn_runner_wires_device_bridge_and_live_emitters(tmp
             api_execution.reset(token)
             approver.join(timeout=2.0)
 
+    assert "French (fr)" in outcomes["prompt"]
     assert outcomes["ui"]["ok"] is True and len(ui_seen) == 1
     assert outcomes["dlv"]["ok"] is True and len(dlv_seen) == 1
     assert outcomes["dev"]["ok"] is True and outcomes["dev"]["data"] == {"ok_from_phone": True}
     assert [ev for ev, _ in dev_events] == ["device.requested", "device.settled"]
+
+
+# ── 8. Bilingual `user_language` / `Accept-Language` & Extended OS Capabilities
+
+
+@pytest.mark.asyncio
+async def test_user_language_accept_language_and_extended_device_capabilities(tmp_path, monkeypatch):
+    from agent.mobile_companion_prompt import (
+        build_mobile_companion_instructions,
+        combine_run_instructions,
+        normalize_user_language,
+        parse_accept_language,
+    )
+    from agent.run_instructions import effective_system_prompt
+    from tools.mobile_device_bridge import DEVICE_ACTION_ALIASES, validate_device_capabilities
+
+    # Extended Android OS draft/navigation capabilities & aliases.
+    ext_caps = ["sms_draft", "map_navigation", "clipboard_write", "contact_draft"]
+    cleaned, err = validate_device_capabilities(ext_caps)
+    assert err is None and cleaned == ext_caps
+    assert DEVICE_ACTION_ALIASES["sms"] == "sms_draft"
+    assert DEVICE_ACTION_ALIASES["nav"] == "map_navigation"
+    assert DEVICE_ACTION_ALIASES["copy"] == "clipboard_write"
+    assert DEVICE_ACTION_ALIASES["add_contact"] == "contact_draft"
+    prompt_ext = build_mobile_companion_instructions(ext_caps, user_language="fr")
+    for cap in ext_caps:
+        assert cap in prompt_ext
+    assert "French (fr)" in prompt_ext
+
+    # Accept-Language parsing & explicit user_language validation.
+    assert parse_accept_language("fr-CA,fr;q=0.9,en;q=0.8") == "fr"
+    assert parse_accept_language("en;q=0.5,fr;q=0.9") == "fr"
+    assert parse_accept_language("fr;q=0,en-US;q=0.8") == "en"
+    assert parse_accept_language("ja,de;q=0.9") is None
+    assert parse_accept_language("fr;q=inf,en;q=0.5") == "en"
+    assert normalize_user_language("fr-CA") == ("fr", None)
+    assert normalize_user_language("en_US") == ("en", None)
+    assert normalize_user_language(None, accept_language="fr-FR,fr;q=0.9") == ("fr", None)
+    assert normalize_user_language("de")[1] is not None
+    assert normalize_user_language("")[1] is not None
+    assert normalize_user_language(123)[1] is not None
+
+    # Language-only prompt without mobile capabilities.
+    lang_only = combine_run_instructions(None, None, user_language="en")
+    assert lang_only is not None and "English (en)" in lang_only and "Smart Notes" in lang_only
+
+    # End-to-end HTTP POST /v1/runs: explicit user_language, Accept-Language fallback, invalid 400, per-run expiry.
+    adapter = _make_adapter()
+    adapter._api_key = "owner-key"
+    agent = MagicMock()
+    agent.ephemeral_system_prompt = None
+    seen_prompts: list[str] = []
+
+    def run(**kwargs):
+        seen_prompts.append(effective_system_prompt(agent, "BASE"))
+        return {"final_response": "ok"}
+
+    agent.run_conversation.side_effect = run
+    monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: agent)
+    app = _mount_full_mobile_app(adapter)
+    headers = {"Authorization": "Bearer owner-key"}
+
+    with override_hermes_home(tmp_path):
+        async with TestClient(TestServer(app)) as client:
+            # Invalid explicit user_language -> 400 invalid_user_language.
+            bad = await client.post("/v1/runs", json={"input": "hi", "user_language": "de"}, headers=headers)
+            assert bad.status == 400
+            assert (await bad.json())["error"]["code"] == "invalid_user_language"
+
+            # Explicit user_language="fr" overrides Accept-Language: en-US.
+            r1 = await client.post(
+                "/v1/runs",
+                json={"input": "bonjour", "user_language": "fr", "device_capabilities": ["sms_draft"]},
+                headers={**headers, "Accept-Language": "en-US,en;q=0.9"},
+            )
+            assert r1.status == 202
+            run1_id = (await r1.json())["run_id"]
+            async with client.get(f"/v1/runs/{run1_id}/events", headers=headers) as stream:
+                await stream.read()
+
+            # Accept-Language fallback when user_language is omitted (even without device_capabilities).
+            r2 = await client.post(
+                "/v1/runs",
+                json={"input": "hello"},
+                headers={**headers, "Accept-Language": "en-US,en;q=0.9"},
+            )
+            assert r2.status == 202
+            run2_id = (await r2.json())["run_id"]
+            async with client.get(f"/v1/runs/{run2_id}/events", headers=headers) as stream:
+                await stream.read()
+
+            # Subsequent run with neither field nor Accept-Language must NOT retain prior language.
+            r3 = await client.post("/v1/runs", json={"input": "neutral"}, headers=headers)
+            assert r3.status == 202
+            run3_id = (await r3.json())["run_id"]
+            async with client.get(f"/v1/runs/{run3_id}/events", headers=headers) as stream:
+                await stream.read()
+
+    assert "French (fr)" in seen_prompts[0] and "sms_draft" in seen_prompts[0]
+    assert "English (en)" in seen_prompts[1] and "[Hermes Mobile Companion]" not in seen_prompts[1]
+    assert seen_prompts[2] == "BASE"
