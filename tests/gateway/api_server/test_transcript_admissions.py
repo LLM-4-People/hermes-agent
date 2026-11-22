@@ -26,7 +26,8 @@ async def test_visible_input_admission_requires_matching_session_and_origin(api,
     seed_messages(store, sid, message("user", first), message("assistant", first),
                   message("user", second), message("assistant"), message("user", other_turn),
                   message("user", different_actor), message("user", "ordinary-platform-id"),
-                  message("user", second, observed=True), message("user"))
+                  message("user", second, observed=True), message("user"),
+                  message("user", first, display_kind="hidden"))
     seed_messages(store, local, message("user", wrong_source))
     app = web.Application()
     api._api_key = "fixture-key"
@@ -45,6 +46,8 @@ async def test_visible_input_admission_requires_matching_session_and_origin(api,
         assert all("api_admission_id" not in row for row in visible if row["role"] == "assistant")
         assert all("platform_message_id" not in row for row in visible)
         assert (await read(path, {"visible_only": "true", "limit": 1, "offset": 2}))[0] == visible[2]
-        assert all("api_admission_id" not in row for row in await read(path, {}))
+        raw = await read(path, {})
+        assert len(raw) == len(visible) + 1 and raw[-1]["display_kind"] == "hidden"
+        assert all("api_admission_id" not in row for row in raw)
         foreign = await read(f"/api/sessions/{local}/messages", {"visible_only": "true"})
         assert "api_admission_id" not in foreign[0]
