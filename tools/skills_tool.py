@@ -253,13 +253,14 @@ def _skill_catalog(
                 continue
             try:
                 frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
-                description = frontmatter.get("description", "")
-                if not description:  # first non-heading body line (a null value stays null)
-                    description = next((ln for ln in map(str.strip, body.strip().split("\n"))
-                                        if ln and not ln.startswith("#")), description)
+                name = frontmatter.get("name", skill_md.parent.name)
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                description = frontmatter.get("description")
+                if not isinstance(description, str) or not description:
+                    description = next((ln for ln in map(str.strip, body.splitlines()) if ln and not ln.startswith("#")), "")
                 scanned.append({
-                    "name": frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH],
-                    "description": _truncate_description(description),
+                    "name": name, "description": _truncate_description(description),
                     "category": _get_category_from_path(skill_md), "tier": tier, "root": scan_dir,
                     "path": skill_md, "visible": bool(skill_matches_platform(frontmatter)
                                                       and skill_matches_environment(frontmatter)
@@ -268,7 +269,7 @@ def _skill_catalog(
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
                 logger.debug("Skipping skill at %s: failed to parse: %s", skill_md, e, exc_info=True)
-    skills = [s for s in resolve_skill_catalog(scanned)
+    skills = [s for s in resolve_skill_catalog(scanned, roots=roots)
               if (s.pop("visible") or include_hidden) and not is_disabled_entry(s, disabled)]
     # Keyed by the signature computed BEFORE the scan: a write racing the scan changes the
     # signature, so the next call re-scans instead of serving a torn result.

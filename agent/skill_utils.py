@@ -470,7 +470,32 @@ def is_disabled_entry(entry: dict[str, Any], disabled: set[str]) -> bool:
     return not disabled.isdisjoint({str(entry["name"]), entry.get("load_name")} - {None})
 
 
-def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _catalog_legacy_candidates(roots, aliases):
+    """Legacy flat Markdown can claim a short name or a relative path suffix in skill_view.
+    Collect only aliases a directory skill could advertise, in one pass over the roots."""
+    from collections import defaultdict
+    candidates = defaultdict(list)
+    filenames = {Path(alias).name + ".md" for alias in aliases}
+    for tier, root in roots:
+        for parent, subdirs, files in os.walk(root):
+            directory = Path(parent)
+            if directory != root and "SKILL.md" in files:
+                # All Markdown below a directory skill belongs to that package.
+                subdirs.clear()
+                continue
+            for filename in files:
+                if filename == "SKILL.md" or filename not in filenames:
+                    continue
+                path = directory / filename
+                parts = path.relative_to(root).with_suffix("").parts
+                for start in range(len(parts)):
+                    alias = "/".join(parts[start:])
+                    if alias in aliases:
+                        candidates[alias].append((tier, str(root), skill_candidate_rank(path, root), path))
+    return candidates
+
+
+def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[dict[str, Any]]:
     """Copies of scanned skills (each with ``name``, ``tier``, ``root`` and ``path`` = its SKILL.md)
     annotated with what skill_view() resolves, using its aliases (declared name, directory name, path
     relative to the root) and :func:`pick_skill_candidate`. Adds ``relative_path`` and ``status``:
@@ -483,12 +508,17 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
         e["relative_path"] = skill_dir.relative_to(e["root"]).as_posix()
         for alias in {str(e["name"]), skill_dir.name, e["relative_path"]}:
             owners.setdefault(alias, []).append(i)
+    legacy = _catalog_legacy_candidates(roots, owners)
     winner: dict[str, Optional[int]] = {}
     for alias, idxs in owners.items():
-        won, _ = pick_skill_candidate([
+        candidates = [
             (out[j]["tier"], str(out[j]["root"]), skill_candidate_rank(out[j]["path"], out[j]["root"]), out[j]["path"])
-            for j in idxs])
-        winner[alias] = None if won is None else idxs[won]
+            for j in idxs]
+        flat = legacy.get(alias, ())
+        won, _ = pick_skill_candidate([*candidates, *flat])
+        # A winning legacy file owns the alias but has no directory-skill catalog row.
+        row_ids = idxs + [-1] * len(flat)
+        winner[alias] = row_ids[won] if won is not None else None
     for i, e in enumerate(out):
         name, rel = str(e["name"]), e["relative_path"]
         higher = [j for j in owners[name] if out[j]["tier"] < e["tier"]]
