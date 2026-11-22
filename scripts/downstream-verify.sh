@@ -48,6 +48,7 @@ scripts/run_tests.sh \
   tests/gateway/test_api_standalone_pending_approvals.py \
   tests/gateway/test_runtime_footer.py \
   tests/gateway/test_session_info.py \
+  tests/persistence_sqlite/conversation/test_photo_previews.py \
   tests/gateway/test_hygiene_provider_identity.py \
   tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_signal.py \

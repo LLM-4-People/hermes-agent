@@ -116,13 +116,30 @@ _PREVIEW_RAW_SELECT = (
     f" ELSE SUBSTR({_sql_ltrim_whitespace(_PREVIEW_CONTENT_SQL)}, 1, {_PREVIEW_HEAD_CHARS}) END")
 
 
+# A real API user row names its admission in platform_message_id. Its typed request retains
+# the original text parts even after the image bytes have been compacted. A plain-text
+# admission can contain a verbatim copy of an attachment receipt and must remain literal.
+_PREVIEW_USER_CONTENT_SQL = """CASE WHEN typeof(m.content) = 'text' AND INSTR(m.content, '[Image attached at: ') > 0
+    AND INSTR(m.content, '[screenshot') > 0 THEN COALESCE((
+        SELECT CASE json_type(a.payload_json, '$.text')
+            WHEN 'text' THEN m.content
+            WHEN 'array' THEN COALESCE((
+                SELECT group_concat(part, char(10)) FROM (
+                    SELECT json_extract(p.value, '$.text') AS part FROM json_each(a.payload_json, '$.text') p
+                    WHERE p.type = 'object' AND json_extract(p.value, '$.type') = 'text' ORDER BY p.key
+                )), 'What do you see in this image?')
+        END FROM session_admissions a
+        WHERE a.admission_id = m.platform_message_id AND a.target_session_id = m.session_id
+          AND json_type(a.payload_json, '$.api_turn_v1') = 'object'
+    ), legacy_api_photo_caption(m.content)) ELSE m.content END"""
+
+
 def _sql_preview_raw(session_id_expr: str = "s.id") -> str:
-    """Correlated ``_preview_raw`` column: the first eligible user message of *session_id_expr*.
-    ``INDEXED BY`` walks the session in timestamp order and stops at the first eligible row; with planner
-    stats older than idx_messages_session_id, SQLite otherwise reads and sorts the whole session (#119403)."""
-    return (f"COALESCE((SELECT {_PREVIEW_RAW_SELECT} FROM messages m INDEXED BY idx_messages_session"
+    """Select the first eligible user row by index. Project its caption before the normal preview cut."""
+    return (f"COALESCE((SELECT {_PREVIEW_RAW_SELECT} FROM (SELECT {_PREVIEW_USER_CONTENT_SQL} AS content"
+        f" FROM messages m INDEXED BY idx_messages_session"
         f" WHERE m.session_id = {session_id_expr} AND m.role = 'user' AND m.content IS NOT NULL"
-        f" AND {_PREVIEW_ELIGIBLE_SQL} ORDER BY m.timestamp, m.id LIMIT 1), '') AS _preview_raw")
+        f" AND {_PREVIEW_ELIGIBLE_SQL} ORDER BY m.timestamp, m.id LIMIT 1) m LIMIT 1), '') AS _preview_raw")
 
 
 # Accidental end reasons recovery treats as resumable. superseded_by_resume = sentinel-parked runtime replaced
