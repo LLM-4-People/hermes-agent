@@ -80,7 +80,7 @@ def build_models_payload(
     capabilities: bool = False, featured: bool = False, force_fresh_nous_tier: bool = False,
     refresh: bool = False, probe_custom_providers: bool = True, probe_current_custom_provider: bool = False,
     for_picker: bool = False, max_models: int | None = None, non_blocking_catalogs: bool = False,
-    fast_custom_probe: bool | None = None,
+    fast_custom_probe: bool | None = None, detailed_metadata: bool = False,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer needs. ``explicit_only`` keeps
     only providers the user explicitly configured — hides ambient/auto-seeded credentials from
@@ -130,7 +130,10 @@ def build_models_payload(
     if canonical_order:
         rows = _reorder_canonical(rows)
     if pricing:
-        _apply_pricing(rows, force_fresh_nous_tier=force_fresh_nous_tier, cached_only=pricing_cache_only)
+        _apply_pricing(
+            rows, force_fresh_nous_tier=force_fresh_nous_tier, cached_only=pricing_cache_only,
+            detailed_metadata=detailed_metadata,
+        )
     # Both metadata decorators consult ``model_overrides``.  Snapshot the
     # read-only config once for this payload rather than letting each model
     # lookup reopen config.yaml through models_dev._cfg_get().
@@ -143,7 +146,7 @@ def build_models_payload(
         except Exception:
             metadata_config = None
     if capabilities:
-        _apply_capabilities(rows, metadata_config=metadata_config)
+        _apply_capabilities(rows, metadata_config=metadata_config, detailed_metadata=detailed_metadata)
     if featured:
         _apply_featured(rows, metadata_config=metadata_config)
     _apply_custom_aliases(rows)
@@ -230,7 +233,7 @@ def build_model_options_payload(
         picker_hints=True, canonical_order=True, pricing=True, pricing_cache_only=not refresh,
         capabilities=True, featured=True, for_picker=True, fast_custom_probe=False,
         refresh=refresh, probe_custom_providers=refresh, probe_current_custom_provider=not refresh,
-        non_blocking_catalogs=not refresh,
+        non_blocking_catalogs=not refresh, detailed_metadata=True,
     )
     _apply_limits(payload["providers"])
     _apply_usage(payload["providers"])
@@ -523,7 +526,57 @@ def _reasoning_catalog_reader(slug: str):
     return read
 
 
-def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None) -> None:
+def _normalized_model_capabilities(
+    slug: str, model: str, meta: Any, *, get_model_info, metadata_config: dict | None,
+) -> dict[str, Any]:
+    """Normalized model capability metadata (explicit ``None`` when unknown, never ``0``)."""
+    info = None
+    if get_model_info is not None and slug:
+        try:
+            info = get_model_info(slug, model, config=metadata_config)
+            if info is None and slug.lower() in {"openrouter", "nous"} and "/" in model:
+                info = get_model_info("openrouter", model, config=metadata_config)
+        except Exception:
+            logging.getLogger(__name__).debug("Model capability lookup failed", exc_info=True)
+            info = None
+
+    ctx_len: Optional[int] = None
+    if info is not None and isinstance(getattr(info, "context_window", None), int) and info.context_window > 0:
+        ctx_len = info.context_window
+    elif meta is not None and isinstance(getattr(meta, "context_window", None), int) and meta.context_window > 0:
+        ctx_len = meta.context_window
+
+    max_out: Optional[int] = None
+    if meta is not None and isinstance(getattr(meta, "max_output_tokens", None), int) and meta.max_output_tokens > 0:
+        max_out = meta.max_output_tokens
+    elif info is not None and isinstance(getattr(info, "max_output", None), int) and info.max_output > 0:
+        max_out = info.max_output
+
+    vision: Optional[bool] = None
+    if meta is not None and meta.supports_vision is not None:
+        vision = bool(meta.supports_vision)
+    elif info is not None:
+        vision = bool(info.supports_vision())
+
+    tools: Optional[bool] = None
+    if meta is not None:
+        tools = bool(meta.supports_tools)
+    elif info is not None:
+        tools = bool(info.tool_call)
+
+    structured_output: Optional[bool] = bool(info.structured_output) if info is not None else None
+    return {
+        "context_length": ctx_len,
+        "max_output_tokens": max_out,
+        "vision": vision,
+        "tools": tools,
+        "structured_output": structured_output,
+    }
+
+
+def _apply_capabilities(
+    rows: list[dict], *, metadata_config: dict | None = None, detailed_metadata: bool = False,
+) -> None:
     """Attach ``{model: {fast, reasoning, ...}}`` per row. ``reasoning`` defaults True when the catalog is
     silent (the dial is a no-op on models that ignore it; hiding it from a capable model is worse). A
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
@@ -532,9 +585,10 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
     from hermes_cli.models import model_supports_ultrafast, resolve_fast_mode_overrides
 
     try:
-        from agent.models_dev import get_model_capabilities
+        from agent.models_dev import get_model_capabilities, get_model_info
     except Exception:
         get_model_capabilities = None  # type: ignore[assignment]
+        get_model_info = None  # type: ignore[assignment]
 
     # Daybreak rides the Responses request; the opt-in codex app-server runtime never sends it.
     _model_cfg = (metadata_config or {}).get("model")
@@ -547,17 +601,23 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
         read_reasoning_catalog = _reasoning_catalog_reader(slug.lower())
         for model in row.get("models") or []:
             reasoning = True
+            meta = None
             if get_model_capabilities is not None and slug:
                 try:
                     meta = get_model_capabilities(slug, model, config=metadata_config)
                     if meta is not None and meta.supports_reasoning is not None:
                         reasoning = meta.supports_reasoning
                 except Exception:
+                    meta = None
                     reasoning = True
 
             fast = resolve_fast_mode_overrides(
                 model, provider=slug, base_url=row.get("api_url")) is not None
             entry: dict[str, Any] = {"fast": fast, "reasoning": reasoning}
+            if detailed_metadata:
+                entry.update(_normalized_model_capabilities(
+                    slug, model, meta, get_model_info=get_model_info, metadata_config=metadata_config,
+                ))
             if fast and model_supports_ultrafast(model) and ultrafast_offered(
                     model, provider=slug, base_url=row.get("api_url")):
                 entry["ultrafast"] = True
@@ -892,8 +952,85 @@ def _plan_usage_window(g) -> dict:
     }
 
 
+def _per_1m_from_per_token(raw: Any) -> Optional[float]:
+    """Convert per-token price string to finite non-negative USD per 1M tokens, else ``None``."""
+    import math
+    if raw in (None, ""):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val < 0.0:
+        return None
+    return round(val * 1_000_000.0, 6)
+
+
+def _decimal_to_float(value: Any) -> Optional[float]:
+    import math
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(val, 6) if math.isfinite(val) and val >= 0.0 else None
+
+
+def _local_pricing_entry(slug: str, model_id: str, *, base_url: Optional[str], format_price) -> Optional[dict[str, Any]]:
+    """Non-blocking local pricing lookup (official docs snapshot + cached models.dev only)."""
+    try:
+        from agent.usage_pricing import (
+            _lookup_official_docs_pricing, _models_dev_pricing_entry, resolve_billing_route,
+        )
+        route = resolve_billing_route(model_id, provider=slug, base_url=base_url)
+        if route.billing_mode == "subscription_included":
+            return None
+        entry = _lookup_official_docs_pricing(route) or _models_dev_pricing_entry(route)
+    except Exception:
+        logging.getLogger(__name__).debug("Local pricing lookup failed", exc_info=True)
+        return None
+    if entry is None:
+        return None
+    inp_1m = _decimal_to_float(entry.input_cost_per_million)
+    out_1m = _decimal_to_float(entry.output_cost_per_million)
+    cache_read_1m = _decimal_to_float(entry.cache_read_cost_per_million)
+    cache_write_1m = _decimal_to_float(entry.cache_write_cost_per_million)
+    if inp_1m is None and out_1m is None:
+        return None
+    inp_str = format_price(str(inp_1m / 1_000_000.0)) if inp_1m is not None else ""
+    out_str = format_price(str(out_1m / 1_000_000.0)) if out_1m is not None else ""
+    cache_str = format_price(str(cache_read_1m / 1_000_000.0)) if cache_read_1m is not None else None
+    return {
+        "input": inp_str,
+        "output": out_str,
+        "cache": cache_str,
+        "free": inp_str == "free" and out_str in ("free", ""),
+        "input_per_1m": inp_1m,
+        "output_per_1m": out_1m,
+        "cache_read_per_1m": cache_read_1m,
+        "cache_write_per_1m": cache_write_1m,
+    }
+
+
+def _apply_local_pricing_fallback(
+    row: dict, slug: str, models: list[str], formatted: dict[str, dict], format_price,
+) -> None:
+    """Fill missing model pricing from local/cached snapshots (zero network I/O)."""
+    base_url = str(row.get("api_url") or "") or None
+    for mid in models:
+        if mid in formatted:
+            continue
+        local = _local_pricing_entry(slug, mid, base_url=base_url, format_price=format_price)
+        if local is not None:
+            formatted[mid] = local
+
+
 # health: allow CC -- usage-window plans: one branch attaches plan usage to the Nous row (built in _attach_nous_plan_usage); over target on main
-def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cached_only: bool = False) -> None:
+def _apply_pricing(
+    rows: list[dict], *, force_fresh_nous_tier: bool = False, cached_only: bool = False,
+    detailed_metadata: bool = False,
+) -> None:
     """Set ``row["pricing"] = {model_id: {input, output, cache | None, free}}``; for Nous also
     ``free_tier`` (account is free-tier) and ``unavailable_models`` (paid models a free user can't pick).
     ``cached_only`` never hits the network: unknown Nous entitlement fails closed (``free_tier_pending``,
@@ -945,6 +1082,13 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
                 row["free_tier"] = bool(cached_nous_tier)
                 row["pricing_pending"] = True
                 row["unavailable_models"] = list(models) if cached_nous_tier else []
+                continue
+            if not detailed_metadata:
+                continue
+            formatted = {}
+            _apply_local_pricing_fallback(row, slug, models, formatted, _format_price_per_mtok)
+            if formatted:
+                row["pricing"] = formatted
             continue
 
         formatted: dict[str, dict] = {}
@@ -954,6 +1098,7 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
                 continue
             inp_raw, out_raw = p.get("prompt", ""), p.get("completion", "")
             cache_raw = p.get("input_cache_read", "")
+            cache_write_raw = p.get("input_cache_write", "")
             inp = _format_price_per_mtok(inp_raw) if inp_raw != "" else ""
             out = _format_price_per_mtok(out_raw) if out_raw != "" else ""
             entry: dict = {
@@ -961,6 +1106,13 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
                 "cache": _format_price_per_mtok(cache_raw) if cache_raw else None,
                 "free": inp == "free" and out in ("free", ""),  # both input and output cost nothing
             }
+            if detailed_metadata:
+                entry.update({
+                    "input_per_1m": _per_1m_from_per_token(inp_raw),
+                    "output_per_1m": _per_1m_from_per_token(out_raw),
+                    "cache_read_per_1m": _per_1m_from_per_token(cache_raw),
+                    "cache_write_per_1m": _per_1m_from_per_token(cache_write_raw),
+                })
             # Sale chrome is Nous Portal-only (other catalogs' nested pricing.original is ignored); free
             # models get flat -100% chrome, was_* only when the gateway served an original.
             if slug == "nous":
@@ -972,6 +1124,9 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
                         if was_raw != "":
                             entry[key] = _format_price_per_mtok(was_raw)
             formatted[mid] = entry
+
+        if detailed_metadata and slug != "nous":
+            _apply_local_pricing_fallback(row, slug, models, formatted, _format_price_per_mtok)
 
         if formatted:
             row["pricing"] = formatted

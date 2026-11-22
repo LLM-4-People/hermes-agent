@@ -32,6 +32,8 @@ class PendingControls:
             if 'edit' in data:
                 prompt['edit'] = deepcopy(data['edit'])
                 prompt['choices'] = ['once', 'deny']
+            from tools.approval_prompt import build_approval_preview
+            prompt['preview'] = build_approval_preview(data)
             if timeout_s is not None:
                 prompt['timeout_s'] = timeout_s
             self.pending[prompt_id] = (route, prompt)

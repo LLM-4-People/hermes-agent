@@ -798,7 +798,7 @@ def _resolve_or_none(filepath: str, task_id: str, *, entry: bool = False) -> str
 
 
 def _write_precheck_error(paths: list[str], content_paths: list[str], task_id: str,
-                          cross_profile: bool) -> str | None:
+                          cross_profile: bool, *, edit_context: dict | None = None) -> str | None:
     """Run the shared write/patch guards in order; return the first error string.
 
     Order matters: hard denies (sensitive path, mirror) and the corruption
@@ -814,7 +814,7 @@ def _write_precheck_error(paths: list[str], content_paths: list[str], task_id: s
         err = _check_binary_document_write(p, task_id)
         if err:
             return err
-    return (_check_protected_instruction_write(paths, task_id)
+    return (_check_protected_instruction_write(paths, task_id, edit_context=edit_context)
             or _check_approval_required_write(paths, task_id))
 
 
@@ -901,7 +901,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     # write_file checks the binary-document guard before the mirror guard.
     err = (_check_sensitive_path(path, task_id)
            or _check_binary_document_write(path, task_id)
-           or _check_protected_instruction_write([path], task_id)
+           or _check_protected_instruction_write(
+               [path], task_id, edit_context={"tool_name": "write_file", "path": path, "new_text": content},
+           )
            or _check_approval_required_write([path], task_id)
            or (None if cross_profile else _check_cross_profile_path(path, task_id)))
     if not err and _is_internal_file_tool_content(content):
@@ -1004,7 +1006,15 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
         _paths_to_check += collected[0]
         _content_write_paths += collected[1]
         _entry_paths = collected[2]
-    precheck_err = _write_precheck_error(_paths_to_check, _content_write_paths, task_id, cross_profile)
+    patch_edit_ctx = {
+        "tool_name": "patch",
+        "path": path or (_paths_to_check[0] if _paths_to_check else ""),
+        "old_text": old_string if mode == "replace" else None,
+        "new_text": new_string if mode == "replace" else patch,
+    }
+    precheck_err = _write_precheck_error(
+        _paths_to_check, _content_write_paths, task_id, cross_profile, edit_context=patch_edit_ctx,
+    )
     if precheck_err:
         return tool_error(precheck_err)
     try:
