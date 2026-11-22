@@ -691,6 +691,15 @@ Canonical controls do not accept identityless or bulk responses. Stale generatio
 foreign prompt IDs, and settled runs return HTTP 409. Existing run authentication
 and hosted-room approval restrictions still apply.
 
+For a standalone run, poll its owning gateway for `pending_controls`. Each
+`approval.request` entry carries the native `request_id`, redacted prompt
+text and the choices available to the caller. Send that ID with the chosen
+answer. Concurrent approvals have separate IDs. An empty array means there
+are no current controls for this run. The legacy `approval` field shows the
+oldest pending entry. Stopping, unknown and terminal runs return an empty
+array. A gateway serving a retained queued, running or waiting run owned by
+another process omits both fields because it cannot inspect that process's waiters.
+
 ### POST /v1/runs/\{run_id\}/clarify
 
 The authenticated endpoint resolves a question in the current run. Check

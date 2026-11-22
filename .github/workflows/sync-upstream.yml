@@ -53,6 +53,7 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           test-environment: 'true'
+          extras: '["sms"]'  # Match the downstream CI gate's locked aiohttp dependency.
           prune-python-cache: true
           cache: 'false'
           cache-python: 'false'

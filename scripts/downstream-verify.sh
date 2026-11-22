@@ -45,6 +45,7 @@ scripts/run_tests.sh \
   tests/gateway/test_model_command_custom_providers.py \
   tests/gateway/test_session_model_override_routing.py \
   tests/gateway/test_gateway_route_identity.py \
+  tests/gateway/test_api_standalone_pending_approvals.py \
   tests/gateway/test_runtime_footer.py \
   tests/gateway/test_session_info.py \
   tests/gateway/test_hygiene_provider_identity.py \

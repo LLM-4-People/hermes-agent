@@ -37,6 +37,7 @@ jobs:
         uses: ./.github/actions/setup-pm
         with:
           test-environment: 'true'
+          extras: '["sms"]'  # The HTTP regression needs aiohttp; this extra installs only that dependency.
           prune-python-cache: true
 
       - name: Verify downstream patch
