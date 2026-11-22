@@ -11,14 +11,15 @@ import logging
 import os
 import time
 from contextlib import contextmanager, suppress
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
 from agent.skill_utils import (
-    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, _hermes_metadata, is_skill_support_path as _is_skill_support_path)
+    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, _hermes_metadata, is_skill_support_path as _is_skill_support_path,
+    skill_lookup_path_error)
 from tools.skills_tool_setup import (
     SkillReadinessStatus, _build_setup_note, _capture_required_environment_variables,
     _get_required_environment_variables, _is_env_var_persisted, _is_remote_env_backend)
@@ -101,20 +102,6 @@ def _skills_dir() -> Path:
 
 _secret_capture_callback = None
 _LOOKUP_HINT = "Use a skill name or relative path within the skills directory."
-
-
-def skill_lookup_path_error(name: str) -> Optional[str]:
-    """Error if lookup *name* could escape the search roots it is joined onto. Windows drive
-    paths are rejected too: their ``:`` would be misread as a plugin namespace separator."""
-    from tools.path_security import has_traversal_component
-    if not isinstance(name, str):
-        return "Skill name must be a string."
-    win = PureWindowsPath(candidate := name.strip())
-    if PurePosixPath(candidate).is_absolute() or win.is_absolute() or win.drive:
-        return "Skill name must be a relative path within the skills directory."
-    if has_traversal_component(candidate):
-        return "Skill name cannot contain '..' path traversal components."
-    return None
 
 
 def load_env() -> dict[str, str]:
@@ -280,7 +267,7 @@ def _skill_catalog(
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
             try:
-                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
+                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md))
                 name = frontmatter.get("name", skill_md.parent.name)
                 if not isinstance(name, str) or not name.strip():
                     continue

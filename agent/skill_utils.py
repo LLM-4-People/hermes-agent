@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import threading
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import (
@@ -504,7 +504,27 @@ def _catalog_legacy_candidates(roots, aliases):
     return candidates
 
 
-_LOCATOR_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+def skill_lookup_path_error(name: str) -> Optional[str]:
+    """Error if lookup *name* could escape the search roots it is joined onto. Windows drive
+    paths are rejected too: their ``:`` would be misread as a plugin namespace separator."""
+    from tools.path_security import has_traversal_component
+    if not isinstance(name, str):
+        return "Skill name must be a string."
+    win = PureWindowsPath(candidate := name.strip())
+    if PurePosixPath(candidate).is_absolute() or win.is_absolute() or win.drive:
+        return "Skill name must be a relative path within the skills directory."
+    if has_traversal_component(candidate):
+        return "Skill name cannot contain '..' path traversal components."
+    return None
+
+
+# Colons dispatch to the plugin registry. Local catalog locators must round-trip without that
+# dispatch and fit on one line, including when their exact relative path is used.
+_LOCAL_LOCATOR_SEPARATOR = re.compile(r"[:\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _is_local_catalog_locator(alias: str) -> bool:
+    return not _LOCAL_LOCATOR_SEPARATOR.search(alias) and skill_lookup_path_error(alias) is None
 
 
 def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[dict[str, Any]]:
@@ -547,7 +567,7 @@ def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[di
             # Locators are single-line identifiers. Fall back to the owned relative path
             # when a YAML block scalar or directory name contains a control character.
             load_name = next((alias for alias in (name, rel) if winner[alias] == i
-                              and not _LOCATOR_CONTROL.search(alias)), None)
+                              and _is_local_catalog_locator(alias)), None)
             e.update(status="unique" if winner[name] == i else "ambiguous", load_name=load_name)
     return out
 
