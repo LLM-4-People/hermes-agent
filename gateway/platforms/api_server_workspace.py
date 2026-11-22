@@ -415,6 +415,19 @@ def _unlink_quietly(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+async def _canonical_upload_session_id(adapter, session_id: str) -> str:
+    """Resolve the stable lineage root for ``session_id`` so uploads survive compaction."""
+    store = adapter._store_beside(await adapter._ensure_store_async())
+    if store is None:
+        return session_id
+    try:
+        root_id = await asyncio.to_thread(store.lineage.conversation_root, session_id)
+        return str(root_id or session_id)
+    except Exception:
+        logger.debug("Lineage root lookup skipped for upload session %s", session_id, exc_info=True)
+        return session_id
+
+
 async def handle_session_upload(adapter, request: web.Request) -> web.Response:
     """POST /api/sessions/{session_id}/uploads — stage a profile/session-scoped artifact."""
     from gateway.platforms.api_server import _error_response
@@ -425,6 +438,7 @@ async def handle_session_upload(adapter, request: web.Request) -> web.Response:
     _, err = await adapter._get_existing_session_or_404(session_id)
     if err is not None:
         return err
+    canonical_session_id = await _canonical_upload_session_id(adapter, session_id)
 
     content_type = (request.content_type or "").lower()
     if not content_type.startswith("multipart/"):
@@ -446,18 +460,19 @@ async def handle_session_upload(adapter, request: web.Request) -> web.Response:
     declared_mime = file_part.headers.get("Content-Type")
     try:
         upload_id, target, meta_path, safe_name = await asyncio.to_thread(
-            _prepare_upload_target, session_id, raw_filename
+            _prepare_upload_target, canonical_session_id, raw_filename
         )
     except FileNotFoundError:
         return _error_response("Profile home is unavailable.", 404, code="profile_unavailable")
-    except OSError as exc:
+    except OSError:
         logger.exception("[%s] Failed to prepare session upload directory", adapter.name)
-        return _error_response(f"Could not stage upload: {exc}", 500, code="upload_stage_failed")
+        return _error_response("Could not stage upload.", 500, code="upload_stage_failed")
 
     hasher = hashlib.sha256()
     sample = bytearray()
     total_bytes = 0
     handle = None
+    committed = False
     try:
         handle = await asyncio.to_thread(_open_upload_file, target)
         while chunk := await file_part.read_chunk(_UPLOAD_CHUNK_BYTES):
@@ -476,48 +491,43 @@ async def handle_session_upload(adapter, request: web.Request) -> web.Response:
         await asyncio.to_thread(handle.close)
         handle = None
         if total_bytes == 0:
-            await asyncio.to_thread(_unlink_quietly, target)
             return _error_response("Uploaded file cannot be empty.", 400, code="empty_upload")
+        mime_type = _sniff_mime_type(bytes(sample), safe_name, declared_mime)
+        sha256_hex = hasher.hexdigest()
+        record = {
+            "upload_id": upload_id,
+            "session_id": canonical_session_id,
+            "filename": safe_name,
+            "stored_name": target.name,
+            "mime_type": mime_type,
+            "size": total_bytes,
+            "sha256": sha256_hex,
+            "created_at": time.time(),
+        }
+        await asyncio.to_thread(_write_upload_metadata, meta_path, record)
+        committed = True
     except web.HTTPRequestEntityTooLarge:
-        if handle is not None:
-            await asyncio.to_thread(handle.close)
-        await asyncio.to_thread(_unlink_quietly, target)
         return _error_response(
             f"Upload exceeds maximum artifact size of {WEBAPP_ATTACHMENT_MAX_BYTES} bytes.",
             413,
             code="artifact_too_large",
         )
-    except OSError as exc:
-        if handle is not None:
-            await asyncio.to_thread(handle.close)
-        await asyncio.to_thread(_unlink_quietly, target)
+    except OSError:
         logger.exception("[%s] Failed writing session upload", adapter.name)
-        return _error_response(f"Could not store upload: {exc}", 500, code="upload_write_failed")
-
-    mime_type = _sniff_mime_type(bytes(sample), safe_name, declared_mime)
-    sha256_hex = hasher.hexdigest()
-    record = {
-        "upload_id": upload_id,
-        "session_id": session_id,
-        "filename": safe_name,
-        "stored_name": target.name,
-        "mime_type": mime_type,
-        "size": total_bytes,
-        "sha256": sha256_hex,
-        "created_at": time.time(),
-    }
-    try:
-        await asyncio.to_thread(_write_upload_metadata, meta_path, record)
-    except OSError as exc:
-        await asyncio.to_thread(_unlink_quietly, target)
-        logger.exception("[%s] Failed writing upload metadata", adapter.name)
-        return _error_response(f"Could not record upload metadata: {exc}", 500, code="upload_write_failed")
+        return _error_response("Could not store upload.", 500, code="upload_write_failed")
+    finally:
+        if handle is not None:
+            with suppress(OSError):
+                await asyncio.to_thread(handle.close)
+        if not committed:
+            await asyncio.to_thread(_unlink_quietly, target)
 
     return web.json_response(
         {
             "object": "hermes.session.upload",
             "upload_id": upload_id,
             "session_id": session_id,
+            "thread_id": canonical_session_id,
             "filename": safe_name,
             "mime_type": mime_type,
             "size": total_bytes,
@@ -594,21 +604,26 @@ def format_attachments_for_prompt(attachments: list[dict[str, Any]]) -> str:
 
 
 async def apply_run_attachments(
+    adapter,
     session_id: str,
     body: dict[str, Any],
-    user_message: str,
+    user_message: Any,
     openai_error,
-) -> tuple[str, Optional[web.Response]]:
-    """Resolve ``body['attachments']`` for ``POST /v1/runs`` without increasing caller CC."""
+) -> tuple[Any, Optional[web.Response]]:
+    """Resolve ``body['attachments']`` for ``POST /v1/runs`` (compaction-lineage & multimodal safe)."""
     raw = body.get("attachments")
     if raw is None:
         return user_message, None
-    resolved, err = await asyncio.to_thread(resolve_session_attachments, session_id, raw)
+    canonical_sid = await _canonical_upload_session_id(adapter, session_id)
+    resolved, err = await asyncio.to_thread(resolve_session_attachments, canonical_sid, raw)
     if err is not None:
         return user_message, web.json_response(openai_error(err[2], code=err[1]), status=err[0])
-    if resolved:
-        return f"{user_message}\n\n{format_attachments_for_prompt(resolved)}", None
-    return user_message, None
+    if not resolved:
+        return user_message, None
+    appendix = format_attachments_for_prompt(resolved)
+    if isinstance(user_message, list):
+        return [*user_message, {"type": "text", "text": appendix}], None
+    return f"{user_message}\n\n{appendix}", None
 
 
 def _http_routes(adapter) -> list[tuple]:

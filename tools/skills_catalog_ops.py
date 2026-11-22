@@ -303,8 +303,9 @@ def read_skill_detail(
 
     try:
         frontmatter, body, raw = _read_skill_frontmatter(resolved_md)
-    except (OSError, UnicodeDecodeError) as exc:
-        return None, (500, "skill_read_failed", f"Could not read skill '{name}': {exc}")
+    except (OSError, UnicodeDecodeError):
+        logger.warning("Could not read skill '%s'", name, exc_info=True)
+        return None, (500, "skill_read_failed", f"Could not read skill '{name}'.")
 
     config = load_config() or {}
     disabled = get_disabled_skills(config, platform=platform)

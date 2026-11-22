@@ -39,7 +39,10 @@ logger = logging.getLogger("gateway.platforms.api_server")
 
 MAX_SOUL_CHARS = 65_536
 _SOUL_PREVIEW_CHARS = 240
-_ALLOWED_DEFAULT_KEYS = frozenset({"model", "provider", "enabled_toolsets", "reasoning_effort"})
+_ALLOWED_DEFAULT_KEYS = frozenset({
+    "model", "provider", "enabled_toolsets", "reasoning_effort", "preferred_language",
+})
+_VALID_PREFERRED_LANGUAGES = frozenset({"fr", "en", "auto"})
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 CAPABILITY_FEATURES: dict[str, Any] = {
@@ -136,6 +139,13 @@ def _sync_get_profile() -> dict[str, Any]:
             raw = soul_path.read_text(encoding="utf-8-sig")
             soul_exists = True
             soul_preview = raw.strip()[:_SOUL_PREVIEW_CHARS]
+    display_cfg = config.get("display") if isinstance(config.get("display"), dict) else {}
+    raw_pref = str(display_cfg.get("preferred_language") or "").strip().lower()
+    if raw_pref in _VALID_PREFERRED_LANGUAGES:
+        preferred_language = raw_pref
+    else:
+        raw_lang = str(display_cfg.get("language") or "").strip().lower()
+        preferred_language = raw_lang if raw_lang == "fr" else "auto"
     return {
         "object": "hermes.profile",
         "name": name,
@@ -143,6 +153,7 @@ def _sync_get_profile() -> dict[str, Any]:
         "default_model": default_model,
         "default_provider": default_provider,
         "reasoning_effort": reasoning_effort,
+        "preferred_language": preferred_language,
         "enabled_toolsets": enabled_toolsets,
         "memory_enabled": memory_enabled,
         "user_profile_enabled": user_profile_enabled,
@@ -205,6 +216,16 @@ def _validate_profile_defaults_body(body: dict[str, Any]) -> tuple[Optional[dict
             return None, (400, "invalid_toolsets", f"Unknown toolset(s): {', '.join(unknown_ts)}.")
         cleaned["enabled_toolsets"] = sorted(normalized_ts)
 
+    if "preferred_language" in body:
+        raw_lang = body["preferred_language"]
+        if not isinstance(raw_lang, str) or raw_lang.strip().lower() not in _VALID_PREFERRED_LANGUAGES:
+            return None, (
+                400,
+                "invalid_preferred_language",
+                "preferred_language must be one of: auto, fr, en.",
+            )
+        cleaned["preferred_language"] = raw_lang.strip().lower()
+
     return cleaned, None
 
 
@@ -235,7 +256,20 @@ def _sync_patch_profile_defaults(updates: dict[str, Any]) -> dict[str, Any]:
                 platform_toolsets = {}
             platform_toolsets["api_server"] = updates["enabled_toolsets"]
             config["platform_toolsets"] = platform_toolsets
+        if "preferred_language" in updates:
+            display_cfg = config.get("display")
+            if not isinstance(display_cfg, dict):
+                display_cfg = {}
+            display_cfg["preferred_language"] = updates["preferred_language"]
+            if updates["preferred_language"] in ("fr", "en"):
+                display_cfg["language"] = updates["preferred_language"]
+            config["display"] = display_cfg
         save_config(config)
+    if "preferred_language" in updates:
+        with suppress(ImportError, RuntimeError):
+            from agent.i18n import reset_language_cache
+
+            reset_language_cache()
     return _sync_get_profile()
 
 
@@ -255,8 +289,9 @@ def _sync_get_soul() -> tuple[Optional[dict[str, Any]], Optional[tuple[int, str,
         }, None
     try:
         content = soul_path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
-        return None, (500, "soul_read_failed", f"Could not read SOUL.md: {exc}")
+    except (OSError, UnicodeDecodeError):
+        logger.warning("Could not read SOUL.md", exc_info=True)
+        return None, (500, "soul_read_failed", "Could not read SOUL.md.")
     return {
         "object": "hermes.profile.soul",
         "content": content,
@@ -277,8 +312,9 @@ def _sync_put_soul(content: str) -> tuple[Optional[dict[str, Any]], Optional[tup
 
         mkdir_under_hermes_home(soul_path.parent)
         atomic_write_text(soul_path, content, preserve_mode=True, create_mode=0o644)
-    except OSError as exc:
-        return None, (500, "soul_write_failed", f"Could not write SOUL.md: {exc}")
+    except OSError:
+        logger.warning("Could not write SOUL.md", exc_info=True)
+        return None, (500, "soul_write_failed", "Could not write SOUL.md.")
     return {
         "object": "hermes.profile.soul",
         "ok": True,

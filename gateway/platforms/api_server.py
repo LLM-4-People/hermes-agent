@@ -111,11 +111,14 @@ except ImportError:
 
 from gateway.config import Platform, PlatformConfig
 from gateway.display_config import resolve_display_setting
+from gateway.platforms import api_server_habits as _api_habits
 from gateway.platforms import api_server_memory as _api_memory
+from gateway.platforms import api_server_notes as _api_notes
 from gateway.platforms import api_server_profile as _api_profile
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms import api_server_sharing as _api_sharing
 from gateway.platforms import api_server_skills as _api_skills
 from gateway.platforms import api_server_workspace as _api_workspace
 from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES as _MAX_ARTIFACT_BYTES
@@ -1611,6 +1614,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         routes.extend(_api_runs._http_routes(self))
         routes.extend(_api_workspace._http_routes(self))
         routes.extend(_api_profile._http_routes(self))
+        routes.extend(_api_notes._http_routes(self))
+        routes.extend(_api_sharing._http_routes(self))
+        routes.extend(_api_habits._http_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -2374,12 +2380,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
             **_STATIC_FEATURE_FLAGS, **_api_memory.CAPABILITY_FEATURES, **_api_skills.CAPABILITY_FEATURES,
             **_api_workspace.CAPABILITY_FEATURES, **_api_profile.CAPABILITY_FEATURES,
+            **_api_notes.CAPABILITY_FEATURES, **_api_sharing.CAPABILITY_FEATURES, **_api_habits.CAPABILITY_FEATURES,
             "cron_run_history": _CRON_AVAILABLE,
             "run_unknown_resolution": canonical, "run_clarify_response": canonical,
             "cors": bool(self._cors_origins)}
         all_endpoints = (
             *_CAPABILITY_ENDPOINTS, *_api_memory.CAPABILITY_ENDPOINTS, *_api_skills.CAPABILITY_ENDPOINTS,
-            *_api_workspace.CAPABILITY_ENDPOINTS, *_api_profile.CAPABILITY_ENDPOINTS)
+            *_api_workspace.CAPABILITY_ENDPOINTS, *_api_profile.CAPABILITY_ENDPOINTS,
+            *_api_notes.CAPABILITY_ENDPOINTS, *_api_sharing.CAPABILITY_ENDPOINTS, *_api_habits.CAPABILITY_ENDPOINTS)
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
             "model": self._model_name,

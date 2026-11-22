@@ -371,7 +371,7 @@ def _sync_search_sessions(
         if sid not in root_cache:
             root_id = sid
             with suppress(Exception):
-                root_id = str(store.lineage.resolve_root(sid) or sid)
+                root_id = str(store.lineage.conversation_root(sid) or sid)
             title = None
             with suppress(Exception):
                 title = store.sessions.get_title(sid) or (store.sessions.get_title(root_id) if root_id != sid else None)

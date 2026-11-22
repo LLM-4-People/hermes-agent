@@ -60,6 +60,7 @@ scripts/run_tests.sh \
   tests/gateway/api_server/test_brain_memory_search_fork.py \
   tests/gateway/api_server/test_skill_studio.py \
   tests/gateway/api_server/test_workspace_profile_analytics.py \
+  tests/gateway/api_server/test_notes_and_habits.py \
   tests/tools/test_skills_tool_discovery_cache.py \
   tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_signal.py \

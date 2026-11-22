@@ -18,7 +18,7 @@ from gateway.platforms.api_server import (
     body_limit_middleware,
     security_headers_middleware,
 )
-from gateway.platforms.api_server_workspace import resolve_session_attachments
+from gateway.platforms.api_server_workspace import apply_run_attachments, resolve_session_attachments
 from gateway.session_authorities import SessionAuthorities
 from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES
 from persistence.conversation.sessions import NewSession
@@ -203,6 +203,7 @@ async def test_profile_defaults_soul_capabilities_and_secret_safety(tmp_path, mo
                 "provider": "anthropic",
                 "reasoning_effort": "high",
                 "enabled_toolsets": ["web", "file"],
+                "preferred_language": "fr",
             },
         )
         assert patch.status == 200
@@ -210,8 +211,14 @@ async def test_profile_defaults_soul_capabilities_and_secret_safety(tmp_path, mo
         assert updated["default_model"] == "claude-sonnet-4"
         assert updated["default_provider"] == "anthropic"
         assert updated["reasoning_effort"] == "high"
+        assert updated["preferred_language"] == "fr"
         assert updated["enabled_toolsets"] == ["file", "web"]
         assert "# Keep this comment" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
+
+        # Reset preferred_language back to auto, and reject invalid language
+        auto_patch = await cli.patch("/api/profile/defaults", headers=headers, json={"preferred_language": "auto"})
+        assert auto_patch.status == 200 and (await auto_patch.json())["preferred_language"] == "auto"
+        assert (await cli.patch("/api/profile/defaults", headers=headers, json={"preferred_language": "de"})).status == 400
 
         # Negative: disallowed keys / invalid effort / unknown toolset
         assert (await cli.patch("/api/profile/defaults", headers=headers, json={"api_key": "sk-x"})).status == 400
@@ -322,3 +329,87 @@ async def test_analytics_cron_runs_and_session_uploads_isolation(tmp_path, monke
             json={"input": "read this", "session_id": "other-sess", "attachments": [upload_id]},
         )
         assert bad_run.status in (403, 404)
+
+
+@pytest.mark.asyncio
+async def test_upload_compaction_lineage_multimodal_and_abort_cleanup(tmp_path, monkeypatch):
+    """Regression suite for #91 findings: multimodal attachment preservation,
+    compacted-session root/tip lineage alignment, stream abort cleanup, and sanitized 500s."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    store = adapter._store_beside(adapter._ensure_store())
+    # Create root session and a compression continuation child (tip)
+    store.sessions.create(NewSession(session_id="thread-root", source="api_server", model="gpt-5"))
+    store.sessions.end("thread-root", "compression")
+    store.sessions.create(
+        NewSession(
+            session_id="thread-tip",
+            source="api_server",
+            model="gpt-5",
+            parent_session_id="thread-root",
+        )
+    )
+    headers = {"Authorization": f"Bearer {OWNER_KEY}"}
+    async with TestClient(TestServer(_make_app(adapter))) as cli:
+        # Upload addressed to root_id; run addressed to compacted tip_id MUST resolve seamlessly
+        form = FormData()
+        form.add_field("file", b"def hello():\n    return 42\n", filename="app.py")
+        up_resp = await cli.post("/api/sessions/thread-root/uploads", headers=headers, data=form)
+        assert up_resp.status == 201
+        upload = await up_resp.json()
+        assert upload["thread_id"] == "thread-root"
+        upload_id = upload["upload_id"]
+
+        # Multimodal list input preserves image_url block + appends structured text block
+        multimodal_input = [
+            {"type": "text", "text": "Inspect the attached code and image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+        ]
+        updated_msg, att_err = await apply_run_attachments(
+            adapter,
+            "thread-tip",
+            {"attachments": [upload_id]},
+            multimodal_input,
+            lambda m, code=None: {"error": {"message": m, "code": code}},
+        )
+        assert att_err is None
+        assert isinstance(updated_msg, list) and len(updated_msg) == 3
+        assert updated_msg[0] == multimodal_input[0]
+        assert updated_msg[1] == multimodal_input[1]
+        assert updated_msg[2]["type"] == "text" and upload_id in updated_msg[2]["text"]
+
+        # Stream abort (non-OSError) leaves zero leaked partial files in uploads/
+        uploads_dir = tmp_path / "uploads"
+        before_files = set(uploads_dir.rglob("*"))
+
+        class _ExplodingPart:
+            filename = "broken.bin"
+            name = "file"
+            headers = {}
+
+            async def read_chunk(self, _n):
+                raise ValueError("simulated client disconnect mid-stream")
+
+        class _FakeReader:
+            def __init__(self):
+                self._yielded = False
+
+            async def next(self):
+                if not self._yielded:
+                    self._yielded = True
+                    return _ExplodingPart()
+                return None
+
+        from gateway.platforms.api_server_workspace import handle_session_upload
+
+        class _FakeReq:
+            match_info = {"session_id": "thread-root"}
+            content_type = "multipart/form-data"
+            headers = {"Authorization": f"Bearer {OWNER_KEY}"}
+
+            async def multipart(self):
+                return _FakeReader()
+
+        with pytest.raises(ValueError, match="simulated client disconnect"):
+            await handle_session_upload(adapter, _FakeReq())
+        assert set(uploads_dir.rglob("*")) == before_files

@@ -402,7 +402,7 @@ def read_workspace_file(
     except PermissionError as exc:
         raise WorkspaceError("Permission denied reading file", status_code=403, code="permission_denied") from exc
     except OSError as exc:
-        raise WorkspaceError(f"Could not read file: {exc}", status_code=500, code="read_failed") from exc
+        raise WorkspaceError("Could not read workspace file", status_code=500, code="read_failed") from exc
 
     truncated = len(raw) > max_bytes
     if truncated:

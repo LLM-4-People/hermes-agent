@@ -853,7 +853,7 @@ async def _resolve_selected_session_and_attachments(
     if selected_session_id:
         selected_session_id = await _resolve_live_session_id(self, str(selected_session_id))
     session_id = selected_session_id or run_id
-    user_message, att_err = await apply_run_attachments(str(session_id), body, user_message, _openai_error)
+    user_message, att_err = await apply_run_attachments(self, str(session_id), body, user_message, _openai_error)
     return selected_session_id, session_id, user_message, att_err
 
 
