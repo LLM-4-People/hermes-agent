@@ -28,6 +28,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response, room_run_claims
+from agent.mobile_companion_prompt import combine_run_instructions
 from agent.run_instructions import run_instruction_scope, valid_run_instructions
 from tools.mobile_deliver import bind_delivery_emitter, emit_run_progress
 from tools.mobile_device_bridge import device_bridge_scope, validate_device_capabilities
@@ -349,7 +350,7 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, 
         or status in TERMINAL_STATUSES
         or bool(field_names & {
             "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "pending_questions",
-            "pending_device_requests", "session_id", "shutdown_requested_at"}))
+            "pending_device_requests", "suggested_actions", "session_id", "shutdown_requested_at"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -1087,6 +1088,11 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             profile_key = run.request_profile or "default"
 
             def _emit_ui(revision: dict[str, Any]) -> None:
+                suggestions = revision.get("suggested_actions")
+                if suggestions:
+                    cur = self._run_statuses.get(run.run_id, {})
+                    if cur.get("status") not in TERMINAL_STATUSES:
+                        self._set_run_status(run.run_id, str(cur.get("status") or "running"), suggested_actions=suggestions)
                 if run.run_id in self._run_streams and loop is not None:
                     with suppress(Exception):
                         loop.call_soon_threadsafe(run.put_event, _run_event(run.run_id, "ui.patch", **revision))
@@ -1096,8 +1102,9 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
                     with suppress(Exception):
                         loop.call_soon_threadsafe(run.put_event, _run_event(run.run_id, "mobile.delivery", **delivery))
 
+            effective_once = combine_run_instructions(run.run_instructions, run.device_capabilities)
             with (
-                run_instruction_scope(agent, run.run_instructions),
+                run_instruction_scope(agent, effective_once),
                 bind_ui_patch_emitter(_emit_ui),
                 bind_delivery_emitter(_emit_delivery),
                 device_bridge_scope(
@@ -1334,7 +1341,15 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 runtime=served_runtime, requested_runtime=requested if any(requested.values()) else None,
                 route_source=("model_routes" if run.agent_kwargs.get("route")
                               else "raw_request" if any(requested.values()) else "global"))
-            _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime)
+            suggestions = self._run_statuses.get(run_id, {}).get("suggested_actions")
+            _finish(
+                status,
+                fields,
+                output=result.get("final_response", ""),
+                usage=usage,
+                runtime=served_runtime,
+                **({"suggested_actions": suggestions} if suggestions else {}),
+            )
     except asyncio.CancelledError:
         _finish("cancelled")
         raise

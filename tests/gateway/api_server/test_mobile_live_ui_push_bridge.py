@@ -659,3 +659,97 @@ async def test_device_bridge_approve_decline_timeout_stop_and_progress_hooks(tmp
             assert stop_outcomes and stop_outcomes[0]["status"] == "cancelled"
     finally:
         unregister_run_progress_hook(progress_events.append)
+
+
+# ── 5. Mobile Companion Prompt Builder & Contextual `suggested_actions[]` ────
+
+
+@pytest.mark.asyncio
+async def test_mobile_companion_prompt_builder_and_suggested_actions(tmp_path, monkeypatch):
+    from agent.mobile_companion_prompt import build_mobile_companion_instructions, combine_run_instructions
+    from agent.run_instructions import effective_system_prompt
+    from tools.mobile_ui_patch import validate_suggested_actions
+
+    # Non-mobile runs get zero extra prompt overhead.
+    assert build_mobile_companion_instructions(None) == ""
+    assert build_mobile_companion_instructions([]) == ""
+    assert combine_run_instructions("stay brief", None) == "stay brief"
+
+    # Mobile prompt strictly reflects ONLY advertised capabilities.
+    prompt = build_mobile_companion_instructions(["camera", "alarm_timer", "ui_surfaces_v2"])
+    assert "camera" in prompt and "alarm_timer" in prompt and "upsert_widget" in prompt and "mobile_deliver" in prompt
+    assert "clipboard_read" not in prompt and "dial_draft" not in prompt
+
+    # Suggested actions validation (positive + negative bounds).
+    valid_chips = [
+        {"id": "pin_kpi", "label": "Épingler le widget", "kind": "pin_widget", "widget_id": "morning_kpi"},
+        {"id": "save_mem", "label": "Retenir cette préférence", "kind": "save_memory", "prompt": "Retiens que je préfère le café noir"},
+    ]
+    cleaned, err = validate_suggested_actions(valid_chips)
+    assert err is None and len(cleaned) == 2
+    assert validate_suggested_actions([])[1] is not None
+    assert validate_suggested_actions([{"id": f"c{i}", "label": "X", "kind": "prompt"} for i in range(4)])[1] is not None
+    assert validate_suggested_actions([{"id": "a", "label": "X", "kind": "shell"}])[1] is not None
+    assert validate_suggested_actions([{"id": "a", "label": "<script>x</script>", "kind": "prompt"}])[1] is not None
+
+    # End-to-end run: mobile turn gets companion guidance + emits suggested_actions; next non-mobile turn sees neither.
+    adapter = _make_adapter()
+    adapter._api_key = "owner-key"
+    agent = MagicMock()
+    agent.ephemeral_system_prompt = None
+    seen_prompts = []
+
+    def create(**kwargs):
+        return agent
+
+    def run(**kwargs):
+        seen_prompts.append(effective_system_prompt(agent, "BASE_SYSTEM"))
+        if len(seen_prompts) == 1:
+            res = json.loads(
+                mobile_ui_patch_tool(
+                    ops=[{
+                        "op": "upsert_widget",
+                        "widget_id": "morning_kpi",
+                        "title": "Mon matin",
+                        "template": "metric",
+                        "items": [{"label": "Rappels", "value": "2"}],
+                        "home_screen_safe": True,
+                    }],
+                    summary="Create morning widget",
+                    suggested_actions=valid_chips,
+                )
+            )
+            assert res["ok"] is True
+        return {"final_response": "C'est prêt."}
+
+    agent.run_conversation.side_effect = run
+    monkeypatch.setattr(adapter, "_create_agent", create)
+    app = _mount_full_mobile_app(adapter)
+    headers = {"Authorization": "Bearer owner-key"}
+
+    with override_hermes_home(tmp_path):
+        async with TestClient(TestServer(app)) as client:
+            r1 = await client.post(
+                "/v1/runs",
+                json={"input": "Aide-moi le matin", "device_capabilities": ["alarm_timer", "ui_surfaces_v2"]},
+                headers=headers,
+            )
+            assert r1.status == 202
+            run1_id = (await r1.json())["run_id"]
+            async with client.get(f"/v1/runs/{run1_id}/events", headers=headers) as stream:
+                events = _parse_sse(await stream.read())
+            completed = next(e for e in events if e.get("event") == "run.completed")
+            assert len(completed["suggested_actions"]) == 2
+            st1 = await (await client.get(f"/v1/runs/{run1_id}", headers=headers)).json()
+            assert [c["id"] for c in st1["suggested_actions"]] == ["pin_kpi", "save_mem"]
+
+            # Subsequent ordinary (non-mobile) run must NOT inherit mobile companion prompt or suggestions.
+            r2 = await client.post("/v1/runs", json={"input": "Hello"}, headers=headers)
+            run2_id = (await r2.json())["run_id"]
+            async with client.get(f"/v1/runs/{run2_id}/events", headers=headers) as stream:
+                await stream.read()
+            st2 = await (await client.get(f"/v1/runs/{run2_id}", headers=headers)).json()
+            assert "suggested_actions" not in st2
+
+    assert "[Hermes Mobile Companion]" in seen_prompts[0] and "alarm_timer" in seen_prompts[0]
+    assert seen_prompts[1] == "BASE_SYSTEM"

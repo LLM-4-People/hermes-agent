@@ -1136,6 +1136,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 agent._silence_marker_needs_reply = not silence_allowed(
                     ctx.persist_user_display_kind, ctx.reply_expected)
                 try:
+                    from agent.mobile_companion_prompt import combine_run_instructions
                     from agent.run_instructions import run_instruction_scope
                     from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
                     from tools.mobile_device_bridge import device_bridge_scope
@@ -1145,8 +1146,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     authority = getattr(getattr(self, "_runner", None), "session_authority", None)
                     api_profile = getattr(authority, "profile_id", None) or "default"
                     broker = ensure_device_bridge_broker(api_adapter) if (api_adapter is not None and api_caps) else None
+                    effective_once = combine_run_instructions(
+                        api.get("run_instructions") if api else None,
+                        api_caps,
+                    )
                     with (
-                        run_instruction_scope(agent, api.get("run_instructions") if api else None),
+                        run_instruction_scope(agent, effective_once),
                         device_bridge_scope(
                             agent,
                             capabilities=api_caps,

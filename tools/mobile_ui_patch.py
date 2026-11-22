@@ -58,6 +58,14 @@ ALLOWED_SCOPES = frozenset({"thread", "atelier"})
 ALLOWED_DENSITIES = frozenset({"compact", "comfortable", "spacious"})
 ALLOWED_SURFACE_STYLES = frozenset({"paper", "elevated", "outlined", "glass"})
 ALLOWED_QUICK_ACTION_KINDS = frozenset({"prompt", "open_destination", "toggle_surface"})
+ALLOWED_SUGGESTED_ACTION_KINDS = frozenset({
+    "pin_widget",
+    "save_memory",
+    "create_reminder",
+    "open_surface",
+    "save_skill",
+    "prompt",
+})
 ALLOWED_DESTINATIONS = frozenset({"discussions", "atelier", "cerveau", "activite"})
 
 MAX_OPS_PER_PATCH = 16
@@ -70,6 +78,7 @@ MAX_SURFACES_PER_SCOPE = 24
 MAX_QUICK_ACTIONS = 12
 MAX_WIDGETS = 16
 MAX_WIDGET_ITEMS = 8
+MAX_SUGGESTED_ACTIONS = 3
 MIN_WCAG_AA_CONTRAST = 4.5
 MIN_FONT_SCALE_STEP = -2
 MAX_FONT_SCALE_STEP = 3
@@ -326,6 +335,52 @@ def validate_widget_spec(raw: Any, *, prefix: str = "widget") -> tuple[Optional[
         return None, f"{prefix} appears to contain a secret or bearer token and cannot be shown on the home screen."
 
     return spec, None
+
+
+def validate_suggested_actions(raw: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
+    """Validate optional contextual 1-tap follow-up chips (1..3 safe declarative chips)."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, list) or not (1 <= len(raw) <= MAX_SUGGESTED_ACTIONS):
+        return None, f"suggested_actions must be an array of 1 to {MAX_SUGGESTED_ACTIONS} chips."
+    scan_err = _scan_strings_safe(raw)
+    if scan_err:
+        return None, f"suggested_actions: {scan_err}"
+    cleaned: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"suggested_actions[{idx}] must be an object."
+        aid = item.get("id")
+        id_err = _validate_safe_id(aid, f"suggested_actions[{idx}].id")
+        if id_err:
+            return None, id_err
+        if aid in seen_ids:
+            return None, f"suggested_actions[{idx}].id duplicates '{aid}'."
+        seen_ids.add(aid)
+        label = item.get("label")
+        if not _valid_utf8_text(label, max_len=48):
+            return None, f"suggested_actions[{idx}].label must be non-empty UTF-8 text (<= 48 chars)."
+        kind = item.get("kind")
+        if kind not in ALLOWED_SUGGESTED_ACTION_KINDS:
+            return None, f"suggested_actions[{idx}].kind must be one of {sorted(ALLOWED_SUGGESTED_ACTION_KINDS)}."
+        entry: dict[str, Any] = {"id": aid, "label": label.strip(), "kind": kind}
+        if "prompt" in item and item["prompt"] is not None:
+            if not _valid_utf8_text(item["prompt"], max_len=MAX_PROMPT_LEN):
+                return None, f"suggested_actions[{idx}].prompt must be non-empty UTF-8 text (<= {MAX_PROMPT_LEN} chars)."
+            entry["prompt"] = item["prompt"].strip()
+        if "target" in item and item["target"] is not None:
+            t_err = _validate_safe_id(item["target"], f"suggested_actions[{idx}].target")
+            if t_err:
+                return None, t_err
+            entry["target"] = item["target"]
+        if "widget_id" in item and item["widget_id"] is not None:
+            w_err = _validate_safe_id(item["widget_id"], f"suggested_actions[{idx}].widget_id")
+            if w_err:
+                return None, w_err
+            entry["widget_id"] = item["widget_id"]
+        cleaned.append(entry)
+    return cleaned, None
 
 
 def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
@@ -629,10 +684,14 @@ class MobileUiStore:
         session_id: Optional[str] = None,
         scope: str = "atelier",
         requires_apply: bool = True,
+        suggested_actions: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         normalized, err = validate_ui_patch_ops(ops)
         if err:
             raise ValueError(err)
+        clean_suggestions, sugg_err = validate_suggested_actions(suggested_actions)
+        if sugg_err:
+            raise ValueError(sugg_err)
         if not _valid_utf8_text(summary, max_len=MAX_SUMMARY_LEN):
             raise ValueError(f"summary must be non-empty UTF-8 text (<= {MAX_SUMMARY_LEN} chars).")
         if scope not in ALLOWED_SCOPES:
@@ -693,6 +752,7 @@ class MobileUiStore:
             "reversible": True,
             "created_at": now,
             "applied_at": applied_at,
+            **({"suggested_actions": clean_suggestions} if clean_suggestions else {}),
         }
         logger.info("mobile_ui revision=%s scope=%s status=%s ops=%d", revision_id, scope, status, len(normalized))
         emit_ui_patch_event(revision)
@@ -864,6 +924,14 @@ MOBILE_UI_PATCH_SCHEMA = {
                 ),
                 "items": {"type": "object"},
             },
+            "suggested_actions": {
+                "type": "array",
+                "description": (
+                    "Optional 1-3 contextual 1-tap follow-up chips (pin_widget, save_memory, create_reminder, "
+                    "open_surface, save_skill, prompt) shown below the reply."
+                ),
+                "items": {"type": "object"},
+            },
         },
         "required": ["summary", "ops"],
     },
@@ -877,6 +945,7 @@ def mobile_ui_patch_tool(
     scope: str = "atelier",
     requires_apply: bool = True,
     session_id: Optional[str] = None,
+    suggested_actions: Any = None,
 ) -> str:
     """Execute ``mobile_ui_patch`` tool call and return JSON result."""
     if not session_id:
@@ -890,6 +959,7 @@ def mobile_ui_patch_tool(
             session_id=session_id,
             scope=scope,
             requires_apply=bool(requires_apply),
+            suggested_actions=suggested_actions,
         )
     except ValueError as exc:
         logger.warning("mobile_ui_patch rejected: %s", exc)
@@ -907,6 +977,7 @@ registry.register(
         scope=args.get("scope", "atelier"),
         requires_apply=args.get("requires_apply", True),
         session_id=kw.get("session_id"),
+        suggested_actions=args.get("suggested_actions"),
     ),
     check_fn=lambda: True,
 )
