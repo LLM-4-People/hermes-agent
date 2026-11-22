@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
+import math
 import queue
 import re
 import threading
@@ -121,6 +123,86 @@ def _tool_complete_payload(call_id, tool_name, args, result, *, is_error=None, v
         from tui_gateway.tool_progress import _tool_result_text
         payload["result_text"] = _tool_result_text(result)
     return payload
+
+
+_ARGS_PREVIEW_MAX_CHARS = 300
+_SUBAGENT_TOOL_PREVIEW_MAX_CHARS = 500
+_SUBAGENT_TOOL_IDENTITY_KEYS = (
+    "subagent_id", "delegation_id", "child_session_id", "parent_id", "task_index", "task_count", "depth", "model",
+)
+
+
+def format_tool_args_preview(args: Any, *, redact_sensitive_text, limit: int = _ARGS_PREVIEW_MAX_CHARS) -> str:
+    """Bounded, force-redacted argument preview (redacted BEFORE truncation)."""
+    if not isinstance(args, dict) or not args:
+        return ""
+    try:
+        raw = json.dumps(args, ensure_ascii=False, default=str, sort_keys=True)
+    except (TypeError, ValueError):
+        raw = str(args)
+    redacted = redact_sensitive_text(raw, force=True)
+    return redacted if len(redacted) <= limit else redacted[: max(1, limit - 3)] + "..."
+
+
+def build_subagent_tool_event(
+    event_type: str,
+    tool_name: str | None,
+    preview: str | None,
+    args: Any,
+    kwargs: dict[str, Any],
+    *,
+    redact_sensitive_text,
+) -> tuple[str, dict[str, Any]] | None:
+    """Normalize a child agent's tool progress callback into ``(sse_event_name, fields)``.
+
+    Maps ``subagent.tool`` / ``subagent.tool.started`` -> ``subagent.tool.started`` and
+    ``subagent.tool.completed`` -> ``subagent.tool.completed``. All free-text previews and
+    argument summaries are force-redacted BEFORE truncation so no secret prefix leaks.
+    """
+    if event_type in {"subagent.tool", "subagent.tool.started"}:
+        wire_name = "subagent.tool.started"
+    elif event_type == "subagent.tool.completed":
+        wire_name = "subagent.tool.completed"
+    else:
+        return None
+
+    fields: dict[str, Any] = {"tool": str(tool_name or "tool")}
+    for key in _SUBAGENT_TOOL_IDENTITY_KEYS:
+        value = kwargs.get(key)
+        if value is not None:
+            fields[key] = value
+    if kwargs.get("tool_call_id"):
+        fields["tool_call_id"] = str(kwargs["tool_call_id"])
+
+    if wire_name == "subagent.tool.started":
+        redacted_preview = redact_sensitive_text(str(preview or ""), force=True) if preview else ""
+        if len(redacted_preview) > _SUBAGENT_TOOL_PREVIEW_MAX_CHARS:
+            redacted_preview = redacted_preview[: _SUBAGENT_TOOL_PREVIEW_MAX_CHARS - 3] + "..."
+        fields["preview"] = redacted_preview
+        args_preview = format_tool_args_preview(args, redact_sensitive_text=redact_sensitive_text)
+        if args_preview:
+            fields["args_preview"] = args_preview
+        return wire_name, fields
+
+    raw_result = kwargs.get("result")
+    text_source = raw_result if raw_result is not None else preview
+    if text_source is None:
+        redacted_preview = ""
+    else:
+        text = text_source if isinstance(text_source, str) else json.dumps(text_source, ensure_ascii=False, default=str)
+        redacted_preview = redact_sensitive_text(text, force=True)
+        if len(redacted_preview) > _SUBAGENT_TOOL_PREVIEW_MAX_CHARS:
+            redacted_preview = redacted_preview[: _SUBAGENT_TOOL_PREVIEW_MAX_CHARS - 3] + "..."
+    raw_duration = kwargs.get("duration")
+    duration_ms: int | None = None
+    if not isinstance(raw_duration, bool) and isinstance(raw_duration, (int, float)):
+        dur_f = float(raw_duration)
+        if math.isfinite(dur_f) and dur_f >= 0.0:
+            duration_ms = round(dur_f * 1000.0)
+    fields["preview"] = redacted_preview
+    fields["is_error"] = bool(kwargs.get("is_error", False))
+    fields["duration_ms"] = duration_ms
+    return wire_name, fields
 
 
 def publish_worker_tool_event(authority, session_id, generation, frame) -> bool:

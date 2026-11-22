@@ -11,6 +11,8 @@ model/provider. Logger name stays ``agent.conversation_loop`` for caplog parity.
 from __future__ import annotations
 
 import logging
+import math
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -20,6 +22,268 @@ from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
 from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
 
 logger = logging.getLogger("agent.conversation_loop")
+
+_KNOWN_COST_STATUSES = frozenset({"actual", "estimated", "included"})
+_BASELINE_INT_ATTRS = (
+    ("input_tokens", "session_prompt_tokens"),
+    ("output_tokens", "session_completion_tokens"),
+    ("total_tokens", "session_total_tokens"),
+    ("cache_read_tokens", "session_cache_read_tokens"),
+    ("cache_write_tokens", "session_cache_write_tokens"),
+    ("reasoning_tokens", "session_reasoning_tokens"),
+    ("api_calls", "session_api_calls"),
+)
+
+
+@dataclass
+class TurnTelemetry:
+    """Per-turn telemetry accumulated at the lowest choking point inside ``record_response_usage``."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    api_calls: int = 0
+    usage_calls: int = 0
+    cost_usd_sum: float = 0.0
+    priced_calls: int = 0
+    unknown_cost_calls: int = 0
+    cost_source: Optional[str] = None
+    cost_status: Optional[str] = None
+    first_ttft_s: Optional[float] = None
+    api_duration_s: float = 0.0
+    generation_duration_s: float = 0.0
+    generation_output_tokens: int = 0
+    turn_started_monotonic: Optional[float] = None
+
+
+def _finite_nonneg(value: Any) -> Optional[float]:
+    """Finite non-negative float (booleans/mocks rejected), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if math.isfinite(f) and f >= 0.0 else None
+
+
+def _strict_int(value: Any) -> Optional[int]:
+    """Non-negative int (booleans/mocks rejected), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return max(0, int(f)) if math.isfinite(f) else None
+
+
+def _normalize_cost_source(source: Any, status: Any) -> Optional[str]:
+    if status == "included" and (not isinstance(source, str) or source.strip().lower() in ("", "none")):
+        return "subscription_included"
+    if isinstance(source, str):
+        cleaned = source.strip()
+        if cleaned and cleaned.lower() != "none":
+            return cleaned
+    return None
+
+
+def reset_turn_telemetry(agent: Any) -> TurnTelemetry:
+    """Start a clean per-turn telemetry accumulator on *agent*."""
+    telemetry = TurnTelemetry(turn_started_monotonic=time.perf_counter())
+    agent._turn_telemetry = telemetry
+    return telemetry
+
+
+def capture_usage_baseline(agent: Any) -> dict[str, Any]:
+    """Snapshot cumulative session counters on *agent* before a turn on a cached agent."""
+    baseline: dict[str, Any] = {
+        key: (_strict_int(getattr(agent, attr, None)) or 0) for key, attr in _BASELINE_INT_ATTRS
+    }
+    cost = _finite_nonneg(getattr(agent, "session_estimated_cost_usd", None))
+    baseline["cost_usd"] = cost if cost is not None else 0.0
+    baseline["started_monotonic"] = time.perf_counter()
+    return baseline
+
+
+def _record_call_telemetry(
+    agent: Any,
+    *,
+    api_duration: float,
+    api_start_time: Optional[float] = None,
+    prompt_tokens: int = 0,
+    output_tokens: int = 0,
+    total_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cost_delta: Optional[float] = None,
+    cost_status: Optional[str] = None,
+    cost_source: Optional[str] = None,
+    has_usage: bool = True,
+) -> None:
+    """Fold one completed provider API call into ``agent._turn_telemetry``."""
+    tel = getattr(agent, "_turn_telemetry", None)
+    if not isinstance(tel, TurnTelemetry):
+        tel = reset_turn_telemetry(agent)
+    tel.api_calls += 1
+    dur = _finite_nonneg(api_duration)
+    if dur is not None:
+        tel.api_duration_s += dur
+
+    ttft_s = _call_ttft_seconds(agent, api_start_time=api_start_time, api_duration=dur)
+    if ttft_s is not None and tel.first_ttft_s is None:
+        tel.first_ttft_s = ttft_s
+
+    if not has_usage:
+        tel.unknown_cost_calls += 1
+        return
+
+    tel.usage_calls += 1
+    tel.input_tokens += max(0, int(prompt_tokens))
+    tel.output_tokens += max(0, int(output_tokens))
+    tel.total_tokens += max(0, int(total_tokens))
+    tel.cache_read_tokens += max(0, int(cache_read_tokens))
+    tel.cache_write_tokens += max(0, int(cache_write_tokens))
+    tel.reasoning_tokens += max(0, int(reasoning_tokens))
+
+    if ttft_s is not None and dur is not None and output_tokens > 0:
+        gen_s = dur - ttft_s
+        if gen_s > 0.0:
+            tel.generation_duration_s += gen_s
+            tel.generation_output_tokens += int(output_tokens)
+
+    delta = _finite_nonneg(cost_delta)
+    if delta is not None and (cost_status in _KNOWN_COST_STATUSES or cost_status is None):
+        tel.cost_usd_sum += delta
+        tel.priced_calls += 1
+        tel.cost_status = cost_status
+        tel.cost_source = _normalize_cost_source(cost_source, cost_status) or tel.cost_source
+    else:
+        tel.unknown_cost_calls += 1
+        tel.cost_status = "unknown"
+        if tel.cost_source is None:
+            tel.cost_source = _normalize_cost_source(cost_source, cost_status)
+
+
+def _call_ttft_seconds(
+    agent: Any, *, api_start_time: Optional[float], api_duration: Optional[float]
+) -> Optional[float]:
+    start = _finite_nonneg(api_start_time)
+    first_chunk = _finite_nonneg(getattr(agent, "_last_api_first_chunk_at", None))
+    if start is None or first_chunk is None or first_chunk < start:
+        return None
+    ttft = first_chunk - start
+    if api_duration is not None and api_duration > 0.0:
+        ttft = min(ttft, api_duration)
+    return ttft
+
+
+def _counter_fallback_metrics(
+    agent: Any, counter_baseline: Optional[dict[str, Any]]
+) -> tuple[dict[str, int], Optional[int], Optional[float], Optional[str]]:
+    """Read real numeric counters from *agent* when ``TurnTelemetry`` did not record calls."""
+    base = counter_baseline or {}
+    counts: dict[str, int] = {}
+    for key, attr in _BASELINE_INT_ATTRS:
+        if key == "api_calls":
+            continue
+        raw = _strict_int(getattr(agent, attr, None))
+        counts[key] = max(0, raw - int(base.get(key, 0))) if raw is not None else 0
+    if counts["total_tokens"] == 0 and (counts["input_tokens"] or counts["output_tokens"]):
+        counts["total_tokens"] = counts["input_tokens"] + counts["output_tokens"]
+
+    raw_calls = _strict_int(getattr(agent, "session_api_calls", None))
+    api_calls = max(0, raw_calls - int(base.get("api_calls", 0))) if raw_calls is not None else None
+
+    cost_status = getattr(agent, "session_cost_status", None)
+    raw_source = getattr(agent, "session_cost_source", None)
+    cost_source = _normalize_cost_source(raw_source, cost_status)
+    cost_usd: Optional[float] = None
+    if isinstance(cost_status, str) and cost_status in _KNOWN_COST_STATUSES:
+        raw_cost = _finite_nonneg(getattr(agent, "session_estimated_cost_usd", None))
+        if raw_cost is not None:
+            cost_usd = round(max(0.0, raw_cost - float(base.get("cost_usd", 0.0))), 6)
+    return counts, api_calls, cost_usd, cost_source
+
+
+def build_run_usage_metrics(
+    agent: Any,
+    *,
+    duration_s: Optional[float] = None,
+    first_token_s: Optional[float] = None,
+    counter_baseline: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Single source of truth for per-run ``usage`` and ``turn.metrics`` payloads.
+
+    Unknown measurements stay explicit ``None`` (serialized as JSON ``null``), never fabricated
+    as ``0``. ``tokens_per_sec`` reports generation throughput (post-TTFT decode) when first-token
+    timing is known, kept distinct from ``end_to_end_tokens_per_sec``.
+    """
+    tel = getattr(agent, "_turn_telemetry", None)
+    use_tel = isinstance(tel, TurnTelemetry) and (tel.api_calls > 0 or tel.usage_calls > 0)
+
+    if use_tel:
+        counts = {
+            "input_tokens": tel.input_tokens,
+            "output_tokens": tel.output_tokens,
+            "total_tokens": tel.total_tokens,
+            "cache_read_tokens": tel.cache_read_tokens,
+            "cache_write_tokens": tel.cache_write_tokens,
+            "reasoning_tokens": tel.reasoning_tokens,
+        }
+        api_calls: Optional[int] = tel.api_calls
+        cost_usd = round(tel.cost_usd_sum, 6) if (tel.priced_calls > 0 and tel.unknown_cost_calls == 0) else None
+        cost_source = tel.cost_source if cost_usd is not None else None
+        ttft_s = tel.first_ttft_s if tel.first_ttft_s is not None else _finite_nonneg(first_token_s)
+    else:
+        counts, api_calls, cost_usd, cost_source = _counter_fallback_metrics(agent, counter_baseline)
+        ttft_s = _finite_nonneg(first_token_s)
+
+    eff_duration = _finite_nonneg(duration_s)
+    if eff_duration is None and use_tel:
+        if tel.turn_started_monotonic is not None:
+            eff_duration = _finite_nonneg(time.perf_counter() - tel.turn_started_monotonic)
+        elif tel.api_duration_s > 0.0:
+            eff_duration = tel.api_duration_s
+    elif eff_duration is None and counter_baseline and counter_baseline.get("started_monotonic") is not None:
+        eff_duration = _finite_nonneg(time.perf_counter() - float(counter_baseline["started_monotonic"]))
+
+    input_tokens = counts["input_tokens"]
+    output_tokens = counts["output_tokens"]
+    cache_read = counts["cache_read_tokens"]
+    cache_hit_ratio = (
+        round(min(1.0, max(0.0, cache_read / input_tokens)), 4) if input_tokens > 0 else None
+    )
+
+    tokens_per_sec: Optional[float] = None
+    if use_tel and tel.generation_duration_s > 0.0 and tel.generation_output_tokens > 0:
+        tokens_per_sec = round(tel.generation_output_tokens / tel.generation_duration_s, 2)
+    elif ttft_s is not None and eff_duration is not None and output_tokens > 0:
+        gen_s = eff_duration - ttft_s
+        if gen_s > 0.0:
+            tokens_per_sec = round(output_tokens / gen_s, 2)
+
+    end_to_end_tps = (
+        round(output_tokens / eff_duration, 2)
+        if output_tokens > 0 and eff_duration is not None and eff_duration > 0.0
+        else None
+    )
+
+    return {
+        "scope": "run",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": counts["total_tokens"],
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": counts["cache_write_tokens"],
+        "cache_hit_ratio": cache_hit_ratio,
+        "reasoning_tokens": counts["reasoning_tokens"],
+        "cost_usd": cost_usd,
+        "cost_source": cost_source,
+        "ttft_ms": round(ttft_s * 1000.0) if ttft_s is not None else None,
+        "duration_ms": round(eff_duration * 1000.0) if eff_duration is not None else None,
+        "tokens_per_sec": tokens_per_sec,
+        "end_to_end_tokens_per_sec": end_to_end_tps,
+        "api_calls": api_calls,
+    }
 
 
 def add_session_usage(agent: Any, usage: Any, *, prompt_tokens: int, completion_tokens: int,
@@ -143,6 +407,7 @@ def with_write_tier(usage: Any, tier: str | None) -> Any:
 def record_response_usage(
     agent: Any, response: Any, *, messages: list[dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
+    api_start_time: Optional[float] = None,
 ) -> ResponseUsageOutcome:
     """Fold ``response.usage`` into compressor, anchors, session counters, state.db
     and the API-call log line (see module docstring). No-usage responses only
@@ -154,6 +419,9 @@ def record_response_usage(
     # must remain observable.
     agent.session_api_calls += 1
     if not (hasattr(response, 'usage') and response.usage):
+        _record_call_telemetry(
+            agent, api_duration=api_duration, api_start_time=api_start_time, has_usage=False,
+        )
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage -> cannot adjudicate the prior compaction; consume the
             # pending verdict so later readings aren't charged to it and
@@ -320,6 +588,21 @@ def record_response_usage(
             agent.session_estimated_cost_usd += _cost_delta
     agent.session_cost_status = cost_result.status
     agent.session_cost_source = cost_result.source
+    _record_call_telemetry(
+        agent,
+        api_duration=api_duration,
+        api_start_time=api_start_time,
+        prompt_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cache_read_tokens=canonical_usage.cache_read_tokens,
+        cache_write_tokens=canonical_usage.cache_write_tokens,
+        reasoning_tokens=canonical_usage.reasoning_tokens,
+        cost_delta=_cost_delta,
+        cost_status=cost_result.status,
+        cost_source=cost_result.source,
+        has_usage=True,
+    )
 
     # Persist per-call token deltas for any session_id so non-CLI runs can't lose
     # accounting; gateway/session-store writes use absolute totals and safely overwrite

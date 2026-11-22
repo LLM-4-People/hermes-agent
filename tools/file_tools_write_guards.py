@@ -264,7 +264,39 @@ _APPROVAL_UNAVAILABLE = "requires approval but the approval subsystem is unavail
 _NO_HUMAN = "requires approval but no interactive user or gateway is present to approve it."
 
 
-def _request_protected_instruction_approval(reasons: list[str], task_id: str = "default") -> str | None:
+def _read_existing_text_for_diff(path: str, task_id: str) -> str | None:
+    """Best-effort bounded host read of an existing file for approval diff previews."""
+    try:
+        resolved = _resolved_or_raw(path, task_id)
+        p = Path(resolved)
+        if not p.is_file():
+            return None
+        with p.open("r", encoding="utf-8-sig", errors="replace") as fh:
+            return fh.read(200_001)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _build_edit_preview(
+    display: str, description: str, pattern_key: str, edit_context: dict | None, task_id: str,
+) -> dict | None:
+    if not isinstance(edit_context, dict):
+        return None
+    from tools.approval_prompt import build_approval_preview
+    edit = dict(edit_context)
+    if edit.get("tool_name") == "write_file" and "old_text" not in edit and edit.get("path"):
+        edit["old_text"] = _read_existing_text_for_diff(str(edit["path"]), task_id)
+    return build_approval_preview({
+        "command": display,
+        "description": description,
+        "pattern_key": pattern_key,
+        "edit": edit,
+    })
+
+
+def _request_protected_instruction_approval(
+    reasons: list[str], task_id: str = "default", *, edit_context: dict | None = None,
+) -> str | None:
     """Ask the human to approve a write to protected instruction file(s); ``None`` when approved.
 
     Deliberately NOT routed through ``_run_approval_gate`` (honors --yolo and
@@ -307,6 +339,9 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
             "description": description,
             "allow_permanent": False,
             "allow_session": False}
+        preview = _build_edit_preview(display, description, "protected_instruction_file", edit_context, task_id)
+        if preview is not None:
+            approval_data["preview"] = preview
         decision = _await_gateway_decision(session_key, notify_cb, approval_data, surface="gateway")
         if decision.get("notify_failed"):
             return blocked.format(why="requires approval but the approval request could not be delivered.")
@@ -347,7 +382,9 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
     return timed_out if timed else denied
 
 
-def _check_protected_instruction_write(paths: list[str], task_id: str = "default") -> str | None:
+def _check_protected_instruction_write(
+    paths: list[str], task_id: str = "default", *, edit_context: dict | None = None,
+) -> str | None:
     """Gate a write/patch touching protected instruction files. ONE protected file gates
     the ENTIRE multi-file patch (one prompt, all-or-nothing)."""
     enabled, extra = _protected_instruction_config()
@@ -357,7 +394,7 @@ def _check_protected_instruction_write(paths: list[str], task_id: str = "default
                            for p in paths) if r]
     if not reasons:
         return None
-    return _request_protected_instruction_approval(reasons, task_id)
+    return _request_protected_instruction_approval(reasons, task_id, edit_context=edit_context)
 
 
 # Approval key -> (prompt noun, why it is gated). One key per class so an approve-always for one
