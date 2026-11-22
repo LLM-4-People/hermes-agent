@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, TypeVar, cast
 
 from hermes_constants import mkdir_under_hermes_home
-from session_rules.media import legacy_api_photo_caption
+from session_rules.photo_previews import archived_photo_preview
 from persistence.sqlite._state.common import escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity
 from persistence.sqlite._state.holders import read_only_db_uri
 from persistence.sqlite._state.health import (
@@ -382,6 +382,9 @@ class StoreHolder:
                 if not _close_time_checkpoint_configurable():
                     self._retire_connection = _prepare_connection_retirement()
                 self._open_writer()
+            # A read-only profile may predate the runtime ledger; opening it never migrates.
+            self.has_session_admissions = not read_only or self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_admissions'").fetchone() is not None
             self._record_db_file_identity()
             initialization_complete = True
         except Exception as exc:
@@ -498,7 +501,7 @@ class StoreHolder:
             check_same_thread=False, timeout=timeout, isolation_level=None,
         )
         conn.row_factory = sqlite3.Row
-        conn.create_function("legacy_api_photo_caption", 1, legacy_api_photo_caption, deterministic=True)
+        conn.create_function("archived_photo_preview", 3, archived_photo_preview, deterministic=True)
         return conn
 
     def _handle_quarantine_if_invalid(self, already_locked: bool = False) -> None:
@@ -532,7 +535,7 @@ class StoreHolder:
         )
         try:
             conn.row_factory = sqlite3.Row
-            conn.create_function("legacy_api_photo_caption", 1, legacy_api_photo_caption, deterministic=True)
+            conn.create_function("archived_photo_preview", 3, archived_photo_preview, deterministic=True)
             mode = apply_wal_with_fallback(conn, db_label="state.db")
             # "wal" is also the *assumed* mode when the on-disk probe was blocked by a concurrent opener
             # (#86515): the lock-free mode=ro read pool needs a confirmed WAL header, so confirm it here.

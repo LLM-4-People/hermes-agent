@@ -18,14 +18,14 @@ from persistence.sqlite.conversation._store.rules import (
 )
 
 
-def _rich_select(select_cols: str, where: str, tail: str = "", prompt_select: Optional[str] = "") -> str:
+def _rich_select(holder: StoreHolder, select_cols: str, where: str, tail: str = "", prompt_select: Optional[str] = "") -> str:
     """``list_sessions_rich``-shaped SELECT: resolved prompt (``prompt_select`` fragment;
     None omits prompt columns AND the join), preview, last_active. Whitespace matches
     the historical inline queries (SQL text is pinned)."""
     prompt_join = "" if prompt_select is None else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
     return f"""
             SELECT {select_cols}{prompt_select or ""},
-                {_sql_preview_raw()},
+                {_sql_preview_raw(holder.has_session_admissions)},
                 {_sql_session_last_active("s")} AS last_active
             FROM sessions s
             {prompt_join}
@@ -118,7 +118,7 @@ def list_cron_job_runs(holder: StoreHolder, job_id: str, limit: int = 20, offset
     prefix, prefix_hi = prefix_range(f"cron_{job_id}_")
     request_lo, request_hi = cron_request_range(job_id)
     query = _rich_select(
-        f"s.*, {_CRON_EXECUTION_SQL} AS cron_execution_id", f"s.source = 'cron' AND s.id IN ({_CRON_RUN_IDS_SQL})",
+        holder, f"s.*, {_CRON_EXECUTION_SQL} AS cron_execution_id", f"s.source = 'cron' AND s.id IN ({_CRON_RUN_IDS_SQL})",
         "\n            ORDER BY s.started_at DESC, s.id DESC\n            LIMIT :limit OFFSET :offset",
         prompt_select=f",\n                {_PROMPT_RESOLVED_SQL}",
     )
@@ -172,7 +172,7 @@ def _get_session_rich_rows_batch(holder: StoreHolder, session_ids, compact_rows:
     # Same read-your-writes guarantee as list_sessions_rich.
     holder.flush_token_counts()
     query = _rich_select(
-        _compact_session_cols(holder.db_path.parent) if compact_rows else "s.*", f"s.id IN ({','.join('?' for _ in ids)})",
+        holder, _compact_session_cols(holder.db_path.parent) if compact_rows else "s.*", f"s.id IN ({','.join('?' for _ in ids)})",
         prompt_select=None if compact_rows else f", {_PROMPT_RESOLVED_SQL}",
     )
     return {s["id"]: s for s in map(_rich_row, _read_rows(holder, query, ids))}

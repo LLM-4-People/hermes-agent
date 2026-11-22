@@ -500,6 +500,9 @@ class SQLiteMessageRepository:
                 include_compacted=request.view is TranscriptView.DISPLAY, limit=request.limit, offset=request.offset,
                 latest=request.latest, after_id=None if request.after_id is None else int(request.after_id),
                 include_ancestors=request.include_lineage)
+            if request.for_export:
+                from persistence.sqlite.housekeeping._photo_export import stamp_exported_photo_previews
+                stamp_exported_photo_previews(holder, {session_id: rows})
         return tuple(_transcript_row(row) for row in rows)
 
     def read_transcript_page(self, session_id: SessionId, request: TranscriptRead, *, visible_only: bool = False) -> TranscriptPage:

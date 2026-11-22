@@ -17,11 +17,12 @@ def _normalize_telegram_topic_profile_name(profile_name: Optional[str] = None) -
     return name if name else "default"
 
 
-_UNLINKED_SELECT_HEAD = f"""
+def _unlinked_select_head(holder):
+    return f"""
                     SELECT s.*,
                         COALESCE(sp.prompt, s.system_prompt)
                             AS _system_prompt_resolved,
-                        {_sql_preview_raw()},
+                        {_sql_preview_raw(holder.has_session_admissions)},
                         {_sql_session_last_active("s")} AS last_active
                     FROM sessions s
                     LEFT JOIN system_prompts sp
@@ -57,11 +58,11 @@ def list_unlinked_telegram_sessions_for_user(
     with holder._read_ctx() as conn:
         try:
             rows = conn.execute(
-                _UNLINKED_SELECT_HEAD + _UNLINKED_SCOPE_CLAUSES + _UNLINKED_SELECT_TAIL,
+                _unlinked_select_head(holder) + _UNLINKED_SCOPE_CLAUSES + _UNLINKED_SELECT_TAIL,
                 (str(user_id), profile_name, int(limit)),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = conn.execute(
-                _UNLINKED_SELECT_HEAD + _UNLINKED_SELECT_TAIL, (str(user_id), int(limit)),
+                _unlinked_select_head(holder) + _UNLINKED_SELECT_TAIL, (str(user_id), int(limit)),
             ).fetchall()
     return [_rich_row(row) for row in rows]
