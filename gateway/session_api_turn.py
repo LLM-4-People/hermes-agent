@@ -9,7 +9,9 @@ import re
 import uuid
 
 from gateway.platforms.api_server_request_options import RUN_TOOL_FIELDS, parse_run_tool_options, run_tool_scope
+from agent.mobile_companion_prompt import normalize_user_language
 from agent.run_instructions import valid_run_instructions
+from tools.mobile_device_bridge import validate_device_capabilities
 from gateway.config import Platform
 from gateway.session_api import bind_api_steps, restore_api_session, run_steps, run_steps_off_loop
 from gateway.session_authority import admission_row
@@ -23,7 +25,7 @@ _SETTINGS_PREFIX = 'gateway.api.settings.v1.'
 # Request-owned sinks an API observer may register for its admission's execution.
 _OBSERVER_KEYS = ('stream_delta_callback', 'tool_start_callback', 'tool_complete_callback',
                   'reasoning_callback', 'status_callback', 'interim_assistant_callback',
-                  'subagent_progress_callback')
+                  'subagent_progress_callback', 'run_id', 'ui_patch_callback', 'delivery_callback')
 _SUBAGENT_OBSERVER_EVENTS = frozenset({
     'subagent.start', 'subagent.complete', 'subagent.tool',
     'subagent.tool.started', 'subagent.tool.completed', 'reasoning.available',
@@ -65,8 +67,10 @@ def check_api_turn(authority, ref, payload):
         # 'browser_control' is accepted and ignored: admissions persisted while the removed
         # browser-extension control existed may carry it and must still recover.
         if (set(data) - {'history', 'settings', 'turn_author', 'media', 'run_owner_scope', 'browser_control',
-                         'relay_metadata', 'resume_unanswered', 'run_instructions'}
+                         'relay_metadata', 'resume_unanswered', 'run_instructions', 'device_capabilities', 'user_language'}
                 or ('run_instructions' in data and not valid_run_instructions(data['run_instructions']))
+                or ('device_capabilities' in data and validate_device_capabilities(data['device_capabilities'])[1] is not None)
+                or ('user_language' in data and (data['user_language'] is None or normalize_user_language(data['user_language'])[1] is not None))
                 or data.get('resume_unanswered', True) is not True
                 or not {'history', 'settings'} <= set(data)
                 or not isinstance(data.get('relay_metadata', {}), dict)
@@ -184,6 +188,18 @@ def admit_api_steps(adapter, **kwargs):
         'history': None if kwargs.get('history_from_session') else kwargs['conversation_history'], 'settings': settings}}))
     if kwargs.get('run_instructions'):
         payload['api_turn_v1']['run_instructions'] = kwargs['run_instructions']
+    if kwargs.get('device_capabilities'):
+        caps, cap_err = validate_device_capabilities(kwargs['device_capabilities'])
+        if cap_err:
+            raise AuthorityRefusal('invalid_params')
+        if caps:
+            payload['api_turn_v1']['device_capabilities'] = caps
+    if kwargs.get('user_language'):
+        lang, lang_err = normalize_user_language(kwargs['user_language'])
+        if lang_err:
+            raise AuthorityRefusal('invalid_params')
+        if lang:
+            payload['api_turn_v1']['user_language'] = lang
     run_owner_scope = kwargs.get('run_owner_scope')
     if run_owner_scope is not None:
         if not _valid_owner_scope(run_owner_scope):
@@ -447,13 +463,33 @@ def prepare_api_execution(authority, ref, payload):
             'content': content, 'turn_author': data.get('turn_author') if data else None,
             'relay_metadata': data.get('relay_metadata') if data else None,
             'run_instructions': data.get('run_instructions') if data else None,
+            'device_capabilities': data.get('device_capabilities') if data else None,
+            'user_language': data.get('user_language') if data else None,
             'resume_unanswered': bool(data and data.get('resume_unanswered'))}
 
 
 def _api_observers(authority, session_id):
-    execution = authority.sessions[session_id].event_stream.execution
+    live = getattr(authority, 'sessions', {}).get(session_id)
+    execution = live.event_stream.execution if live is not None else None
     admission_id = execution.get('admission_id') if execution else None
     return tuple(getattr(authority, 'api_observers', {}).get(admission_id, ()))
+
+
+def active_api_run_id(authority, session_id):
+    """Return the live API ``run_id`` observing the active admission for ``session_id``, if any."""
+    for observer in _api_observers(authority, session_id):
+        run_id = observer.get('run_id')
+        if isinstance(run_id, str) and run_id:
+            return run_id
+    return None
+
+
+def notify_api_ui_patch(authority, session_id, revision):
+    return _notify_observers(authority, session_id, 'ui_patch_callback', revision)
+
+
+def notify_api_delivery(authority, session_id, delivery):
+    return _notify_observers(authority, session_id, 'delivery_callback', delivery)
 
 
 def _notify_observers(authority, session_id, key, *args, **kwargs):

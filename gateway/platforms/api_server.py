@@ -2378,14 +2378,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "chat_completions": True, "chat_completions_streaming": True,
             "responses_api": True, "responses_streaming": True, "run_submission": True,
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
-            **_STATIC_FEATURE_FLAGS, **_api_memory.CAPABILITY_FEATURES, **_api_skills.CAPABILITY_FEATURES,
+            **_STATIC_FEATURE_FLAGS, **_api_runs._MOBILE_FEATURE_FLAGS, **_api_memory.CAPABILITY_FEATURES, **_api_skills.CAPABILITY_FEATURES,
             **_api_workspace.CAPABILITY_FEATURES, **_api_profile.CAPABILITY_FEATURES,
             **_api_notes.CAPABILITY_FEATURES, **_api_sharing.CAPABILITY_FEATURES, **_api_habits.CAPABILITY_FEATURES,
             "cron_run_history": _CRON_AVAILABLE,
             "run_unknown_resolution": canonical, "run_clarify_response": canonical,
             "cors": bool(self._cors_origins)}
         all_endpoints = (
-            *_CAPABILITY_ENDPOINTS, *_api_memory.CAPABILITY_ENDPOINTS, *_api_skills.CAPABILITY_ENDPOINTS,
+            *_CAPABILITY_ENDPOINTS, *_api_runs._MOBILE_CAPABILITY_ENDPOINTS, *_api_memory.CAPABILITY_ENDPOINTS, *_api_skills.CAPABILITY_ENDPOINTS,
             *_api_workspace.CAPABILITY_ENDPOINTS, *_api_profile.CAPABILITY_ENDPOINTS,
             *_api_notes.CAPABILITY_ENDPOINTS, *_api_sharing.CAPABILITY_ENDPOINTS, *_api_habits.CAPABILITY_ENDPOINTS)
         return web.json_response({

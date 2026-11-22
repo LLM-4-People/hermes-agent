@@ -92,6 +92,9 @@ CONFIGURABLE_TOOLSETS = [
     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("computer_use",     "🖱️  Computer Use (macOS/Windows/Linux)", "background desktop control via cua-driver"),
+    ("mobile_ui",       "📱 Mobile Live UI",           "propose/apply reversible declarative UI patches & widgets"),
+    ("mobile_deliver",  "🔔 Mobile Deliveries",        "deliver structured notices, cards, files & briefings to Hermes Mobile"),
+    ("mobile_device",   "📲 Mobile Device Bridge",     "request explicitly approved Android device actions"),
 ]
 
 

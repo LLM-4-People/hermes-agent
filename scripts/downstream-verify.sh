@@ -56,6 +56,7 @@ scripts/run_tests.sh \
   tests/agent/test_codex_app_server_persist.py \
   tests/agent/test_codex_runtime_prompt_handoff.py \
   tests/gateway/api_server/test_run_instructions.py \
+  tests/gateway/api_server/test_mobile_live_ui_push_bridge.py \
   tests/gateway/api_server/test_rich_telemetry_and_live_stream.py \
   tests/agent/test_turn_usage_telemetry.py \
   tests/tools/test_approval_preview.py \

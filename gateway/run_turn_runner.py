@@ -1136,8 +1136,54 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 agent._silence_marker_needs_reply = not silence_allowed(
                     ctx.persist_user_display_kind, ctx.reply_expected)
                 try:
+                    from agent.mobile_companion_prompt import combine_run_instructions
                     from agent.run_instructions import run_instruction_scope
-                    with run_instruction_scope(agent, api.get("run_instructions") if api else None):
+                    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
+                    from gateway.session_api_turn import active_api_run_id, notify_api_delivery, notify_api_ui_patch
+                    from gateway.session_authorities import active_authority
+                    from tools.mobile_deliver import bind_delivery_emitter
+                    from tools.mobile_device_bridge import device_bridge_scope
+                    from tools.mobile_ui_patch import bind_ui_patch_emitter
+                    api_adapter = api.get("adapter") if api else None
+                    api_caps = api.get("device_capabilities") if api else None
+                    authority = active_authority(self._runner) if getattr(self, "_runner", None) is not None else None
+                    if authority is None:
+                        authority = getattr(getattr(self, "_runner", None), "session_authority", None)
+                    api_run_id = (
+                        (active_api_run_id(authority, ctx.session_id) if authority is not None and ctx.session_id else None)
+                        or getattr(ctx, "active_run_id", None)
+                        or ctx.session_id
+                        or ""
+                    )
+                    api_profile = resolve_device_profile_key(api_adapter, getattr(authority, "profile_id", None))
+                    broker = ensure_device_bridge_broker(api_adapter) if (api_adapter is not None and api_caps) else None
+                    ui_emitter = (
+                        (lambda rev: notify_api_ui_patch(authority, ctx.session_id, rev))
+                        if authority is not None and ctx.session_id
+                        else None
+                    )
+                    dlv_emitter = (
+                        (lambda dlv: notify_api_delivery(authority, ctx.session_id, dlv))
+                        if authority is not None and ctx.session_id
+                        else None
+                    )
+                    effective_once = combine_run_instructions(
+                        api.get("run_instructions") if api else None,
+                        api_caps,
+                        user_language=api.get("user_language") if api else None,
+                    )
+                    with (
+                        run_instruction_scope(agent, effective_once),
+                        bind_ui_patch_emitter(ui_emitter),
+                        bind_delivery_emitter(dlv_emitter),
+                        device_bridge_scope(
+                            agent,
+                            capabilities=api_caps,
+                            run_id=api_run_id,
+                            profile_key=api_profile,
+                            broker=broker,
+                        ),
+                    ):
                         result = agent.run_conversation(api_message, **kwargs)
                 finally:
                     agent._silence_marker_needs_reply = False
