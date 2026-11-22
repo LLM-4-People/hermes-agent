@@ -110,11 +110,12 @@ def test_regexes_use_the_same_python_dialect_that_validates_them(tmp_path):
     assert "a.txt:1" in result.stderr
 
 
-def test_inline_flags_are_rejected_at_parse_time(tmp_path):
-    """Matching is always case-insensitive; an inline global flag cannot sit inside the combined
-    alternation, so it must fail during parsing instead of during the scan."""
-    repo = _repo(tmp_path, {"a.txt": b"anything\n"})
-    result = _run(repo, "re:(?i)corp-internal\n", tmp_path=tmp_path)
+def test_inline_flags_and_backreferences_follow_python_semantics(tmp_path):
+    """Each rule compiles on its own: an inline flag works, and a numeric backreference keeps its
+    own group numbering even when another rule also has a group."""
+    repo = _repo(tmp_path, {"a.txt": b"bb\ncorp-internal\n"})
+    result = _run(repo, "re:(z)\nre:(b)\\1\nre:(?i)CORP-INTERNAL\n", tmp_path=tmp_path)
 
-    assert result.returncode == 2
-    assert "do not combine" in result.stderr
+    assert result.returncode == 1
+    assert "a.txt:1" in result.stderr
+    assert "a.txt:2" in result.stderr

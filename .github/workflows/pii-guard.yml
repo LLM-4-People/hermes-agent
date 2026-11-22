@@ -3,15 +3,14 @@ name: Public tree hygiene
 # The denylist secret must never be reachable from code a pull request controls. This workflow runs
 # in the base repository's context (`pull_request_target`): the workflow file and the checker come
 # from the trusted base commit, and the candidate is checked out only as data. No candidate code is
-# executed. On `push`, the checker and the tree are both the trusted merged commit.
+# executed. Direct pushes to `main` are blocked by the `main-pr-only` ruleset, so every merged tree
+# was scanned at its pull request head; this job never scans a pushed tree with the secret.
 
 on:
   # zizmor: ignore[dangerous-triggers] -- the candidate is checked out as data only; the checker
   # and this workflow come from the trusted base commit, and no candidate code is executed.
   pull_request_target:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -31,7 +30,7 @@ jobs:
       - name: Checkout the trusted checker
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
 
       - name: Checkout the candidate as data

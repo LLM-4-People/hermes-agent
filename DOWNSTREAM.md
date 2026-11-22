@@ -97,12 +97,14 @@ details. `scripts/ci/check_public_pii.py` (also available locally as
 
 The identifiers themselves are **not** in the tree — publishing the denylist would defeat it. They
 live in the repository secret `PII_DENYLIST` (newline-separated literals or Python regular
-expressions prefixed with `re:`; matching is case-insensitive). `.github/workflows/pii-guard.yml`
-runs on `pull_request_target` and on pushes to `main`: the workflow and checker come from the
-trusted base commit, the candidate is checked out only as data, and the scan runs with
-`HERMES_PUBLIC_PII_REQUIRE=1`. No pull-request code executes in that job, so neither a same-repo PR
-nor the automation branch (which may contain merged upstream code) can read the denylist. The
-regular downstream gate deliberately does not receive the secret.
+expressions prefixed with `re:`; matching is case-insensitive and each rule is matched
+independently). `.github/workflows/pii-guard.yml` runs on `pull_request_target`: the workflow and
+checker come from the trusted base commit, the candidate is checked out only as data, and the scan
+runs with `HERMES_PUBLIC_PII_REQUIRE=1`. No pull-request code executes in that job, so neither a
+same-repo PR nor the automation branch (which may contain merged upstream code) can read the
+denylist. There is deliberately no `push` trigger, because that job would run the just-merged
+checker with the secret; direct pushes to `main` are blocked by the ruleset, so every merged tree
+was scanned at its pull request head. A manual `workflow_dispatch` runs only the merged checker.
 
 Locally, put the same newline-separated list in `~/.config/hermes/pii-denylist` (or point
 `HERMES_PUBLIC_PII_DENYLIST` at another file) and run `scripts/check --only public-pii`. Findings

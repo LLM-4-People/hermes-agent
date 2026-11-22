@@ -5,8 +5,8 @@ The identifiers are deliberately **not** committed: publishing the denylist woul
 what it protects. They are supplied at the lowest choke point, by ``--denylist-file`` or the
 ``HERMES_PUBLIC_PII_DENYLIST`` environment variable (newline-separated). Each non-blank,
 non-comment entry is a literal or a Python regular expression prefixed with ``re:``. Matching is
-case-insensitive; patterns are combined into one alternation, so they must not use backreferences
-(the error names the constraint).
+case-insensitive, and every rule is matched independently, so backreferences keep their own
+numbering.
 
 The scan reads tracked files directly, so it has exactly one regex dialect (Python's) and works
 the same on every platform. Exit codes: 0 clean (or no denylist configured, with a visible
@@ -43,7 +43,7 @@ class Rule:
     regex: bool
 
     def expression(self) -> str:
-        return f"(?:{self.pattern})" if self.regex else re.escape(self.pattern)
+        return self.pattern if self.regex else re.escape(self.pattern)
 
 
 def parse_denylist(text: str) -> list[Rule]:
@@ -63,15 +63,6 @@ def parse_denylist(text: str) -> list[Rule]:
             except re.error as exc:
                 raise ValueError(f"invalid denylist regex at entry {len(rules) + 1}: {exc}") from exc
         rules.append(Rule(len(rules) + 1, pattern, regex))
-    if rules:
-        try:
-            re.compile("|".join(rule.expression() for rule in rules), re.IGNORECASE)
-        except re.error as exc:
-            raise ValueError(
-                f"denylist entries do not combine into one expression ({exc}); "
-                "backreferences and inline flags are not supported, matching is always "
-                "case-insensitive"
-            ) from exc
     return rules
 
 
@@ -98,7 +89,8 @@ def _tracked_files(repo: Path) -> list[str]:
 
 def scan(repo: Path, rules: Sequence[Rule]) -> tuple[list[str], int]:
     """``(matches sorted by path/line, generated lines skipped)``."""
-    pattern = re.compile("|".join(rule.expression() for rule in rules), re.IGNORECASE)
+    # One compiled pattern per rule: an alternation would renumber numeric backreferences.
+    patterns = [re.compile(rule.expression(), re.IGNORECASE) for rule in rules]
     hits: list[str] = []
     skipped = 0
     for rel in _tracked_files(repo):
@@ -112,7 +104,7 @@ def scan(repo: Path, rules: Sequence[Rule]) -> tuple[list[str], int]:
         if b"\0" in data[:_BINARY_PROBE]:
             continue
         for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
-            if not pattern.search(line):
+            if not any(pattern.search(line) for pattern in patterns):
                 continue
             if len(line) > _GENERATED_LINE_MIN and "base64," in line:
                 skipped += 1
