@@ -109,4 +109,3 @@ def test_requested_entry_selects_its_affinity_header_on_main_and_aux():
             aux._RUNTIME_MAIN_CONTEXT.reset(token)
 
     assert aux_headers == {"X-Beta-Session": "sess-A"}
-

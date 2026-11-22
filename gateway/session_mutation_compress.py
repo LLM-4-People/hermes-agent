@@ -37,6 +37,8 @@ async def prepare_compress(authority, live, payload, prepared):
     from agent.model_metadata import estimate_request_tokens_rough
     from hermes_cli.partial_compress import (
         rejoin_compressed_head_and_tail, split_history_for_partial_compress, summarize_compress_preview)
+    from hermes_cli.config import get_compatible_custom_providers
+    from hermes_cli.providers import live_provider_identity
     from utils import is_truthy_value
     request = compress_request(payload)
     snapshot = prepared['snapshot']
@@ -84,11 +86,13 @@ async def prepare_compress(authority, live, payload, prepared):
                         _end_engine(owner, snapshot['target'], messages)
                     raise
             compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
-                api_key=runtime.get('api_key') or '', provider=runtime.get('provider') or '',
+                api_key=runtime.get('api_key') or '',
+                provider=live_provider_identity(
+                    runtime.get('provider'), runtime.get('requested_provider')) or '',
                 api_mode=runtime.get('api_mode') or '', quiet_mode=True, abort_on_summary_failure=True,
                 protect_first_n=options.get('protect_first_n', 3), protect_last_n=options.get('protect_last_n', 20),
                 min_tail_user_messages=max(1, _parse_config_int(options.get('min_tail_user_messages', 1), 1)),
-                custom_providers=config.get('custom_providers'))
+                custom_providers=get_compatible_custom_providers(config))
             compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
                                                focus_topic=request.focus_topic, memory_context=memory_context)
             if not any(m.get('_compressed_summary') for m in compressed):

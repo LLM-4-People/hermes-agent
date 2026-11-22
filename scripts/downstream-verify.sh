@@ -16,7 +16,7 @@ PYTHON="${HERMES_PYTHON:-python3}"
 
 # Static guards + lint. All Python-only, so no Node toolchain is needed.
 "$PYTHON" scripts/check --only \
-  footguns,detached-spawns,install-root,config-writers,config-readers,ruff
+  footguns,detached-spawns,install-root,config-writers,config-readers,public-pii,ruff
 
 # Downstream regression suite: provider routing + footer identity + Signal media, plus every
 # consumer that resolves route metadata (main client, Anthropic wire, auxiliary, /model,
@@ -34,16 +34,21 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_provider_section3_grouping.py \
   tests/agent/test_custom_provider_extra_headers_client.py \
   tests/agent/test_anthropic_adapter_extra_headers.py \
+  tests/agent/test_anthropic_prompt_cache_policy.py \
   tests/agent/test_aux_custom_endpoint_headers.py \
   tests/agent/test_auxiliary_named_custom_providers.py \
   tests/agent/test_session_affinity_header.py \
   tests/agent/test_switch_model_reapplies_headers.py \
   tests/agent/test_switch_model_context.py \
+  tests/agent/test_prompt_cache_ttl_propagation.py \
   tests/agent/test_auxiliary_error_policy.py \
   tests/gateway/test_model_command_custom_providers.py \
   tests/gateway/test_session_model_override_routing.py \
   tests/gateway/test_gateway_route_identity.py \
   tests/gateway/test_runtime_footer.py \
+  tests/gateway/test_session_info.py \
+  tests/gateway/test_hygiene_provider_identity.py \
+  tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_signal.py \
   tests/gateway/test_signal_inbound_attachments.py \
   tests/gateway/test_signal_rate_limit.py \
@@ -52,6 +57,7 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_status_provider_label.py \
   tests/hermes_cli/test_cmd_update_docker.py \
   tests/ci/test_docs_drift.py \
+  tests/ci/test_check_public_pii.py \
   -q
 
 # That file imports the Discord and Slack SDKs at module load, which need the optional

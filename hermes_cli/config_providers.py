@@ -457,7 +457,8 @@ def _entries_for_route(
     custom_providers: Optional[list[dict[str, Any]]],
     config: Optional[dict[str, Any]],
     *,
-    provider: Optional[str] = None):
+    provider: Optional[str] = None,
+    unmatched: str = "fail"):
     """Yield entries whose normalized route identity equals *base_url*.
 
     None *custom_providers* → ``get_compatible_custom_providers(config)`` (failure → none).
@@ -466,9 +467,20 @@ def _entries_for_route(
     ``custom:<slug>``). When it names an entry on this route, ONLY that entry is yielded: several
     providers may share one endpoint (a router fronting many upstreams), and route metadata
     (headers, TLS, context length, capabilities) belongs to the provider, not to the URL. A named
-    identity that is configured elsewhere never borrows this route's first entry. Bare ``custom``,
-    no identity, and a built-in name with no matching custom entry keep the legacy URL-only scan.
+    identity that is configured elsewhere never borrows this route's first entry.
+
+    *unmatched* decides what an identity that names no entry anywhere means:
+
+    - ``fail`` (routing metadata: headers, TLS, affinity, context, api mode) keeps nothing, so a
+      deleted or renamed entry cannot inherit a sibling's route policy;
+    - ``route`` (capability/model declarations) keeps the URL-only scan, the upstream contract for
+      callers whose identity may legitimately be unknown.
+
+    Bare ``custom``, no identity, and a built-in name with no matching custom entry keep the
+    legacy URL-only scan.
     """
+    if unmatched not in {"fail", "route"}:
+        raise ValueError(f"unmatched must be 'fail' or 'route', got {unmatched!r}")
     from hermes_cli.config import get_compatible_custom_providers
     if custom_providers is None:
         try:
@@ -494,12 +506,16 @@ def _entries_for_route(
             yield from selected
             return
         # A ``custom:<name>`` is unambiguously a named entry; a bare identity that matches an entry
-        # on another route is a named entry too. Neither may inherit a sibling's metadata. A bare
+        # on another route is a named entry too. So is any bare name that is not a built-in provider
+        # (a deleted or renamed entry): none of them may inherit a sibling's metadata. Only a bare
         # built-in name (e.g. ``openai`` with a user-supplied base_url) keeps the legacy scan.
-        if identity.startswith("custom:") or any(
+        from hermes_cli.providers import is_builtin_provider
+        named_elsewhere = any(
             isinstance(entry, dict) and wanted & _entry_route_aliases(entry)
             for entry in custom_providers
-        ):
+        )
+        if (identity.startswith("custom:") or named_elsewhere
+                or (unmatched == "fail" and not is_builtin_provider(identity))):
             return
     yield from matches
 
@@ -541,8 +557,15 @@ def _route_model_cfgs(
     config: Optional[dict[str, Any]],
     *,
     provider: Optional[str] = None) -> Iterator[dict[str, Any]]:
-    """Yield the ``models.<model>`` mapping of every entry matching *base_url* and *provider*."""
-    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
+    """Yield the ``models.<model>`` mapping of every entry matching *base_url* and *provider*.
+
+    Capability declarations are route-scoped: an identity that names no entry keeps the URL-only
+    scan (upstream contract, so a declaration still applies when the caller has no usable
+    identity), unlike routing metadata, which fails closed because headers and TLS belong to one
+    provider.
+    """
+    for entry in _entries_for_route(
+            base_url, custom_providers, config, provider=provider, unmatched="route"):
         model_cfg = _route_model_cfg(entry, model)
         if model_cfg is not None:
             yield model_cfg
@@ -650,7 +673,9 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
     if not extra_headers:
         return
     merged = dict(client_kwargs.get("default_headers") or {})
-    merged.update(extra_headers)
+    # HTTP header names are case-insensitive: an override spelled with different casing must
+    # replace the existing header, not become a second wire header the proxy may read first.
+    _merge_headers_case_insensitive(merged, extra_headers)
     client_kwargs["default_headers"] = merged
 
 

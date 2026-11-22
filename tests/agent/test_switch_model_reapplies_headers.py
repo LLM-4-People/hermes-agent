@@ -116,4 +116,3 @@ def test_switch_to_the_second_provider_on_a_shared_route_uses_its_tls(mock_ctx_l
 
     assert agent._client_kwargs.get("ssl_verify") is False
     assert "ssl_ca_cert" not in agent._client_kwargs
-

@@ -313,6 +313,24 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
     return pdef
 
 
+def is_builtin_provider(name: str) -> bool:
+    """Whether *name* is a shipped provider id or alias, never a user-configured entry name.
+
+    Provider-scoped route metadata must not hand a sibling's headers, TLS or context window to a
+    bare name whose entry was deleted or renamed; only a real built-in may keep the legacy
+    URL-only scan. Shipped tables answer every built-in provider without I/O; the registry is
+    consulted only for a name they do not know (plugin profiles, warm models.dev entries), with
+    network probes disabled so a lookup on a request path never blocks.
+    """
+    key = str(name or "").strip().lower()
+    if not key:
+        return False
+    canonical = normalize_provider(key)
+    if _is_static_canonical(canonical):
+        return True
+    return get_provider(canonical, allow_network=False) is not None
+
+
 def _plugin_profile_pdef(name: str) -> Optional[ProviderDef]:
     """The registered ``ProviderProfile`` for *name* (or one of its aliases) as a ProviderDef; the
     id is the profile's canonical name so an alias switch persists and resolves credentials under
@@ -578,6 +596,13 @@ def provider_display_name(
     ):
         for key, entry in entries:
             if not isinstance(entry, dict):
+                continue
+            # A ``providers.<id>`` block that only tunes a built-in provider (e.g.
+            # ``providers.bedrock.stale_timeout_seconds``) declares no route and no display name;
+            # it must not shadow the built-in label with its lower-case config key.
+            if not str(entry.get("name") or "").strip() and not any(
+                    isinstance(entry.get(field), str) and entry.get(field).strip()
+                    for field in ("base_url", "api", "url")):
                 continue
             if wanted & custom_provider_aliases(
                 str(entry.get("name") or ""), str(entry.get("provider_key") or key or "")):

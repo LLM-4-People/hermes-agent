@@ -887,7 +887,9 @@ def _apply_openai_header_policy(agent, client_kwargs: dict[str, Any]) -> None:
         _cp_entries = get_compatible_custom_providers(load_config())
         _cp_base_url = str(client_kwargs.get("base_url") or agent.base_url or "")
         # Route metadata is provider-scoped: several providers may share one proxy endpoint.
-        _cp_provider = str(getattr(agent, "requested_provider", "") or getattr(agent, "provider", "") or "")
+        from hermes_cli.providers import live_provider_identity
+        _cp_provider = live_provider_identity(
+            getattr(agent, "provider", ""), getattr(agent, "requested_provider", ""))
         apply_custom_provider_tls_to_client_kwargs(
             client_kwargs, _cp_base_url, _cp_entries, provider=_cp_provider)
         # Per-provider extra_headers applied last so the most specific config level wins.

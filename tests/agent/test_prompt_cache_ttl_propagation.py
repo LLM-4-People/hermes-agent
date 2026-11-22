@@ -11,6 +11,7 @@ contract (every fallback activation must restart the outer iteration so the
 pre-API preflight re-runs against the fallback's context window).
 """
 
+import pytest
 
 
 def _collect_cache_controls(obj):
@@ -260,3 +261,45 @@ class TestAuxFallbackReplanThreadsTtl:
             advisor, None, destination=auxiliary_client._FallbackDestination(
                 "anthropic", "https://api.anthropic.com", "anthropic_messages", "claude-opus-4.8"))
         assert _collect_cache_controls(out_msgs), "a pre-decorated advisor request must keep caching"
+
+
+@pytest.mark.parametrize("adapter,requested,expected", [
+    ("custom", "custom:beta", "custom:beta"),
+    ("custom", "", "custom"),
+    ("openrouter", "custom:beta", "openrouter"),
+])
+def test_request_plan_judges_the_live_provider(monkeypatch, adapter, requested, expected):
+    """TTL clamping and marker support must read the requested entry for a generic adapter, and
+    the concrete adapter when it owns the route (a stale requested name must not override it)."""
+    from types import SimpleNamespace
+
+    from agent import turn_request_assembly
+
+    seen = {}
+
+    def fake_ttl(ttl, *, provider, model, base_url, auto):
+        seen["ttl"] = provider
+        return ttl
+
+    def fake_plan(messages, tools, **kwargs):
+        return SimpleNamespace(messages=messages, tools=tools, plan=kwargs)
+
+    def fake_markers(provider, base_url):
+        seen["markers"] = provider
+        return False
+
+    agent = SimpleNamespace(
+        provider=adapter, requested_provider=requested,
+        model="shared-model", base_url="https://router.example.com/v1",
+        _cache_ttl="1h", _cache_ttl_auto=False, _use_native_cache_layout=False,
+        _cached_system_prompt_static=None, _cached_system_prompt="sys",
+        _direct_native_anthropic_tool_cache_capability=lambda: False,
+    )
+    monkeypatch.setattr(turn_request_assembly, "effective_cache_ttl", fake_ttl)
+    monkeypatch.setattr(turn_request_assembly, "build_prompt_cache_plan", fake_plan)
+    monkeypatch.setattr(
+        "agent.prompt_caching.envelope_tool_part_cache_markers_supported", fake_markers)
+
+    turn_request_assembly.plan_request_cache(agent, [], [])
+
+    assert seen == {"ttl": expected, "markers": expected}

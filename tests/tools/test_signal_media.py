@@ -188,5 +188,7 @@ class TestAttachmentDataUri:
         path = tmp_path / "chart.png"
         path.write_bytes(b"x" * 8)
         assert attachment_size_sync(path) == 8
-        with pytest.raises(ValueError, match="too large"):
+        from plugins.platforms.signal.signal_media import AttachmentTooLarge
+        with pytest.raises(AttachmentTooLarge) as excinfo:
             attachment_size_sync(path, max_bytes=4)
+        assert excinfo.value.size == 8

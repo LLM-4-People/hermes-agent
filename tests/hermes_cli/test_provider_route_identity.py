@@ -86,6 +86,23 @@ def test_a_named_identity_with_no_matching_entry_returns_no_metadata():
     assert get_custom_provider_extra_headers(_ROUTE, entries, provider="elsewhere") == {}
 
 
+def test_a_deleted_bare_entry_identity_does_not_borrow_a_sibling():
+    """A bare name whose entry was removed is not a built-in: it must not inherit route policy."""
+    assert get_custom_provider_extra_headers(_ROUTE, _entries(), provider="beta-removed") == {}
+    assert get_custom_provider_tls_settings(_ROUTE, _entries(), provider="beta-removed") == {}
+
+
+def test_capability_declarations_keep_the_route_scoped_fallback():
+    """Capabilities are route/model-scoped: an identity that names no entry still reads the
+    declaration serving this endpoint, while an explicit missing ``custom:<slug>`` does not."""
+    entries = [{"name": "alpha", "base_url": _ROUTE,
+                "models": {"m": {"prompt_caching": True}}}]
+    assert get_custom_provider_model_capability(
+        "m", _ROUTE, "prompt_caching", entries, provider="unknown-alias") is True
+    assert get_custom_provider_model_capability(
+        "m", _ROUTE, "prompt_caching", entries, provider="custom:removed") is None
+
+
 def test_a_builtin_identity_keeps_a_custom_endpoint_entry():
     """A built-in provider pointed at a user-declared custom endpoint still gets its entry."""
     entries = [{"name": "my-proxy", "base_url": _ROUTE, "extra_headers": {"H": "proxy"}}]

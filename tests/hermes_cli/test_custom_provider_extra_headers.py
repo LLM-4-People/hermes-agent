@@ -234,3 +234,22 @@ def test_fetch_api_models_sends_extra_headers_to_models_probe(monkeypatch):
     assert captured["headers"]["authorization"] == "Bearer proxy-key"
     assert captured["headers"]["sleeve-harness"] == "hermes"
     assert captured["headers"]["sleeve-base-url"] == "http://localhost:8081/v1"
+
+
+def test_client_default_headers_merge_replaces_the_same_name_in_any_case():
+    """HTTP header names are case-insensitive: the provider value must replace the user default,
+    not travel beside it as a second wire header a proxy may read first."""
+    client_kwargs = {"default_headers": {"x-upstream": "user", "X-SDK": "1"}}
+
+    apply_custom_provider_extra_headers_to_client_kwargs(
+        client_kwargs,
+        "https://router.example.com/v1",
+        [{
+            "name": "beta",
+            "base_url": "https://router.example.com/v1",
+            "extra_headers": {"X-Upstream": "beta"},
+        }],
+        provider="beta",
+    )
+
+    assert client_kwargs["default_headers"] == {"X-SDK": "1", "X-Upstream": "beta"}

@@ -177,7 +177,9 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: upstream-workflows
-          path: merged
+          # upload-artifact roots a multi-path artifact at the common parent (``.github``), so the
+          # downloaded tree must be re-anchored there for ``root: merged`` to resolve.
+          path: merged/.github
 
       - name: Audit fork-owned workflows
         uses: ./.github/actions/workflow-lint
@@ -224,6 +226,7 @@ jobs:
       - name: Open or update the sync pull request
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           SHA: ${{ needs.verify.outputs.sha }}
         run: |
           set -euo pipefail
@@ -267,6 +270,7 @@ jobs:
       - name: Open or update the sync failure issue
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail

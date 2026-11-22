@@ -138,4 +138,3 @@ def test_send_timeout_scales_with_attachment_bytes():
         serialized / SIGNAL_UPLOAD_MIN_THROUGHPUT)
     assert _signal_send_timeout(32, total_bytes=32 * serialized) == SIGNAL_MAX_SEND_TIMEOUT
     assert _signal_send_timeout(20, total_bytes=1024) == pytest.approx(100.0)
-

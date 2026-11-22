@@ -1339,10 +1339,11 @@ def anthropic_prompt_cache_policy(
         return (False, False)
     from hermes_cli.providers import live_provider_identity
 
-    eff_provider = (
-        provider if provider is not None and str(provider).strip().lower() not in {"", "custom", "auto"}
-        else live_provider_identity(provider, getattr(agent, "requested_provider", ""))
-    ) or ""
+    # A caller that omits ``provider`` means "the agent's live route", not "no provider": the
+    # requested entry only replaces a generic adapter, so resolve it from the agent's own value.
+    source = provider if provider is not None else getattr(agent, "provider", "")
+    eff_provider = live_provider_identity(
+        source, getattr(agent, "requested_provider", "")) or ""
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
     eff_model = (model if model is not None else agent.model) or ""
@@ -1742,6 +1743,7 @@ def _resolve_switch_destination(agent, new_model, new_provider, base_url, api_mo
 
 def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new_norm) -> None:
     """Build the client for the switched-to destination (MoA facade / native Anthropic / OpenAI wire)."""
+    from hermes_cli.providers import live_provider_identity
     if new_norm == "moa":
         from agent.moa_loop import bind_moa_runtime
         # MoA speaks only chat.completions via the MoAClient facade; the aggregator's real transport
@@ -1780,7 +1782,8 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         agent._anthropic_client = build_anthropic_client(
             effective_key, agent._anthropic_base_url,
             timeout=get_provider_request_timeout(agent.provider, agent.model),
-            provider=str(getattr(agent, "requested_provider", "") or new_provider or ""),
+            provider=live_provider_identity(
+                new_provider, getattr(agent, "requested_provider", "")),
         )
         agent._is_anthropic_oauth = anthropic_route_is_oauth(agent._anthropic_base_url, effective_key, provider=new_provider)
         agent.client = None
@@ -1801,7 +1804,8 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         apply_custom_provider_tls_to_client_kwargs(
             agent._client_kwargs, str(effective_base or ""),
             get_compatible_custom_providers(load_config_readonly()),
-            provider=str(getattr(agent, "requested_provider", "") or new_provider or ""),
+            provider=live_provider_identity(
+                new_provider, getattr(agent, "requested_provider", "")),
         )
     except Exception:
         logger.debug("custom-provider TLS resolution skipped on switch_model", exc_info=True)
@@ -1866,6 +1870,7 @@ def _resolve_switch_context_length(agent, snapshot):
             get_compatible_custom_providers, get_custom_provider_context_length, load_config
         )
         from agent.agent_init import config_context_length_for_runtime
+        from hermes_cli.providers import live_provider_identity
         switch_cfg = load_config()
         custom_providers = get_compatible_custom_providers(switch_cfg)
         # The durable ``model.context_length`` pin is re-read from live config (never carried over
@@ -1876,7 +1881,8 @@ def _resolve_switch_context_length(agent, snapshot):
         if intent is None:
             intent = get_custom_provider_context_length(
                 model=agent.model, base_url=agent.base_url, custom_providers=custom_providers,
-                provider=str(getattr(agent, "requested_provider", "") or agent.provider or ""),
+                provider=live_provider_identity(
+                    agent.provider, getattr(agent, "requested_provider", "")),
             )
     except Exception:
         intent = None

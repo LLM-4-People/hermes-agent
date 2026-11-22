@@ -8,9 +8,9 @@ change lives in its own commit and touches as few upstream files as possible.
 
 | Change | Owner files | Why |
 |---|---|---|
-| Provider-aware route metadata | `hermes_cli/config_providers.py`, `hermes_cli/runtime_provider_custom.py`, `agent/agent_init.py`, `agent/client_lifecycle.py`, `agent/anthropic_adapter.py`, `agent/auxiliary_client.py`, `agent/opencode_affinity.py`, `agent/reasoning_promotion.py`, `hermes_cli/model_switch_providers.py`, `hermes_cli/main_provider_setup.py`, `hermes_cli/model_setup_flows_custom.py`, `hermes_cli/models_local.py`, `acp_adapter/model_catalog.py` | `extra_headers`/TLS/api-mode/context/capability lookups matched by base URL, so two providers behind one proxy shared the first entry's metadata. `_entries_for_route` now selects by provider identity (key, display name, `custom:<slug>`) and every consumer passes it. |
+| Provider-aware route metadata | `hermes_cli/config_providers.py`, `hermes_cli/runtime_provider_custom.py`, `agent/agent_init.py`, `agent/client_lifecycle.py`, `agent/anthropic_adapter.py`, `agent/auxiliary_client.py`, `agent/opencode_affinity.py`, `agent/reasoning_promotion.py`, `hermes_cli/model_switch_providers.py`, `hermes_cli/main_provider_setup.py`, `hermes_cli/model_setup_flows_custom.py`, `hermes_cli/models_local.py`, `acp_adapter/model_catalog.py` | `extra_headers`/TLS/api-mode/context/capability lookups matched by base URL, so two providers behind one proxy shared the first entry's metadata. `_entries_for_route` now selects by provider identity (key, display name, `custom:<slug>`) and every consumer passes it. Routing metadata fails closed for a bare identity whose entry was deleted or renamed; capability declarations keep the URL-scoped fallback, because they are a property of the model and endpoint. |
 | `providers.<name>.proxy` | `hermes_cli/config_providers.py`, docs | First-class upstream routing for gateways: `proxy.base_url` is sent as `X-Proxy-Base-URL` (configurable via `proxy.header`), with `proxy.headers` and `extra_headers` overrides. Removes hand-written routing headers. |
-| Footer `provider` field | `gateway/runtime_footer.py`, `gateway/run_turn_runner.py`, `gateway/run_turn_persistence.py`, `gateway/slash_commands.py`, `hermes_cli/providers.py` | The gateway reply footer now renders `model · provider · ctx% · cwd`; named custom providers show their configured name (the configured label), not the internal slug. |
+| Footer `provider` field | `gateway/runtime_footer.py`, `gateway/run_turn_runner.py`, `gateway/run_turn_persistence.py`, `gateway/slash_commands.py`, `hermes_cli/providers.py` | The gateway reply footer now renders `model · provider · ctx% · cwd`; named custom providers show the configured entry name, not the internal slug. |
 | Signal media in split deployments | `plugins/platforms/signal/signal_media.py`, `adapter.py`, `standalone.py`, `gateway_env.py`, `plugin.yaml` | signal-cli resolves attachment paths in its own container. Outbound attachments are now self-contained data URIs (`SIGNAL_INLINE_ATTACHMENTS=never` restores paths for shared volumes); inbound documents keep the sender's filename/extension and images with no `contentType` are classified from magic bytes. |
 | Image identity | `Dockerfile`, `hermes_cli/config.py` | `HERMES_IMAGE_NAME` build arg is baked into `/etc/hermes/image-provenance.json`, so `hermes update` tells operators to pull this fork's image instead of upstream's. |
 
@@ -38,6 +38,12 @@ does not have.
 `main` is never written directly by automation. Merging the PR triggers the normal push-triggered
 image build, so the published `edge` image always corresponds to a reviewed commit. A repository
 ruleset also rejects direct pushes to `main`, so the PR-only rule is mechanically enforced.
+
+The `main-pr-only` ruleset intentionally has no required checks or approvals: the sync PR is
+created with `GITHUB_TOKEN`, whose `pull_request` runs require manual approval, so a required-check
+rule would leave every automatic sync permanently unmergeable. This is an explicit
+single-maintainer exception; a GitHub App token plus a required-check ruleset is the next step if a
+second reviewer joins the fork.
 
 A conflict aborts the merge, pushes nothing, and opens/updates the `upstream-sync` issue with the
 conflicting files. Resolve on the automation branch:
@@ -81,6 +87,25 @@ cosign verify ghcr.io/llm-4-people/hermes-agent@sha256:<digest> \
 The smoke job also runs the published image and imports
 `hermes_cli.config_providers.normalize_proxy_headers`, so a green publish proves the downstream
 patch is present in the image.
+
+## Public-tree hygiene
+
+This repository is public, so operator infrastructure is never committed: internal hostnames, IP
+addresses, phone numbers, provider slugs and account-specific model ids are all identifying
+details. `scripts/ci/check_public_pii.py` (wired into `scripts/check` as `public-pii` and therefore
+into the downstream gate) rejects any tracked file that contains one.
+
+The identifiers themselves are **not** in the tree — publishing the denylist would defeat it. They
+live in the repository secret `PII_DENYLIST` (newline-separated literals, or `re:` patterns).
+`downstream-ci.yml` exposes it to the gate and sets `HERMES_PUBLIC_PII_REQUIRE=1`, so a missing
+secret fails the lane instead of silently skipping the scan. The sync workflow runs merged upstream
+code with no secret and therefore skips the literal scan; the merged branch is scanned with the
+secret when its pull request triggers `downstream-ci.yml`.
+
+Locally, put the same newline-separated list in `~/.config/hermes/pii-denylist` (or point
+`HERMES_PUBLIC_PII_DENYLIST` at another file) and run `scripts/downstream-verify.sh`. Findings
+report `path:line` with the matched text redacted; generated base64 lines (inline source maps) are
+counted and skipped.
 
 ## Local verification
 

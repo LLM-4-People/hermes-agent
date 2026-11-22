@@ -37,7 +37,8 @@ from gateway.platforms.media_cache import mime_for_ext
 from tools.audio_container import CONTAINER_TO_EXT, sniff_container
 from plugins.platforms.signal.signal_format import markdown_to_signal
 from plugins.platforms.signal.signal_media import (
-    SIGNAL_MAX_ATTACHMENT_SIZE, attachment_data_uri, attachment_payload_size, attachment_size_sync,
+    SIGNAL_MAX_ATTACHMENT_SIZE, AttachmentTooLarge, attachment_data_uri, attachment_payload_size,
+    attachment_size_sync,
     inline_attachments_enabled,
 )
 from plugins.platforms.signal.signal_rate_limit import (
@@ -822,8 +823,12 @@ class SignalAdapter(BasePlatformAdapter):
                 return None, "download", e
         if not file_path or not Path(file_path).exists():
             return None, "missing", None
-        if (file_size := Path(file_path).stat().st_size) > SIGNAL_MAX_ATTACHMENT_SIZE:
-            return None, "oversize", file_size
+        try:
+            attachment_size_sync(file_path)
+        except AttachmentTooLarge as exc:
+            return None, "oversize", exc.size
+        except ValueError:
+            return None, "missing", None
         return file_path, None, None
 
     async def send_multiple_images(self, chat_id: str, images: list[tuple[str, str]],
@@ -948,7 +953,9 @@ class SignalAdapter(BasePlatformAdapter):
             try:
                 attachment = await attachment_data_uri(file_path, filename=filename)
             except ValueError as exc:
-                return SendResult(success=False, error=str(exc))
+                return SendResult(success=False, error=f"{media_label}: {exc}")
+            # Budget the wire size: base64 is ~4/3 of the file, and that is what signal-cli uploads.
+            total_bytes = attachment_payload_size(attachment)
         else:
             attachment = file_path
         params = await self._with_target(

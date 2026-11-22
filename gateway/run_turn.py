@@ -387,9 +387,20 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             f"{context_length / 1_000_000:.1f}M" if context_length >= 1_000_000
             else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
         )
+        provider_label = resolved.provider or "openrouter"
+        if ":" in provider_label:
+            # A named custom entry's live identity is ``custom:<slug>``; show the configured label.
+            try:
+                from hermes_cli.config import get_compatible_custom_providers, load_config
+                from hermes_cli.providers import provider_display_name
+                _cfg = load_config()
+                provider_label = provider_display_name(
+                    provider_label, _cfg.get("providers"), get_compatible_custom_providers(_cfg))
+            except Exception:
+                pass
         lines = [
             t("gateway.session.info_model", model=resolved.model),
-            t("gateway.session.info_provider", provider=resolved.provider or "openrouter"),
+            t("gateway.session.info_provider", provider=provider_label),
             t("gateway.session.info_context", tokens=ctx_display, source=ctx_source),
         ]
         if (resolved.provider or "") == "moa":

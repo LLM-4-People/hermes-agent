@@ -66,4 +66,13 @@ def test_live_provider_identity_ignores_a_stale_requested_name_for_a_concrete_ad
 
     assert live_provider_identity("custom", "custom:beta") == "custom:beta"
     assert live_provider_identity("custom", "") == "custom"
+    assert live_provider_identity("auto", "custom:beta") == "custom:beta"
     assert live_provider_identity("openrouter", "custom:beta") == "openrouter"
+
+
+def test_tuning_only_builtin_block_does_not_shadow_the_builtin_label():
+    """``providers.bedrock.stale_timeout_seconds`` tunes a built-in; it is not a named route."""
+    from hermes_cli.providers import provider_display_name
+
+    providers = {"bedrock": {"stale_timeout_seconds": 600}}
+    assert provider_display_name("bedrock", providers, None) == "AWS Bedrock"

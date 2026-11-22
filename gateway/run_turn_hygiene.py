@@ -109,13 +109,19 @@ class GatewayTurnHygieneMixin:
             if hs.data:
                 self._hmwa_hygiene_read_config(hs, hs.data)
             configured_model, configured_provider, configured_base_url = hs.model, hs.provider, hs.base_url
+            # The adapter class (``custom``) is not the route: on a shared endpoint the chosen
+            # entry owns the context window. Keep the raw adapter for the pin comparison below.
+            runtime_provider = hs.provider
 
             with suppress(Exception):
                 hs.model, _hyg_runtime = self._resolve_session_agent_runtime(
                     source=source, session_key=session_key,
                     user_config=hs.data if isinstance(hs.data, dict) else None,
                 )
-                hs.provider = _hyg_runtime.get("provider") or hs.provider
+                from hermes_cli.providers import live_provider_identity
+                runtime_provider = _hyg_runtime.get("provider") or hs.provider
+                hs.provider = live_provider_identity(
+                    runtime_provider, _hyg_runtime.get("requested_provider")) or runtime_provider
                 hs.base_url = _hyg_runtime.get("base_url") or hs.base_url
                 hs.api_key = _hyg_runtime.get("api_key") or hs.api_key
 
@@ -125,7 +131,7 @@ class GatewayTurnHygieneMixin:
 
                     if await should_clear_context_pin_async(
                         configured_model, hs.model, configured_base_url, hs.base_url,
-                        configured_provider, hs.provider,
+                        configured_provider, runtime_provider,
                     ):
                         hs.config_context_length = None
                 except Exception:
@@ -146,6 +152,7 @@ class GatewayTurnHygieneMixin:
                             _hyg_custom_providers = []
                     _hyg_custom_ctx = _gw_gccl(
                         model=hs.model, base_url=hs.base_url, custom_providers=_hyg_custom_providers,
+                        provider=hs.provider or "",
                     )
                     if _hyg_custom_ctx:
                         hs.config_context_length = int(_hyg_custom_ctx)

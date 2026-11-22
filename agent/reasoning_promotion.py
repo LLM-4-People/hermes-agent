@@ -26,7 +26,10 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
     """
     base_url = str(getattr(agent, "base_url", "") or "")
     provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    if provider == "openrouter" or base_url_host_matches(base_url, "openrouter.ai"):
+    from hermes_cli.providers import live_provider_identity
+    live_provider = live_provider_identity(
+        provider, getattr(agent, "requested_provider", ""))
+    if live_provider.strip().lower() == "openrouter" or base_url_host_matches(base_url, "openrouter.ai"):
         return False
 
     api_mode = str(getattr(agent, "api_mode", "") or "").strip().lower()
@@ -38,13 +41,12 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
 
     model = str(getattr(agent, "model", "") or "")
     custom_providers = getattr(agent, "_custom_providers", None)
-    requested = str(getattr(agent, "requested_provider", "") or "").strip().lower()
     configured = get_custom_provider_model_capability(
         model=model,
         base_url=base_url,
         capability=_ANSWER_IN_REASONING_CAPABILITY,
         custom_providers=custom_providers,
-        provider=requested or provider,
+        provider=live_provider,
     )
     if configured is not None:
         return configured
@@ -55,7 +57,7 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
     # and TUI keep ``provider="custom"`` and the named identity in ``requested_provider``.
     # The route owner resolves the live identity (and falls back to every sibling on the endpoint
     # when no identity matches).
-    entries = list(_entries_for_route(base_url, custom_providers, None, provider=requested or provider))
+    entries = list(_entries_for_route(base_url, custom_providers, None, provider=live_provider))
     flags = {v for e in entries
              if isinstance(v := (e.get("capabilities") or {}).get(_ANSWER_IN_REASONING_CAPABILITY), bool)}
     if flags:

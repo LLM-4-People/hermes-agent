@@ -663,6 +663,32 @@ class TestSignalSendDocumentViaHelper:
         assert captured[0]["params"]["attachments"][0].startswith(
             "data:application/pdf;filename=report.pdf;base64,")
 
+    @pytest.mark.asyncio
+    async def test_single_inline_attachment_budgets_the_serialized_payload(
+            self, monkeypatch, tmp_path):
+        """A 24 MiB inline file uploads ~32 MiB of base64, so the timeout must be 64s, not the
+        60s floor the decoded size would produce."""
+        from plugins.platforms.signal.signal_media import attachment_payload_size
+        from plugins.platforms.signal.signal_rate_limit import (
+            SIGNAL_UPLOAD_MIN_THROUGHPUT, _signal_send_timeout)
+
+        adapter = _make_signal_adapter(monkeypatch)
+        mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        doc_path = tmp_path / "big.bin"
+        _sparse_file(doc_path, 24 * 1024 * 1024)
+
+        result = await adapter.send_document(chat_id="+155****4567", file_path=str(doc_path))
+
+        assert result.success is True
+        attachment = captured[0]["params"]["attachments"][0]
+        serialized = attachment_payload_size(attachment)
+        assert captured[0]["kwargs"]["timeout"] == pytest.approx(
+            _signal_send_timeout(1, total_bytes=serialized))
+        assert serialized / SIGNAL_UPLOAD_MIN_THROUGHPUT > 60.0
+
 
 # ---------------------------------------------------------------------------
 # Signal streaming edit capability / message_id behavior

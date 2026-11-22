@@ -931,10 +931,12 @@ class ClientLifecycleMixin:
         if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
             try:
                 from hermes_cli.config import apply_custom_provider_extra_headers_to_client_kwargs
+                from hermes_cli.providers import live_provider_identity
                 # Identity, not URL, selects the entry: providers may share one proxy endpoint.
                 apply_custom_provider_extra_headers_to_client_kwargs(
                     self._client_kwargs, base_url, getattr(self, "_custom_providers", None),
-                    provider=str(getattr(self, "requested_provider", "") or self.provider or ""))
+                    provider=live_provider_identity(
+                        self.provider, getattr(self, "requested_provider", "")))
             except Exception:
                 logger.debug("custom-provider extra_headers skipped", exc_info=True)
 
@@ -1012,9 +1014,11 @@ class ClientLifecycleMixin:
             from hermes_cli.config import (
                 apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers, load_config_readonly,
             )
+            from hermes_cli.providers import live_provider_identity
             apply_custom_provider_tls_to_client_kwargs(
                 self._client_kwargs, str(self.base_url or ""), get_compatible_custom_providers(load_config_readonly()),
-                provider=str(getattr(self, "requested_provider", "") or self.provider or ""),
+                provider=live_provider_identity(
+                    self.provider, getattr(self, "requested_provider", "")),
             )
         except Exception:
             logger.debug("custom-provider TLS resolution skipped on credential rotation", exc_info=True)

@@ -48,6 +48,14 @@ def inline_attachments_enabled(value: object) -> bool:
     return True
 
 
+class AttachmentTooLarge(ValueError):
+    """An attachment is over Signal's limit; ``size`` carries the measured bytes for the caller."""
+
+    def __init__(self, size: int, max_bytes: int):
+        super().__init__(f"attachment too large ({size} bytes > {max_bytes})")
+        self.size = size
+
+
 def attachment_size_sync(
     path: str | Path,
     *,
@@ -67,7 +75,7 @@ def attachment_size_sync(
     except OSError as exc:
         raise ValueError(f"attachment unavailable: {type(exc).__name__}") from exc
     if size > max_bytes:
-        raise ValueError(f"attachment too large ({size} bytes > {max_bytes})")
+        raise AttachmentTooLarge(size, max_bytes)
     return size
 
 
