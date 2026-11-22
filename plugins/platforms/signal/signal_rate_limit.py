@@ -78,10 +78,19 @@ def _format_wait(seconds: float) -> str:
     return t("platform.signal.wait_seconds", count=round(s)) if s < 90 else t("platform.signal.wait_minutes", count=max(1, round(s / 60)))
 
 
-def _signal_send_timeout(num_attachments: int) -> float:
+SIGNAL_UPLOAD_MIN_THROUGHPUT = 512 * 1024  # bytes/s; a conservative floor, not a target
+SIGNAL_MAX_SEND_TIMEOUT = 900.0  # 15 min ceiling; a larger batch is not one healthy send
+
+
+def _signal_send_timeout(num_attachments: int, total_bytes: int = 0) -> float:
     """HTTP timeout for a Signal ``send`` RPC: signal-cli uploads attachments serially inside the call, so
-    the default 30s truncates large batches mid-upload (phantom failure). 5s/attachment, 60s floor."""
-    return 30.0 if num_attachments <= 0 else max(60.0, 5.0 * num_attachments)
+    a fixed floor truncates large files mid-upload (phantom failure). 5s/attachment, a 60s floor, plus a
+    byte-derived budget at ``SIGNAL_UPLOAD_MIN_THROUGHPUT`` (serialized bytes for data URIs), capped so a
+    pathological batch cannot pin a worker indefinitely."""
+    if num_attachments <= 0:
+        return 30.0
+    upload_budget = max(0, int(total_bytes)) / SIGNAL_UPLOAD_MIN_THROUGHPUT
+    return min(max(60.0, 5.0 * num_attachments, upload_budget), SIGNAL_MAX_SEND_TIMEOUT)
 
 
 class SignalAttachmentScheduler:

@@ -18,6 +18,10 @@ LEGACY_SANDBOX_IMAGE = LEGACY_SANDBOX_IMAGES[0]
 DEFAULT_VERCEL_IMAGE = "vercel/sandbox/universal:latest"
 LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choice
 
+#: Order shown in the gateway reply footer when ``display.runtime_footer.fields`` is unset.
+#: ``latency`` and ``served_model`` are opt-in; see gateway/runtime_footer.py.
+DEFAULT_RUNTIME_FOOTER_FIELDS = ("model", "provider", "context_pct", "cwd")
+
 
 DEFAULT_CONFIG = {
     "model": "",
@@ -948,13 +952,13 @@ DEFAULT_CONFIG = {
             # WeCom native streaming (msgtype "stream" via aibot_respond_msg).
             "wecom": {"streaming": True},
         },
-        # Gateway runtime footer on the FINAL message, e.g. `model · 68% · ~/projects/hermes`.
+        # Gateway runtime footer on the FINAL message, e.g. `model · provider · 68% · ~/projects/hermes`.
         # Per-platform: display.platforms.<platform>.runtime_footer.
         "runtime_footer": {
             "enabled": False,
             # order shown; drop any to hide. Opt-in extras: latency, served_model (alias → the
             # deployment a routing proxy reported / Hermes' fallback route).
-            "fields": ["model", "context_pct", "cwd"],
+            "fields": list(DEFAULT_RUNTIME_FOOTER_FIELDS),
         },
         # CLI/TUI status bar fields. Non-empty = only listed fields show (built-in order kept,
         # config controls visibility not ordering); empty = default set. Available: model,

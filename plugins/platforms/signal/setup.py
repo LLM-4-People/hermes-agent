@@ -36,11 +36,16 @@ def interactive_setup() -> None:
         _gw()._print_info_lines(
             "  Signal requires signal-cli running as an HTTP daemon.", "  Install options:",
             "    Linux:  download from https://github.com/AsamK/signal-cli/releases",
-            "    macOS:  brew install signal-cli", "    Docker: bbernhard/signal-cli-rest-api",
+            "    macOS:  brew install signal-cli",
+            "    Docker: ghcr.io/asamk/signal-cli (run `daemon --http 0.0.0.0:8080`)",
         )
-        print()
         _gw()._print_info_lines(
-            "  After installing, link your account and start the daemon:",
+            "  The bbernhard/signal-cli-rest-api wrapper is NOT compatible with this adapter",
+            "  (it exposes /v1/*, Hermes needs signal-cli's native /api/v1/* endpoints).",
+        )
+        _gw()._print_info_lines(
+            "  After installing, register the bot number or link it as a secondary device:",
+            "    signal-cli -a +YOURNUMBER register && signal-cli -a +YOURNUMBER verify CODE",
             '    signal-cli link -n "HermesAgent"',
             "    signal-cli --account +YOURNUMBER daemon --http 127.0.0.1:8080",
         )

@@ -8,6 +8,9 @@ import time
 
 from plugins.platforms.signal import signal_rate_limit as rl
 from plugins.platforms.signal.signal_format import markdown_to_signal
+from plugins.platforms.signal.signal_media import (
+    attachment_data_uri, attachment_payload_size, attachment_size_sync, inline_attachments_enabled,
+)
 from gateway.platforms.base import describe_proxy_error, env_proxy_for_redaction  # httpx reads HTTPS_PROXY itself
 from gateway.outbound.senders import _error, _success
 
@@ -60,12 +63,24 @@ async def _send_signal(extra, chat_id, message, media_files=None):
         if not account:
             return {"error": "Signal account not configured"}
         valid_media = media_files or []
+        inline = inline_attachments_enabled(extra.get("inline_attachments", "always"))
         attachment_paths = []
         for media_path, _is_voice in valid_media:
-            if os.path.exists(media_path):
-                attachment_paths.append(media_path)
-            else:
+            if not os.path.exists(media_path):
                 logger.warning("Signal media file not found, skipping: %s", media_path)
+                continue
+            try:
+                attachment_size_sync(media_path)
+            except ValueError as exc:
+                logger.warning("Signal media skipped: %s", exc)
+                continue
+            if inline:
+                try:
+                    attachment_paths.append(await attachment_data_uri(media_path))
+                except ValueError as exc:
+                    logger.warning("Signal media skipped: %s", exc)
+                continue
+            attachment_paths.append(media_path)
         # No attachments still means one (text-only) batch; text rides on batch #0 only.
         per_batch = rl.SIGNAL_MAX_ATTACHMENTS_PER_MSG
         att_batches = [attachment_paths[i:i + per_batch] for i in range(0, len(attachment_paths), per_batch)] or [[]]
@@ -85,8 +100,10 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                 return await client.post(f"{http_url}/api/v1/rpc", json=payload)
 
         async def _post(batch_attachments, batch_message):
+            total_bytes = sum(attachment_payload_size(a) for a in batch_attachments)
             resp = await _rpc_send(batch_message, id_prefix="send", attachments=batch_attachments, styled=True,
-                                   timeout=rl._signal_send_timeout(len(batch_attachments)))
+                                   timeout=rl._signal_send_timeout(
+                                       len(batch_attachments), total_bytes=total_bytes))
             resp.raise_for_status()
             return resp.json()
         scheduler = rl.get_scheduler()
@@ -109,7 +126,7 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                 return outcome
         warnings = []
         if len(attachment_paths) < len(valid_media):
-            warnings.append("Some media files were skipped (not found on disk)")
+            warnings.append("Some media files were skipped (missing, oversize or unreadable)")
         if failed_batches:
             warnings.append(f"Signal rate-limited {len(failed_batches)} batch(es) "
                             f"(#{', #'.join(str(b) for b in failed_batches)})")

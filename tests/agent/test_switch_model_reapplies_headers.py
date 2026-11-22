@@ -83,3 +83,36 @@ def test_switch_away_from_headered_provider_clears_stale_headers(mock_ctx_len):
     headers = agent._client_kwargs.get("default_headers") or {}
     assert "HTTP-Referer" not in headers
     assert "X-Title" not in headers
+
+
+_ROUTE = "https://router.example.com/v1"
+_DUAL_PROVIDERS = {
+    "providers": {
+        "alpha": {
+            "name": "Provider A",
+            "api": _ROUTE,
+            "api_key": "coral-key",
+            "ssl_ca_cert": "/etc/ssl/coral.pem",
+        },
+        "beta": {
+            "name": "Provider B",
+            "api": _ROUTE,
+            "api_key": "beta-key",
+            "ssl_verify": False,
+        },
+    }
+}
+
+
+@patch("agent.model_metadata.get_model_context_length", return_value=131_072)
+def test_switch_to_the_second_provider_on_a_shared_route_uses_its_tls(mock_ctx_len):
+    """A /model switch to Provider B must not inherit Provider A' CA from the first URL match."""
+    agent = _make_agent(provider="custom", base_url=_ROUTE)
+    agent.requested_provider = "alpha"
+
+    with patch("hermes_cli.config.load_config_readonly", return_value=_DUAL_PROVIDERS), \
+            patch("hermes_cli.config.load_config", return_value=_DUAL_PROVIDERS):
+        agent.switch_model("shared-model", "beta", api_key="beta-key", base_url=_ROUTE)
+
+    assert agent._client_kwargs.get("ssl_verify") is False
+    assert "ssl_ca_cert" not in agent._client_kwargs

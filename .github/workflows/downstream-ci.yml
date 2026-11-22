@@ -1,0 +1,96 @@
+name: Downstream CI
+
+# Fork-owned gate. Upstream's workflows target Blacksmith runners and Docker Hub credentials
+# that do not exist here (all disabled in this repository); this workflow runs on GitHub-hosted
+# runners and proves the downstream provider-routing patch still works.
+#
+# scripts/downstream-verify.sh is the single owner of the check set; sync-upstream.yml runs the
+# same script before it pushes an upstream merge.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: downstream-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint and provider-routing tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up the locked PM test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Verify downstream patch
+        run: ./scripts/downstream-verify.sh
+
+  workflow-lint:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit fork-owned workflows
+        uses: ./.github/actions/workflow-lint
+
+  disable-upstream-workflows:
+    name: Keep upstream workflows disabled
+    # Upstream's workflows target Blacksmith runners and Docker Hub credentials this fork does not
+    # have. They are disabled at the repository level; a merge that adds a new upstream workflow
+    # would otherwise leave it active, so every push to main re-applies the invariant.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Disable workflows the fork does not own
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          keep=$(tr '\n' ' ' < scripts/fork-owned-workflows.txt)
+          gh workflow list --all --json name,path,state \
+            --jq '.[] | select(.state == "active") | [.name, .path] | @tsv' |
+          while IFS=$'\t' read -r name path; do
+            case "$path" in
+              .github/workflows/*) ;;
+              *) continue ;;
+            esac
+            file=$(basename "$path")
+            case " $keep " in
+              *" $file "*) continue ;;
+            esac
+            echo "Disabling upstream workflow: $name ($path)"
+            gh workflow disable "$file"
+          done

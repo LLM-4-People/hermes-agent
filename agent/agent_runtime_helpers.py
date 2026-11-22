@@ -706,6 +706,7 @@ def _build_anthropic_client_from_runtime(agent, rt: dict[str, Any]) -> None:
     agent._anthropic_client = build_anthropic_client(
         rt["anthropic_api_key"], rt["anthropic_base_url"],
         timeout=get_provider_request_timeout(agent.provider, agent.model),
+        provider=str(getattr(agent, "requested_provider", "") or agent.provider or ""),
     )
     agent._is_anthropic_oauth = rt["is_anthropic_oauth"]
     agent.client = None
@@ -1336,7 +1337,13 @@ def anthropic_prompt_cache_policy(
     """
     if getattr(agent, "_cache_disabled", False):
         return (False, False)
-    eff_provider = (provider if provider is not None else agent.provider) or ""
+    from hermes_cli.providers import live_provider_identity
+
+    # A caller that omits ``provider`` means "the agent's live route", not "no provider": the
+    # requested entry only replaces a generic adapter, so resolve it from the agent's own value.
+    source = provider if provider is not None else getattr(agent, "provider", "")
+    eff_provider = live_provider_identity(
+        source, getattr(agent, "requested_provider", "")) or ""
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
     eff_model = (model if model is not None else agent.model) or ""
@@ -1376,6 +1383,7 @@ def anthropic_prompt_cache_policy(
             custom_prompt_caching = get_custom_provider_model_capability(
                 model=eff_model, base_url=eff_base_url, capability="prompt_caching",
                 custom_providers=getattr(agent, "_custom_providers", None),
+                provider=eff_provider,
             )
             if custom_prompt_caching is not None:
                 # Layout follows the transport: native Messages → inner blocks; OpenAI wire → envelope.
@@ -1735,6 +1743,7 @@ def _resolve_switch_destination(agent, new_model, new_provider, base_url, api_mo
 
 def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new_norm) -> None:
     """Build the client for the switched-to destination (MoA facade / native Anthropic / OpenAI wire)."""
+    from hermes_cli.providers import live_provider_identity
     if new_norm == "moa":
         from agent.moa_loop import bind_moa_runtime
         # MoA speaks only chat.completions via the MoAClient facade; the aggregator's real transport
@@ -1773,6 +1782,8 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         agent._anthropic_client = build_anthropic_client(
             effective_key, agent._anthropic_base_url,
             timeout=get_provider_request_timeout(agent.provider, agent.model),
+            provider=live_provider_identity(
+                new_provider, getattr(agent, "requested_provider", "")),
         )
         agent._is_anthropic_oauth = anthropic_route_is_oauth(agent._anthropic_base_url, effective_key, provider=new_provider)
         agent.client = None
@@ -1793,6 +1804,8 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         apply_custom_provider_tls_to_client_kwargs(
             agent._client_kwargs, str(effective_base or ""),
             get_compatible_custom_providers(load_config_readonly()),
+            provider=live_provider_identity(
+                new_provider, getattr(agent, "requested_provider", "")),
         )
     except Exception:
         logger.debug("custom-provider TLS resolution skipped on switch_model", exc_info=True)
@@ -1857,6 +1870,7 @@ def _resolve_switch_context_length(agent, snapshot):
             get_compatible_custom_providers, get_custom_provider_context_length, load_config
         )
         from agent.agent_init import config_context_length_for_runtime
+        from hermes_cli.providers import live_provider_identity
         switch_cfg = load_config()
         custom_providers = get_compatible_custom_providers(switch_cfg)
         # The durable ``model.context_length`` pin is re-read from live config (never carried over
@@ -1866,7 +1880,9 @@ def _resolve_switch_context_length(agent, snapshot):
         intent = config_context_length_for_runtime(agent, switch_cfg)
         if intent is None:
             intent = get_custom_provider_context_length(
-                model=agent.model, base_url=agent.base_url, custom_providers=custom_providers
+                model=agent.model, base_url=agent.base_url, custom_providers=custom_providers,
+                provider=live_provider_identity(
+                    agent.provider, getattr(agent, "requested_provider", "")),
             )
     except Exception:
         intent = None
@@ -1904,8 +1920,10 @@ def _update_switch_compressor(agent, custom_providers, effective_context_length,
     # string for live probes, so coerce defensively.
     ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
     try:
+        from hermes_cli.providers import live_provider_identity
+        _live_provider = live_provider_identity(agent.provider, getattr(agent, "requested_provider", ""))
         new_context_length = get_model_context_length(
-            agent.model, base_url=agent.base_url, api_key=ctx_api_key, provider=agent.provider,
+            agent.model, base_url=agent.base_url, api_key=ctx_api_key, provider=_live_provider,
             config_context_length=effective_context_length, custom_providers=custom_providers,
         )
         agent.context_compressor.update_model(
@@ -1913,7 +1931,7 @@ def _update_switch_compressor(agent, custom_providers, effective_context_length,
             context_length=new_context_length,
             base_url=agent.base_url,
             api_key=agent.api_key,  # context_compressor forwards to call_llm; callable preserved
-            provider=agent.provider,
+            provider=_live_provider,
             api_mode=agent.api_mode,
         )
     except Exception:
@@ -1997,8 +2015,10 @@ def switch_model(
     # sees flags added to config.yaml after session start.
     if custom_providers is not None:
         agent._custom_providers = custom_providers
+    from hermes_cli.providers import live_provider_identity
     agent._use_prompt_caching, agent._use_native_cache_layout = agent._anthropic_prompt_cache_policy(
-        provider=new_provider, base_url=agent.base_url, api_mode=api_mode, model=new_model
+        provider=live_provider_identity(new_provider, getattr(agent, "requested_provider", "")),
+        base_url=agent.base_url, api_mode=api_mode, model=new_model
     )
     if hasattr(agent, "context_compressor") and agent.context_compressor:
         _update_switch_compressor(agent, custom_providers, effective_context_length, snapshot)

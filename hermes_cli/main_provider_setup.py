@@ -857,7 +857,7 @@ def _run_anthropic_oauth_flow(save_env_value):
 
 def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
     """Saved custom providers keyed by slug, with raw ``${ENV}`` refs preserved."""
-    from hermes_cli.config import get_compatible_custom_providers, read_raw_config
+    from hermes_cli.config import get_compatible_custom_providers, read_raw_config, resolve_provider_extra_headers
     from hermes_cli.providers import custom_provider_slug
 
     # Raw (un-expanded) templates keyed by identity. ``get_compatible_custom_providers(
@@ -914,7 +914,7 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
             "model": model,
             "models": entry.get("models", {}),
             "models_discovered": entry.get("models_discovered", False),
-            "extra_headers": entry.get("extra_headers", {}),
+            "extra_headers": resolve_provider_extra_headers(entry),
             "discover_models": entry.get("discover_models", True),
             "api_mode": entry.get("api_mode", ""),
             "provider_key": provider_key,

@@ -108,7 +108,12 @@ def _prepare_moa_request(agent: Any, api_messages: Any, pending_moa_prepared_req
 def plan_request_cache(agent: Any, api_messages: Any, tools: Any) -> Any:
     """The request-local cache sections (``PromptCachePlan``) for *agent*'s destination."""
     from agent.prompt_caching import envelope_tool_part_cache_markers_supported
+    from hermes_cli.providers import live_provider_identity
 
+    # One live identity for both decisions: the requested entry owns TTL and marker support when
+    # the adapter is generic, and a concrete adapter owns its own route.
+    live_provider = live_provider_identity(
+        agent.provider, getattr(agent, "requested_provider", ""))
     static_system_prefix = getattr(agent, "_cached_system_prompt_static", None)
     return build_prompt_cache_plan(
         api_messages,
@@ -116,7 +121,7 @@ def plan_request_cache(agent: Any, api_messages: Any, tools: Any) -> Any:
         # Clamp per-destination: a configured 1h regresses to 5m on
         # Qwen/Alibaba routes, whose context cache is 5m-only.
         cache_ttl=effective_cache_ttl(
-            agent._cache_ttl, provider=agent.provider, model=agent.model,
+            agent._cache_ttl, provider=live_provider, model=agent.model,
             base_url=getattr(agent, "base_url", "") or "", auto=getattr(agent, "_cache_ttl_auto", False),
         ),
         native_anthropic=agent._use_native_cache_layout,
@@ -126,7 +131,7 @@ def plan_request_cache(agent: Any, api_messages: Any, tools: Any) -> Any:
         # LiteLLM-style envelope routes forward part-level markers into
         # tool_result.content[] → non-retryable 400.
         tool_part_markers=envelope_tool_part_cache_markers_supported(
-            getattr(agent, "provider", ""), getattr(agent, "base_url", "")
+            live_provider, getattr(agent, "base_url", "")
         ),
     )
 

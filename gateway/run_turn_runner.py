@@ -1518,6 +1518,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             "model": getattr(agent, "model", None) if agent else None,
             # Most failed results name no provider; the error card's sign-in / update-key action needs it.
             "provider": getattr(agent, "provider", None) if agent else None,
+            # The footer needs the live route's configured identity, not the "custom" adapter:
+            # requested_provider + base_url let session_provider_identity name custom:<slug>.
+            "requested_provider": getattr(agent, "requested_provider", None) if agent else None,
+            "base_url": getattr(agent, "base_url", None) if agent else None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
             # The rest of the `-z --usage-file` ledger (hermes_cli/oneshot._USAGE_KEYS): a finite
             # viewer reads the committed result over `prompt.receipt`, so the projection must keep

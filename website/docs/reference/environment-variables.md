@@ -421,6 +421,8 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `SIGNAL_GROUP_ALLOWED_USERS` | Comma-separated group IDs, or `*` for all groups |
 | `SIGNAL_HOME_CHANNEL_NAME` | Display name for the Signal home channel |
 | `SIGNAL_IGNORE_STORIES` | Ignore Signal stories/status updates |
+| `SIGNAL_IGNORE_ATTACHMENTS` | Do not download inbound attachments (`true`/`false`, default `false`) |
+| `SIGNAL_INLINE_ATTACHMENTS` | Send attachments as data URIs (`always`, default) or file paths (`never`, requires a volume shared with signal-cli) |
 | `SIGNAL_ALLOW_ALL_USERS` | Allow all Signal users without an allowlist |
 | `TWILIO_ACCOUNT_SID` | Twilio Account SID (shared with telephony skill) |
 | `TWILIO_AUTH_TOKEN` | Twilio Auth Token (shared with telephony skill; also used for webhook signature validation) |

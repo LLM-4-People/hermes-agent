@@ -313,6 +313,24 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
     return pdef
 
 
+def is_builtin_provider(name: str) -> bool:
+    """Whether *name* is a shipped provider id or alias, never a user-configured entry name.
+
+    Provider-scoped route metadata must not hand a sibling's headers, TLS or context window to a
+    bare name whose entry was deleted or renamed; only a real built-in may keep the legacy
+    URL-only scan. Shipped tables answer every built-in provider without I/O; the registry is
+    consulted only for a name they do not know (plugin profiles, warm models.dev entries), with
+    network probes disabled so a lookup on a request path never blocks.
+    """
+    key = str(name or "").strip().lower()
+    if not key:
+        return False
+    canonical = normalize_provider(key)
+    if _is_static_canonical(canonical):
+        return True
+    return get_provider(canonical, allow_network=False) is not None
+
+
 def _plugin_profile_pdef(name: str) -> Optional[ProviderDef]:
     """The registered ``ProviderProfile`` for *name* (or one of its aliases) as a ProviderDef; the
     id is the profile's canonical name so an alias switch persists and resolves credentials under
@@ -541,6 +559,62 @@ def custom_provider_aliases(display_name: str, provider_key: str = "") -> frozen
             if suffix:
                 aliases.update({suffix, f"custom:{normalized}"})
     return frozenset(aliases)
+
+
+def live_provider_identity(provider: Any, requested_provider: Any = "") -> str:
+    """The route identity for metadata lookups: the requested entry when the adapter is generic.
+
+    Hermes keeps ``provider="custom"`` as the billing adapter class for every named custom entry and
+    stores the chosen entry in ``requested_provider``. A bare adapter name therefore must not be
+    used to resolve provider-scoped metadata on a shared endpoint.
+    """
+    adapter = str(provider or "").strip()
+    requested = str(requested_provider or "").strip()
+    if adapter.lower() in {"", "custom", "auto"}:
+        return requested or adapter
+    return adapter
+
+
+def provider_display_name(
+    provider_id: str,
+    user_providers: Optional[dict[str, Any]] = None,
+    custom_providers: Optional[list[dict[str, Any]]] = None,
+) -> str:
+    """Human label for a live route: built-in label, else the configured entry's name.
+
+    ``custom:<slug>`` rows must show the name the operator configured (``Provider B``), not the
+    internal slug. Scan the configured entries by their aliases first: the config key and the
+    display name may differ (``providers.acme.name = Acme``), and the live identity may be either.
+    """
+    target = str(provider_id or "").strip()
+    if target.lower() in {"", "custom", "auto"}:
+        return get_label(target)
+    wanted = custom_provider_aliases(target)
+    for entries in (
+        (user_providers or {}).items() if isinstance(user_providers, dict) else (),
+        ((entry.get("provider_key", ""), entry) for entry in custom_providers or () if isinstance(entry, dict)),
+    ):
+        for key, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            # A ``providers.<id>`` block that only tunes a built-in provider (e.g.
+            # ``providers.bedrock.stale_timeout_seconds``) declares no route and no display name;
+            # it must not shadow the built-in label with its lower-case config key.
+            if not str(entry.get("name") or "").strip() and not any(
+                    isinstance(entry.get(field), str) and entry.get(field).strip()
+                    for field in ("base_url", "api", "url")):
+                continue
+            if wanted & custom_provider_aliases(
+                str(entry.get("name") or ""), str(entry.get("provider_key") or key or "")):
+                return str(entry.get("name") or key or target)
+    candidates = [target]
+    if target.lower().startswith("custom:"):
+        candidates.append(target.split(":", 1)[1])
+    for candidate in candidates:
+        pdef = resolve_provider_full(candidate, user_providers, custom_providers)
+        if pdef is not None and pdef.name:
+            return pdef.name
+    return get_label(target)
 
 
 def resolve_custom_provider(name: str, custom_providers: Optional[list[dict[str, Any]]]) -> Optional[ProviderDef]:

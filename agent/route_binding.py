@@ -116,8 +116,10 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     from agent.agent_runtime_helpers import sync_credential_pool_entry_id
     sync_credential_pool_entry_id(agent)
 
+    from hermes_cli.providers import live_provider_identity
     agent._use_prompt_caching, agent._use_native_cache_layout = agent._anthropic_prompt_cache_policy(
-        provider=provider, base_url=base_url, api_mode=api_mode, model=model)
+        provider=live_provider_identity(provider, getattr(agent, "requested_provider", "")),
+        base_url=base_url, api_mode=api_mode, model=model)
     agent._ensure_lmstudio_runtime_loaded()  # LM Studio: preload before probing context length
     _update_fallback_context_compressor(agent)
     _reresolve_fallback_reasoning_config(agent)

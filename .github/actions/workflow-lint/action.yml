@@ -1,0 +1,55 @@
+name: Workflow lint
+description: >-
+  Audit the fork-owned workflows with zizmor and actionlint. One owner for both the PR/push gate
+  (downstream-ci.yml) and the automatic upstream merge gate (sync-upstream.yml). The list of
+  fork-owned workflows lives in scripts/fork-owned-workflows.txt.
+
+inputs:
+  root:
+    description: Tree to audit, relative to the checkout (defaults to the checkout root).
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up uv for zizmor
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # 8.2.0
+      with:
+        version: '0.13.5'
+        enable-cache: false
+
+    - name: Audit workflows with zizmor
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        mapfile -t owned < "$GITHUB_WORKSPACE/scripts/fork-owned-workflows.txt"
+        files=()
+        for file in "${owned[@]}"; do
+          files+=("${ROOT}/.github/workflows/${file}")
+        done
+        files+=("${ROOT}/.github/actions/workflow-lint/action.yml")
+        uvx --from zizmor==1.32.0 zizmor --min-severity medium --persona regular "${files[@]}"
+
+    - name: Set up Go for actionlint
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      with:
+        go-version: 'stable'
+        cache: false
+
+    - name: actionlint
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+      run: |
+        set -euo pipefail
+        mapfile -t owned < "$GITHUB_WORKSPACE/scripts/fork-owned-workflows.txt"
+        files=()
+        for file in "${owned[@]}"; do
+          files+=("${ROOT}/.github/workflows/${file}")
+        done
+        go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        # Upstream's workflows are linted by upstream CI and contain Blacksmith-only keys this
+        # actionlint release does not know; audit only the fork-owned workflows.
+        "$(go env GOPATH)/bin/actionlint" -color "${files[@]}"

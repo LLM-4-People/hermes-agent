@@ -1456,14 +1456,8 @@ def _route_from_model_input(st: _Switch) -> Optional[ModelSwitchResult]:
 
 
 def _switch_provider_label(st: _Switch) -> str:
-    label = get_label(st.target_provider)
-    if st.target_provider == "custom" and st.current_base_url:
-        label = "Custom endpoint"
-    if st.target_provider.startswith("custom:"):
-        custom_pdef = resolve_provider_full(st.target_provider, st.user_providers, st.custom_providers)
-        if custom_pdef is not None:
-            label = custom_pdef.name
-    return label
+    from hermes_cli.providers import provider_display_name
+    return provider_display_name(st.target_provider, st.user_providers, st.custom_providers)
 
 
 def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:

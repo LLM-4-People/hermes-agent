@@ -1369,12 +1369,36 @@ providers:
     transport: anthropic_messages  # for Anthropic-compatible proxies
 ```
 
-Each entry accepts: `api` (the endpoint base URL — `base_url`/`url` are accepted aliases), `name` (optional display name; defaults to the dict key), `key_env` or inline `api_key` or `key_cmd` (see below), `transport` (`chat_completions` / `anthropic_messages` / `codex_responses`), `default_model`, `models`, `context_length`, `discover_models`, `extra_body`, `extra_headers`, `session_affinity_header` (name of a header that carries the conversation id, for session-aware proxies; off unless set), `ssl_ca_cert` / `ssl_verify`, `catalog_provider` (see below), and `enabled: false` to hide an entry without deleting it.
+Each entry accepts: `api` (the endpoint base URL — `base_url`/`url` are accepted aliases), `name` (optional display name; defaults to the dict key), `key_env` or inline `api_key` or `key_cmd` (see below), `transport` (`chat_completions` / `anthropic_messages` / `codex_responses`), `default_model`, `models`, `context_length`, `discover_models`, `extra_body`, `extra_headers`, `proxy` (provider-scoped upstream routing, see below), `session_affinity_header` (name of a header that carries the conversation id, for session-aware proxies; off unless set), `ssl_ca_cert` / `ssl_verify`, `catalog_provider` (see below), and `enabled: false` to hide an entry without deleting it.
 
 An entry keyed like a built-in provider (`openrouter:`, `Anthropic:`, `deepseek:`, in any case) that sets its own `api`/`base_url` **is** what that name means: `--provider openrouter`, `/model`, `hermes model` and the dashboard save it as `custom:openrouter` and every turn goes to your endpoint. When the entry declares a key (`api_key`, `key_env` or `key_cmd`), that key is used and the built-in's own key is never sent. An entry with no key gets the built-in's env and pooled keys only while its address is on the built-in's own host (scheme, host and port); anywhere else (a proxy, a mirror, another region's host such as Kimi's `.cn` endpoint) it sends no key, because a built-in's key is never sent to a host other than its own unless you say so. To use the built-in's key on your endpoint, name it: `key_env: DEEPSEEK_API_KEY` (the built-in's variable), or add the endpoint's key with `hermes auth add deepseek` while the entry is configured, which records the entry's address. A same-named block without an endpoint (for example `providers.openrouter: {request_timeout_seconds: 300}`) only tunes the built-in. `hermes doctor` warns when `model.provider` names a built-in that such an entry takes over.
 
 :::note Migration: built-in keys and same-named entries
 Earlier releases sent the built-in's env key (for example `DEEPSEEK_API_KEY`) to a key-less `providers.deepseek` entry on any address. Now that key stays on the built-in's own host. If such an entry now gets `401`, add `key_env: DEEPSEEK_API_KEY` (use your provider's variable) to the entry. Hermes logs one warning per entry naming the remedy when this happens. Pooled keys added before addresses were recorded (`hermes auth add`, the dashboard) for a built-in's pool belong to the built-in's own address. To use one on the entry's host, re-add it with `hermes auth add <name>` while the entry is configured.
+:::
+
+#### Provider-scoped proxy routing (`proxy`)
+
+A gateway can front many upstreams behind one base URL and pick the upstream from a request header. Declare that upstream once per provider instead of hand-writing the header:
+
+```yaml
+providers:
+  beta:
+    api: https://proxy.example.com/v1       # where Hermes sends requests
+    key_env: BETA_PROXY_KEY
+    proxy:
+      base_url: https://upstream-b.example.com/v1     # sent as X-Proxy-Base-URL by default
+      header: X-Proxy-Base-URL              # optional: the proxy's routing header name
+      headers:                              # optional: additional routing headers
+        X-Proxy-Tenant: acme
+```
+
+`api` stays the address Hermes connects to; `proxy.base_url` only sets the routing header value. Precedence is: the derived `{header: proxy.base_url}`, then `proxy.headers` (which may override the derived header), then explicit `extra_headers` (most specific wins). The default header is `X-Proxy-Base-URL`; set `header` for a different gateway. Header values are treated as secrets and are never logged.
+
+Because metadata is provider-scoped, several providers may share one `api` URL with different `proxy`/`extra_headers`/TLS/context settings: Hermes resolves them by provider identity (config key, display name or `custom:<slug>`), not by first-URL-match. This matters on the main client, `/model` switches, credential rotation, auxiliary calls (titles, compression, vision) and Anthropic-wire routes alike.
+
+:::note
+`providers.<name>.proxy` is unrelated to the top-level `proxy:` section, which configures the egress (iron-proxy) layer.
 :::
 
 #### Command-minted credentials (`key_cmd`)

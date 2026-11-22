@@ -55,3 +55,21 @@ def test_cmd_update_in_docker_prints_guidance_and_exits(
 # ---------- Non-Docker installs unaffected ----------
 
 # ---------- format_docker_update_message — content lock ----------
+
+
+def test_docker_update_guidance_uses_the_baked_image_name(monkeypatch):
+    """A downstream image must tell the operator to pull ITS image, not upstream's."""
+    from hermes_cli import config as config_mod
+
+    class _Provenance:
+        valid = True
+        image = "ghcr.io/llm-4-people/hermes-agent"
+
+    monkeypatch.setattr(
+        "hermes_cli.image_provenance.read_image_provenance",
+        lambda *args, **kwargs: _Provenance(),
+    )
+    assert config_mod.docker_image_name() == "ghcr.io/llm-4-people/hermes-agent"
+    message = config_mod.format_docker_update_message()
+    assert "docker pull ghcr.io/llm-4-people/hermes-agent:latest" in message
+    assert "docker run --rm ghcr.io/llm-4-people/hermes-agent:latest --version" in message

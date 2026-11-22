@@ -637,7 +637,7 @@ def _is_codex_route(provider: str, base_url: str, custom_providers: list | None)
         return False
     with contextlib.suppress(Exception):  # config unreadable → not a known Codex route
         from hermes_cli.config import get_custom_provider_api_mode
-        return get_custom_provider_api_mode(base_url, custom_providers) == "codex_responses"
+        return get_custom_provider_api_mode(base_url, custom_providers, provider=provider) == "codex_responses"
     return False
 
 
@@ -2144,7 +2144,8 @@ def _config_override_context_length(model: str, base_url: str, provider: str, cu
     if base_url and model:
         with contextlib.suppress(Exception):  # fall through to probing
             from hermes_cli.config import get_custom_provider_context_length
-            cp_ctx = get_custom_provider_context_length(model=model, base_url=base_url, custom_providers=custom_providers)
+            cp_ctx = get_custom_provider_context_length(
+                model=model, base_url=base_url, custom_providers=custom_providers, provider=provider)
             if cp_ctx:
                 return cp_ctx
     return None

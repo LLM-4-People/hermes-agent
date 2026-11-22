@@ -18,9 +18,9 @@ The Signal adapter uses `httpx` (already a core Hermes dependency) for all commu
 
 ## Prerequisites
 
-- **signal-cli** — Java-based Signal client ([GitHub](https://github.com/AsamK/signal-cli))
-- **Java 17+** runtime — required by signal-cli
-- **A phone number** with Signal installed (for linking as a secondary device)
+- **signal-cli 0.14+** — Java-based Signal client ([GitHub](https://github.com/AsamK/signal-cli))
+- **Java 25+** runtime — required by signal-cli 0.14 and newer; the official Docker image bundles it
+- **A phone number for the bot** — either register it as a primary Signal account (no phone or Signal app required) or link it as a secondary device to a phone you already use. `SIGNAL_ACCOUNT` is the bot's number, and only the humans who may talk to it belong in `SIGNAL_ALLOWED_USERS`.
 
 ### Installing signal-cli
 
@@ -42,9 +42,24 @@ signal-cli is **not** in apt or snap repositories. The Linux install above downl
 
 ---
 
-## Step 1: Link Your Signal Account
+## Step 1: Register or Link the Bot Account
 
-Signal-cli works as a **linked device** — like WhatsApp Web, but for Signal. Your phone stays the primary device.
+### Option A — Primary registration (separate bot number)
+
+Use this when the bot has its own number. No phone and no Signal app are involved.
+
+```bash
+signal-cli -a +18195550100 register
+signal-cli -a +18195550100 verify 123456      # code received by SMS
+```
+
+If registration asks for a captcha, open the printed URL, complete it, and rerun with
+`--captcha <token>`. The account is now stored in signal-cli's data directory; the daemon below
+loads it automatically.
+
+### Option B — Link as a secondary device
+
+Signal-cli can also work as a **linked device** — like WhatsApp Web, but for Signal. Your phone stays the primary device.
 
 ```bash
 # Generate a linking URI (displays a QR code or link)
@@ -61,12 +76,37 @@ signal-cli link -n "HermesAgent"
 ## Step 2: Start the signal-cli Daemon
 
 ```bash
-# Replace +1234567890 with your Signal phone number (E.164 format)
+# Replace +1234567890 with the bot's Signal phone number (E.164 format)
 signal-cli --account +1234567890 daemon --http 127.0.0.1:8080
 ```
 
 :::tip
 Keep this running in the background. You can use `systemd`, `tmux`, `screen`, or run it as a service.
+:::
+
+### Docker
+
+The official [`ghcr.io/asamk/signal-cli`](https://github.com/AsamK/signal-cli/pkgs/container/signal-cli) image is the supported container distribution. It keeps account state in `/var/lib/signal-cli`, so mount a volume there or every restart loses the registration.
+
+```bash
+docker run -d --name signal-cli \
+  -p 127.0.0.1:8080:8080 \
+  -v signal-cli-data:/var/lib/signal-cli \
+  ghcr.io/asamk/signal-cli:0.14.10 \
+  daemon --http 0.0.0.0:8080
+```
+
+Register the number first by running the same image interactively, then start the daemon:
+
+```bash
+docker run -it --rm -v signal-cli-data:/var/lib/signal-cli \
+  ghcr.io/asamk/signal-cli:0.14.10 -a +18195550100 register
+```
+
+When Hermes and signal-cli run as **separate containers**, put both on the same Docker network and point `SIGNAL_HTTP_URL` at the service name (`http://signal-cli:8080`). Do **not** rely on a shared attachment volume: Hermes inlines outgoing files as data URIs precisely so path resolution stays inside signal-cli's own container.
+
+:::caution
+The `bbernhard/signal-cli-rest-api` wrapper is **not** compatible with this adapter — it exposes `/v1/*`, while Hermes needs signal-cli's native `/api/v1/*` endpoints.
 :::
 
 Verify it's running:
@@ -166,6 +206,8 @@ The agent can send media files via `MEDIA:` tags in responses. The following del
 
 All outgoing media goes through Signal's standard attachment API. Unlike some platforms, Signal does not distinguish between voice messages and file attachments at the protocol level.
 
+By default Hermes inlines each file as a self-contained `data:<mime>;filename=<name>;base64,...` attachment. That is what makes media delivery work when Hermes and signal-cli run in **separate containers without a shared volume** — signal-cli resolves path attachments in its own filesystem and rejects paths it cannot see. If both processes share a volume and you prefer path uploads (no base64 expansion), set `SIGNAL_INLINE_ATTACHMENTS=never`. Incoming documents keep the sender's filename and real extension (DOCX/XLSX/PPTX are not reduced to `.zip`), and `SIGNAL_IGNORE_ATTACHMENTS=true` disables inbound downloads entirely.
+
 Attachment size limit: **100 MB** (both directions).
 :::warning
 **Signal servers will rate-limit attachment uploads**, the adapter uses a scheduler for multiple image sending that batches images in groups of 32 and throttles uploads to match the Signal server policy.
@@ -229,7 +271,7 @@ The adapter monitors the SSE connection and automatically reconnects if:
 | **"Cannot reach signal-cli"** during setup | Ensure signal-cli daemon is running: `signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080` |
 | **Messages not received** | Check that `SIGNAL_ALLOWED_USERS` includes the sender's number in E.164 format (with `+` prefix) |
 | **"signal-cli not found on PATH"** | Install signal-cli and ensure it's in your PATH, or use Docker |
-| **Connection keeps dropping** | Check signal-cli logs for errors. Ensure Java 17+ is installed. |
+| **Connection keeps dropping** | Check signal-cli logs for errors. Ensure Java 25+ is installed (or use the official Docker image). |
 | **Group messages ignored** | Configure `SIGNAL_GROUP_ALLOWED_USERS` with specific group IDs, or `*` to allow all groups. |
 | **Bot responds to no one** | Configure `SIGNAL_ALLOWED_USERS`, use DM pairing, or explicitly allow all users through gateway policy if you want broader access. |
 | **Duplicate messages** | Ensure only one signal-cli instance is listening on your phone number |

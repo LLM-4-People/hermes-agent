@@ -2025,8 +2025,11 @@ def check_compression_model_feasibility(agent: Any) -> None:
         aux_api_key = "" if (callable(_raw_aux_key) and not isinstance(_raw_aux_key, str)) else str(_raw_aux_key or "")
         # Resolve each model with its own provider so provider-specific paths (Bedrock table, OpenRouter API)
         # hit the correct client, not the main model's.
+        from hermes_cli.providers import live_provider_identity
         _aux_provider = (
-            _aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(agent, "provider", "")
+            _aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto"
+            else live_provider_identity(
+                getattr(agent, "provider", ""), getattr(agent, "requested_provider", ""))
         )
         _aux_cfg_ctx = _configured_compression_context_length(agent)
         if _aux_cfg_ctx is None and _aux_inherits_main_route(agent, aux_model, aux_base_url):

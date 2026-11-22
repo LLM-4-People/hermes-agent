@@ -140,9 +140,9 @@ def _get_ollama_request_headers() -> dict[str, str]:
     from hermes_cli.models import _get_provider_config_dict
     entry = _get_provider_config_dict("ollama")
     try:
-        from hermes_cli.config import normalize_extra_headers
+        from hermes_cli.config import resolve_provider_extra_headers
 
-        result = normalize_extra_headers(entry.get("extra_headers"))
+        result = resolve_provider_extra_headers(entry)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError):
         result = {}
 

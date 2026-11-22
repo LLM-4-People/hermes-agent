@@ -26,7 +26,10 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
     """
     base_url = str(getattr(agent, "base_url", "") or "")
     provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    if provider == "openrouter" or base_url_host_matches(base_url, "openrouter.ai"):
+    from hermes_cli.providers import live_provider_identity
+    live_provider = live_provider_identity(
+        provider, getattr(agent, "requested_provider", ""))
+    if live_provider.strip().lower() == "openrouter" or base_url_host_matches(base_url, "openrouter.ai"):
         return False
 
     api_mode = str(getattr(agent, "api_mode", "") or "").strip().lower()
@@ -43,6 +46,7 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
         base_url=base_url,
         capability=_ANSWER_IN_REASONING_CAPABILITY,
         custom_providers=custom_providers,
+        provider=live_provider,
     )
     if configured is not None:
         return configured
@@ -51,14 +55,10 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
     # Several entries may share one endpoint (LiteLLM/vLLM router): only the live ``custom:<slug>``
     # entry counts; without one, every flagged sibling on the endpoint must opt in. Startup, gateway
     # and TUI keep ``provider="custom"`` and the named identity in ``requested_provider``.
-    from hermes_cli.providers import custom_provider_slug
-
-    requested = str(getattr(agent, "requested_provider", "") or "").strip().lower()
-    ids = {custom_provider_slug(p) for p in (provider, requested) if p.startswith("custom:")}
-    entries = list(_entries_for_route(base_url, custom_providers, None))
-    live = [e for e in entries
-            if custom_provider_slug(e.get("name"), e.get("provider_key")) in ids]
-    flags = {v for e in live or entries
+    # The route owner resolves the live identity (and falls back to every sibling on the endpoint
+    # when no identity matches).
+    entries = list(_entries_for_route(base_url, custom_providers, None, provider=live_provider))
+    flags = {v for e in entries
              if isinstance(v := (e.get("capabilities") or {}).get(_ANSWER_IN_REASONING_CAPABILITY), bool)}
     if flags:
         return flags == {True}

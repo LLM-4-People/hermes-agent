@@ -571,6 +571,85 @@ class TestKeyedCustomProviderReasoningWire:
         assert kwargs["extra_body"] == nested and "reasoning_effort" not in kwargs
 
 
+class TestAuxOnSharedProxyFollowsTheRequestedEntry:
+    """The live main runtime keeps a bare ``custom`` adapter and the chosen entry in
+    ``requested_provider``. Auxiliary routing must resolve THAT entry — a URL-first scan hands the
+    auxiliary call the first sibling's routing header, TLS material and api mode."""
+
+    _ROUTE = "https://router.example.com/v1"
+
+    def _config(self):
+        return {
+            "model": {
+                "default": "shared-model",
+                "provider": "custom",
+                "requested_provider": "custom:beta",
+            },
+            "providers": {
+                "alpha": {
+                    "name": "Provider A",
+                    "api": self._ROUTE,
+                    "api_key": "coral-key",
+                    "extra_headers": {"X-Proxy-Base-URL": "https://upstream-a.example.com/v1"},
+                    "ssl_ca_cert": "/etc/ssl/coral.pem",
+                },
+                "beta": {
+                    "name": "Provider B",
+                    "api": self._ROUTE,
+                    "api_key": "beta-key",
+                    "proxy": {"base_url": "https://upstream-b.example.com/v1"},
+                    "ssl_verify": False,
+                },
+            },
+        }
+
+    @pytest.mark.parametrize("requested", ["beta", "custom:beta"])
+    def test_headers_come_from_the_requested_entry(self, tmp_path, requested):
+        _write_config(tmp_path, self._config())
+        from agent import auxiliary_client as aux
+
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch.object(aux, "_create_openai_client", side_effect=fake_create):
+            routed = aux._try_main_provider_route(
+                "custom", "shared-model", self._ROUTE, "beta-key", "",
+                requested_provider=requested,
+            )
+
+        assert routed is not None
+        assert routed[2] == requested
+        assert captured["provider"] == requested
+        assert captured["default_headers"] == {"X-Proxy-Base-URL": "https://upstream-b.example.com/v1"}
+
+    def test_wire_client_header_merge_is_case_insensitive(self):
+        from agent import auxiliary_client as aux
+
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch.object(aux, "_apply_user_default_headers",
+                          return_value={"x-upstream": "user", "X-SDK": "1"}), patch.object(
+                aux, "_create_openai_client", side_effect=fake_create):
+            aux._named_custom_openai_wire_client(
+                self._ROUTE, "beta-key", {"X-Upstream": "beta"}, provider="custom:beta")
+
+        assert captured["default_headers"] == {"X-SDK": "1", "X-Upstream": "beta"}
+
+    def test_auto_main_provider_is_still_skipped(self):
+        from agent import auxiliary_client as aux
+
+        assert aux._try_main_provider_route(
+            "auto", "shared-model", self._ROUTE, "k", "", requested_provider="beta",
+        ) is None
+
+
 class TestAuxInheritsCustomProviderExtraBody:
     """#103738 hole 3: an aux request routed to a custom provider carries that entry's ``extra_body`` the
     way the main agent's requests do — a proxy that 400s without a ``user`` field must not break smart

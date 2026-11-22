@@ -1488,11 +1488,13 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     anthropic_messages). No-op for every other provider.
     """
     from agent.opencode_affinity import merge_session_affinity_headers
+    from hermes_cli.providers import live_provider_identity
 
     kwargs = _build_api_kwargs_for_mode(agent, api_messages, tools_for_api)
     return merge_session_affinity_headers(
         kwargs,
-        getattr(agent, "provider", None),
+        live_provider_identity(
+            getattr(agent, "provider", None), getattr(agent, "requested_provider", None)),
         getattr(agent, "base_url", None),
         getattr(agent, "session_id", None),
     )
@@ -1927,16 +1929,19 @@ def _update_fallback_context_compressor(agent) -> None:
     if not compressor:
         return
     from agent.model_metadata import get_model_context_length
+    from hermes_cli.providers import live_provider_identity
+    _live_provider = live_provider_identity(
+        agent.provider, getattr(agent, "requested_provider", ""))
     fb_context_length = get_model_context_length(
         agent.model, base_url=agent.base_url,
         api_key=agent.api_key if isinstance(agent.api_key, str) else "",  # callable (Entra ID) → probes need str
-        provider=agent.provider,
+        provider=_live_provider,
         config_context_length=getattr(agent, "_config_context_length", None),
         custom_providers=getattr(agent, "_custom_providers", None),
     )
     compressor.update_model(  # callable api_key preserved → call_llm
         model=agent.model, context_length=fb_context_length, base_url=agent.base_url,
-        api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
+        api_key=getattr(agent, "api_key", ""), provider=_live_provider, api_mode=agent.api_mode,
     )
     # Fallback activation is an error path: refresh an EXISTING verdict eagerly (the ceiling was voided by
     # update_model()), but a session that never probed keeps its lazy compaction-time probe rather than

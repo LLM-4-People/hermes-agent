@@ -270,3 +270,26 @@ class TestResetNoticeSessionInfo:
         assert "anthropic" in info
         assert "base-model" not in info
 
+
+
+def test_named_custom_identity_shows_the_configured_label(runner, tmp_path):
+    """``custom:<slug>`` is the live identity, not something to show in /status."""
+    config_yaml = (
+        "model:\n"
+        "  default: shared-model\n"
+        "  provider: custom:beta\n"
+        "providers:\n"
+        "  beta:\n"
+        "    name: Beta\n"
+        "    base_url: https://router.example.com/v1\n"
+    )
+    p1, p2, p3 = _patch_info(
+        tmp_path, config_yaml, "shared-model",
+        {"provider": "custom:beta", "base_url": "https://router.example.com/v1", "api_key": ""})
+    entries = [{"name": "Beta", "provider_key": "beta",
+                "base_url": "https://router.example.com/v1"}]
+    with p1, p2, p3, patch(
+        "hermes_cli.config.get_compatible_custom_providers", return_value=entries):
+        info = runner._format_session_info()
+    assert "Beta" in info
+    assert "custom:beta" not in info

@@ -82,7 +82,9 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
                                        if is_anthropic else None) or ""
         agent.api_key = agent._anthropic_api_key = effective_key
         agent._anthropic_base_url = fb_base_url
-        agent._anthropic_client = build_anthropic_client(effective_key, fb_base_url, timeout=timeout)
+        agent._anthropic_client = build_anthropic_client(
+            effective_key, fb_base_url, timeout=timeout,
+            provider=str(getattr(agent, "requested_provider", "") or fb_provider or ""))
         agent._is_anthropic_oauth = anthropic_route_is_oauth(fb_base_url, effective_key, provider=fb_provider)
         agent.client, agent._client_kwargs = None, {}
         return
@@ -501,7 +503,9 @@ class ClientLifecycleMixin:
     def _build_direct_anthropic_client(self, token: str, base_url: Any) -> Any:
         """Native Anthropic client for ``token``/``base_url`` with the provider/model request timeout."""
         from agent.anthropic_adapter import build_anthropic_client
-        return build_anthropic_client(token, base_url, timeout=get_provider_request_timeout(self.provider, self.model))
+        return build_anthropic_client(
+            token, base_url, timeout=get_provider_request_timeout(self.provider, self.model),
+            provider=str(getattr(self, "requested_provider", "") or self.provider or ""))
 
     def _anthropic_oauth_flag(self, token: str) -> bool:
         """OAuth flag only on native Anthropic routes; third-party Anthropic-protocol endpoints must not trip OAuth paths."""
@@ -512,7 +516,9 @@ class ClientLifecycleMixin:
         from agent.anthropic_adapter import build_anthropic_bedrock_client, build_anthropic_client
         if key[0] == "bedrock":
             return build_anthropic_bedrock_client(key[1], timeout=key[2])
-        return build_anthropic_client(key[1], key[2], timeout=key[3], drop_context_1m_beta=key[4])
+        return build_anthropic_client(
+            key[1], key[2], timeout=key[3], drop_context_1m_beta=key[4],
+            provider=str(getattr(self, "requested_provider", "") or self.provider or ""))
 
     def _create_request_anthropic_client(self, *, reason: str) -> Any:
         """Build (or reuse) a request-local Anthropic client for one in-flight call.
@@ -925,7 +931,12 @@ class ClientLifecycleMixin:
         if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
             try:
                 from hermes_cli.config import apply_custom_provider_extra_headers_to_client_kwargs
-                apply_custom_provider_extra_headers_to_client_kwargs(self._client_kwargs, base_url)
+                from hermes_cli.providers import live_provider_identity
+                # Identity, not URL, selects the entry: providers may share one proxy endpoint.
+                apply_custom_provider_extra_headers_to_client_kwargs(
+                    self._client_kwargs, base_url, getattr(self, "_custom_providers", None),
+                    provider=live_provider_identity(
+                        self.provider, getattr(self, "requested_provider", "")))
             except Exception:
                 logger.debug("custom-provider extra_headers skipped", exc_info=True)
 
@@ -1003,8 +1014,11 @@ class ClientLifecycleMixin:
             from hermes_cli.config import (
                 apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers, load_config_readonly,
             )
+            from hermes_cli.providers import live_provider_identity
             apply_custom_provider_tls_to_client_kwargs(
                 self._client_kwargs, str(self.base_url or ""), get_compatible_custom_providers(load_config_readonly()),
+                provider=live_provider_identity(
+                    self.provider, getattr(self, "requested_provider", "")),
             )
         except Exception:
             logger.debug("custom-provider TLS resolution skipped on credential rotation", exc_info=True)

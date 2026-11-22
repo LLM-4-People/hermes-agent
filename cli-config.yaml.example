@@ -189,6 +189,25 @@ model:
   #       CF-Access-Client-Secret: "${CF_ACCESS_SECRET}"
   #       X-Client-Name: "hermes-agent"
   #
+  # proxy (per provider): for a gateway that routes to many upstreams behind one
+  #   base URL and selects the upstream from a request header. "api" stays the
+  #   address Hermes connects to; proxy.base_url is the value sent in the routing
+  #   header (X-Proxy-Base-URL unless proxy.header overrides it). proxy.headers
+  #   adds further routing headers; explicit extra_headers win over both.
+  #   Providers sharing one api URL are resolved by provider identity, so each
+  #   sends only its own routing header. Unrelated to the top-level proxy: egress
+  #   section.
+  #
+  # providers:
+  #   beta:
+  #     api: "https://proxy.example.com/v1"
+  #     key_env: "BETA_API_KEY"
+  #     proxy:
+  #       base_url: "https://upstream-b.example.com/v1"
+  #       # header: X-Proxy-Base-URL
+  #       # headers:
+  #       #   X-Proxy-Tenant: "acme"
+  #
   # session_affinity_header: NAME of a header that carries Hermes' conversation
   # id on every request to that provider (all api_modes + auxiliary calls). Off
   # unless set. For session-aware proxies that otherwise treat each agent-loop

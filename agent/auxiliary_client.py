@@ -154,13 +154,14 @@ _LOGGED_UNSUPPORTED_EXTPROC_KEYS: set = set()
 _LOGGED_UNSUPPORTED_OAUTH_KEYS: set = set()
 
 
-def _resolve_aux_verify(base_url: Optional[str]) -> Any:
+def _resolve_aux_verify(base_url: Optional[str], *, provider: Optional[str] = None) -> Any:
     """httpx ``verify`` for an aux base_url, mirroring the main client (per-provider ``ssl_ca_cert`` /
     ``ssl_verify``; otherwise the OS trust store); any failure → httpx default (``True``)."""
     try:
         from agent.ssl_verify import resolve_httpx_verify
         from hermes_cli.config import get_custom_provider_tls_settings, load_config_readonly
-        tls = get_custom_provider_tls_settings(str(base_url or ""), config=load_config_readonly())
+        tls = get_custom_provider_tls_settings(
+            str(base_url or ""), config=load_config_readonly(), provider=provider)
         return resolve_httpx_verify(
             ca_bundle=tls.get("ssl_ca_cert"), ssl_verify=tls.get("ssl_verify"), base_url=str(base_url or ""))
     except Exception:
@@ -170,12 +171,13 @@ def _resolve_aux_verify(base_url: Optional[str]) -> Any:
 _WARNED_KEEPALIVE_IMPORT_SKEW = False
 
 
-def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = False) -> dict[str, Any]:
+def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = False,
+                               provider: Optional[str] = None) -> dict[str, Any]:
     """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
     try:
         from agent.process_bootstrap import build_keepalive_http_client
         client = build_keepalive_http_client(
-            str(base_url or ""), async_mode=async_mode, verify=_resolve_aux_verify(base_url))
+            str(base_url or ""), async_mode=async_mode, verify=_resolve_aux_verify(base_url, provider=provider))
     except (ImportError, AttributeError):
         # Version-skewed install (Desktop runtime lagging a git tree) lacks this helper:
         # degrade to the SDK default httpx client rather than kill the job; warn once.
@@ -191,11 +193,11 @@ def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = Fa
     return {"http_client": client} if client is not None else {}
 
 
-def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+def _create_openai_client(*, api_key: str, base_url: str, provider: Optional[str] = None, **kwargs: Any) -> Any:
     if _aux_probe_active():
         # Availability probe: resolved credentials/base_url are the answer.
         return _AuxProbeClientStub(api_key=api_key, base_url=base_url)
-    kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
+    kwargs = {**_openai_http_client_kwargs(base_url, provider=provider), **kwargs}
     _apply_required_codex_headers(kwargs, access_token=api_key, base_url=base_url)
     # Hermes owns aux retry/fallback policy; the SDK default (max_retries=2) would triple
     # wall time on a hung endpoint before Hermes sees one failure.
@@ -4371,15 +4373,33 @@ def _main_route_target(runtime: dict[str, Any], task: Optional[str]) -> tuple[st
 
 def _try_main_provider_route(
     main_provider: str, main_model: str, runtime_base_url: str, runtime_api_key: Any, runtime_api_mode: str,
+    requested_provider: str = "",
 ) -> Optional[tuple[Any, str, str]]:
     """Step 1: route aux onto the main provider + main model; None if unusable."""
+    from hermes_cli.providers import live_provider_identity
+
     if not (main_provider and main_model and main_provider not in {"auto", ""}):
         return None
-    resolved_provider = main_provider
+    identity = live_provider_identity(main_provider, requested_provider)
+    resolved_provider = identity or main_provider
     explicit_base_url = runtime_base_url or None
-    health_base_url = _custom_health_base_url(main_provider, explicit_base_url)
     explicit_api_key = None
-    if runtime_base_url and main_provider == "custom":
+    named_identity = identity if identity.lower().startswith("custom:") else ""
+    if named_identity and named_identity != main_provider:
+        # The live adapter is bare ``custom`` while the chosen entry is named: its config owns the
+        # URL, key and api_mode. Resolving by the adapter alone would let the first sibling entry on
+        # a shared proxy serve the auxiliary call.
+        explicit_base_url = None
+        _has_named_entry = False
+        with contextlib.suppress(ImportError):
+            from hermes_cli.runtime_provider import _get_named_custom_provider
+            _has_named_entry = _get_named_custom_provider(named_identity) is not None
+        if not _has_named_entry:
+            # Config-less named custom provider (live runtime only): anonymous custom arm + runtime key.
+            resolved_provider = "custom"
+            explicit_base_url = runtime_base_url or None
+            explicit_api_key = runtime_api_key or None
+    elif runtime_base_url and main_provider == "custom":
         # Anonymous custom endpoint — pass through explicit base_url + api_key.
         explicit_api_key = runtime_api_key or None
     elif main_provider.startswith("custom:"):
@@ -4403,6 +4423,7 @@ def _try_main_provider_route(
         # Pin aux to the main session's working key, not a re-selected (maybe exhausted) pool key.
         explicit_api_key = runtime_api_key
     # Skip if the main provider was recently 402'd (unhealthy TTL bounds the bypass).
+    health_base_url = _custom_health_base_url(resolved_provider, explicit_base_url)
     main_chain_label = _normalize_chain_label(resolved_provider)
     if main_chain_label and _is_provider_unhealthy(main_chain_label, health_base_url):
         _log_skip_unhealthy(main_chain_label, base_url=health_base_url)
@@ -4467,7 +4488,10 @@ def _resolve_auto_route(
     runtime = _normalize_main_runtime(main_runtime)
     _warn_stale_openai_base_url(runtime.get("provider", ""))
     main_provider, main_model, base_url, api_key, api_mode = _main_route_target(runtime, task)
-    routed = _try_main_provider_route(main_provider, main_model, base_url, api_key, api_mode)
+    routed = _try_main_provider_route(
+        main_provider, main_model, base_url, api_key, api_mode,
+        requested_provider=str(runtime.get("requested_provider") or ""),
+    )
     if routed is not None:
         return routed
     if task:
@@ -4918,12 +4942,21 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
         )
         _clean_base, _dq = _extract_url_query_params(custom_base)
         extra = {"default_query": _dq} if _dq else {}
-        from hermes_cli.config import get_custom_provider_extra_headers  # this endpoint's entry, as agent_init
-        _custom_headers = {**(_endpoint_default_headers(custom_base, provider, is_vision=req.is_vision) or {}),
-                           **get_custom_provider_extra_headers(custom_base)}
+        from hermes_cli.config import get_custom_provider_extra_headers, merge_headers_case_insensitive
+        from hermes_cli.providers import live_provider_identity
+        # Aux calls on a shared proxy endpoint must carry THIS provider's routing header, not a sibling's.
+        # ``req.original_provider`` is often the bare adapter ("custom"); only a concrete identity wins.
+        _aux_identity = live_provider_identity(
+            req.original_provider or provider,
+            (main_runtime or {}).get("requested_provider") or provider or "",
+        )
+        _custom_headers = merge_headers_case_insensitive(
+            dict(_endpoint_default_headers(custom_base, _aux_identity, is_vision=req.is_vision) or {}),
+            get_custom_provider_extra_headers(custom_base, provider=_aux_identity))
         if _custom_headers:
             extra["default_headers"] = _custom_headers
-        client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **extra)
+        client = _create_openai_client(
+            api_key=custom_key, base_url=_clean_base, provider=_aux_identity, **extra)
         client = _wrap_transport(req, client, final_model, wrap_base or custom_base, custom_key)
         return _route_client(req, client, final_model)
     # Try custom first, then API-key providers (Codex excluded here:
@@ -4942,7 +4975,8 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
     return None, None
 
 
-def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_headers: Optional[dict[str, str]] = None):
+def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_headers: Optional[dict[str, str]] = None,
+                                     provider: Optional[str] = None):
     """Plain OpenAI client on the /v1 equivalent of a named custom entry's base URL.
 
     ``extra_headers`` is the entry's own header block (gateway routing tags, proxy auth): the main
@@ -4951,10 +4985,13 @@ def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_he
     _extra = {"default_query": _dq} if _dq else {}
     _headers = _apply_user_default_headers(None)
     if extra_headers:
-        _headers = {**(_headers or {}), **extra_headers}
+        from hermes_cli.config import merge_headers_case_insensitive
+        # Case-insensitive like the main client: the entry's routing value must replace a same-name
+        # user default instead of sending two wire headers.
+        _headers = merge_headers_case_insensitive(dict(_headers or {}), extra_headers)
     if _headers:
         _extra["default_headers"] = _headers
-    return _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra)
+    return _create_openai_client(api_key=custom_key, base_url=_clean_base, provider=provider, **_extra)
 
 
 def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResult]:
@@ -4974,6 +5011,10 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
     # A per-task/explicit base_url or api_key composes OVER the named entry's defaults: the entry supplies
     # whatever the caller left blank, never replaces what the caller set (compression prompts carry
     # conversation history, so a silently swapped destination is a data-routing bug, not a nuisance).
+    _aux_identity = str(req.original_provider or provider or "")
+    from hermes_cli.providers import live_provider_identity
+    _aux_identity = live_provider_identity(
+        _aux_identity, custom_entry.get("provider_key") or custom_entry.get("name") or provider or "")
     custom_base = (req.explicit_base_url or custom_entry.get("base_url") or "").strip()
     custom_key = _normalize_api_key(req.explicit_api_key) or _named_custom_api_key(custom_entry, provider, custom_base, req.model)
     if custom_key == "no-key-required":
@@ -5014,7 +5055,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
         try:
             from agent.anthropic_adapter import build_anthropic_client
             from agent.anthropic_credentials import anthropic_route_is_oauth
-            real_client = build_anthropic_client(custom_key, custom_base)
+            real_client = build_anthropic_client(custom_key, custom_base, provider=_aux_identity)
             if entry_headers:
                 # Same entry headers as the two OpenAI-wire arms; ``with_options`` merges onto the
                 # beta/credential-Omit headers the builder installed (#109595).
@@ -5022,11 +5063,12 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
         except ImportError:
             logger.warning("Named custom provider %r declares api_mode=anthropic_messages but the anthropic SDK "
                            "is not installed — falling back to OpenAI-wire.", provider)
-            return _route_client(req, _named_custom_openai_wire_client(custom_base, custom_key, entry_headers), final_model)
+            return _route_client(req, _named_custom_openai_wire_client(
+                custom_base, custom_key, entry_headers, provider=_aux_identity), final_model)
         return _route_client(
             req, AnthropicAuxiliaryClient(real_client, final_model, custom_key, custom_base,
                                           is_oauth=anthropic_route_is_oauth(custom_base, custom_key)), final_model)
-    client = _named_custom_openai_wire_client(custom_base, custom_key, entry_headers)
+    client = _named_custom_openai_wire_client(custom_base, custom_key, entry_headers, provider=_aux_identity)
     # codex_responses, or auto-detect via _wrap_transport (which reads the task-level api_mode).
     if entry_api_mode == "codex_responses":
         client = CodexAuxiliaryClient(client, final_model)
@@ -6585,7 +6627,11 @@ def _build_call_kwargs(
     # Conversation affinity (OpenCode relay, opt-in custom-provider header) — same key as the main
     # turn so compression/title/vision calls stay on the conversation's warm backend.
     from agent.opencode_affinity import merge_session_affinity_headers
-    return merge_session_affinity_headers(kwargs, provider, base_url, _runtime_main_value("session_id") or None)
+    from hermes_cli.providers import live_provider_identity
+    return merge_session_affinity_headers(
+        kwargs,
+        live_provider_identity(provider, _runtime_main_value("requested_provider") or ""),
+        base_url, _runtime_main_value("session_id") or None)
 
 
 def _validate_llm_response(

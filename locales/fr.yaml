@@ -4224,7 +4224,7 @@ tips:
   t287: "/copy [N] copie la dernière réponse de l'assistant dans votre presse-papiers, ou la N-ième en partant de la fin avec un nombre."
   t288: "/redraw force un rafraîchissement complet de l'interface, corrigeant les décalages du terminal après un redimensionnement tmux ou des artefacts de sélection à la souris."
   t289: "/agents (alias /tasks) affiche les agents actifs et les tâches d'arrière-plan en cours dans la session actuelle."
-  t290: "/footer active ou désactive le pied de page du gateway sur les réponses finales, indiquant le modèle, le % de contexte et le cwd."
+  t290: "/footer active ou désactive le pied de page du gateway sur les réponses finales, indiquant le modèle, le fournisseur, le % de contexte et le cwd."
   t291: "/busy queue|steer|interrupt contrôle ce que fait la touche Enter pendant qu'Hermes travaille."
   t292: "/topic dans les messages privés Telegram active le mode topics multi-sessions géré par l'utilisateur — /topic <id> restaure des sessions passées en ligne."
   t293: "/approve session|always exécute une commande dangereuse en attente avec la portée de confiance choisie ; /deny la rejette."

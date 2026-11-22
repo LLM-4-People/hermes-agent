@@ -1287,12 +1287,17 @@ def _redecorate_prompt_cache_for_provider(
         _ensure_cached_system_prompt_static(agent, system_message=system_message)
         static = getattr(agent, "_cached_system_prompt_static", None)
         from agent.prompt_caching import envelope_tool_part_cache_markers_supported
+        from hermes_cli.providers import live_provider_identity
+        # The adapter class is not the route: the requested entry owns TTL and marker support on a
+        # shared endpoint. Resolve it once so both lookups below judge the same destination.
+        live_provider = live_provider_identity(
+            agent.provider, getattr(agent, "requested_provider", ""))
         plan = build_prompt_cache_plan(
             messages,
             planned_tools,
             # Clamp per-destination: a configured 1h regresses to 5m on
             # Qwen/Alibaba routes, whose context cache is 5m-only (#84733).
-            cache_ttl=effective_cache_ttl(agent._cache_ttl, provider=agent.provider, model=agent.model,
+            cache_ttl=effective_cache_ttl(agent._cache_ttl, provider=live_provider, model=agent.model,
                                           base_url=getattr(agent, "base_url", "") or "",
                                           auto=getattr(agent, "_cache_ttl_auto", False)),
             native_anthropic=agent._use_native_cache_layout,
@@ -1304,7 +1309,7 @@ def _redecorate_prompt_cache_for_provider(
             # LiteLLM-style envelope routes forward part-level markers into
             # tool_result.content[] → non-retryable 400 (#89886).
             tool_part_markers=envelope_tool_part_cache_markers_supported(
-                getattr(agent, "provider", ""), getattr(agent, "base_url", "")
+                live_provider, getattr(agent, "base_url", "")
             ),
         )
         messages, planned_tools = plan.messages, plan.tools

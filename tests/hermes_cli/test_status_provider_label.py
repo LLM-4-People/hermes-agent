@@ -29,3 +29,50 @@ def test_non_openrouter_provider_untouched():
          patch("hermes_cli.status.resolve_provider", return_value="anthropic"):
         label = _effective_provider_label()
     assert "OpenRouter" not in label
+
+
+def test_named_custom_provider_uses_the_configured_name():
+    from hermes_cli.providers import provider_display_name
+
+    providers = {"beta": {"name": "Provider B", "api": "https://upstream-b.example.com/v1"}}
+    assert provider_display_name("custom:beta", providers, None) == "Provider B"
+    assert provider_display_name("beta", providers, None) == "Provider B"
+
+
+def test_unknown_custom_provider_falls_back_to_its_slug():
+    from hermes_cli.providers import provider_display_name
+
+    assert provider_display_name("custom:missing") == "custom:missing"
+
+
+def test_configured_key_and_display_name_both_resolve():
+    from hermes_cli.providers import provider_display_name
+
+    providers = {"acme": {"name": "Beta", "api": "https://upstream-b.example.com/v1"}}
+    assert provider_display_name("beta", providers, None) == "Beta"
+    assert provider_display_name("custom:beta", providers, None) == "Beta"
+    assert provider_display_name("acme", providers, None) == "Beta"
+
+
+def test_bare_custom_does_not_borrow_a_legacy_entry_name():
+    from hermes_cli.providers import provider_display_name
+
+    legacy = [{"name": "Legacy", "base_url": "https://legacy.example/v1"}]
+    assert provider_display_name("custom", None, legacy) == "Custom endpoint"
+
+
+def test_live_provider_identity_ignores_a_stale_requested_name_for_a_concrete_adapter():
+    from hermes_cli.providers import live_provider_identity
+
+    assert live_provider_identity("custom", "custom:beta") == "custom:beta"
+    assert live_provider_identity("custom", "") == "custom"
+    assert live_provider_identity("auto", "custom:beta") == "custom:beta"
+    assert live_provider_identity("openrouter", "custom:beta") == "openrouter"
+
+
+def test_tuning_only_builtin_block_does_not_shadow_the_builtin_label():
+    """``providers.bedrock.stale_timeout_seconds`` tunes a built-in; it is not a named route."""
+    from hermes_cli.providers import provider_display_name
+
+    providers = {"bedrock": {"stale_timeout_seconds": 600}}
+    assert provider_display_name("bedrock", providers, None) == "AWS Bedrock"

@@ -2327,12 +2327,13 @@ def _resolve_gateway_model_context(
     """
     from agent.context_pin import is_fallback_context_length
     from agent.model_metadata import get_model_context_length
+    from hermes_cli.providers import live_provider_identity
     resolved_model = model or _resolve_gateway_model()
-    config_context_length = provider = base_url = api_key = custom_providers = None
+    config_context_length = provider = base_url = api_key = custom_providers = requested_provider = None
     configured_model = configured_provider = configured_base_url = None
 
     def _read_config() -> None:
-        nonlocal config_context_length, provider, base_url, custom_providers
+        nonlocal config_context_length, provider, base_url, custom_providers, requested_provider
         nonlocal configured_model, configured_provider, configured_base_url
         data = _load_gateway_config()
         if not data:
@@ -2345,6 +2346,7 @@ def _resolve_gateway_model_context(
                 with suppress(TypeError, ValueError):
                     config_context_length = int(raw_ctx)
             configured_provider = provider = model_cfg.get("provider") or None
+            requested_provider = model_cfg.get("requested_provider") or None
             configured_base_url = base_url = model_cfg.get("base_url") or None
         try:
             from hermes_cli.config import get_compatible_custom_providers
@@ -2353,30 +2355,36 @@ def _resolve_gateway_model_context(
             custom_providers = data.get("custom_providers")
 
     def _read_runtime() -> None:
-        nonlocal provider, base_url, api_key
+        nonlocal provider, base_url, api_key, requested_provider
         if route and (route.get("base_url") or route.get("_runtime_resolved")):
             # A session route with its own endpoint (a /model switch), or provider-specific runtime
             # already resolved by the caller, replaces the default runtime read. A persisted route
             # without either still resolves default credentials so a custom endpoint and its pin survive.
             provider = route.get("provider") or provider
+            requested_provider = route.get("requested_provider") or requested_provider
             base_url = route.get("base_url") or ""
             api_key = route.get("api_key")
             return
         runtime = _resolve_runtime_agent_kwargs()
         provider = runtime.get("provider") or provider
+        requested_provider = runtime.get("requested_provider") or requested_provider
         base_url = runtime.get("base_url") or base_url
         api_key = runtime.get("api_key")
+
+    def _live_provider() -> str:
+        return live_provider_identity(provider, requested_provider)
 
     def _pin_still_applies() -> bool:
         # Drop a configured context_length pin when the effective route no longer matches (or on error).
         from hermes_cli.route_identity import should_clear_context_pin
         return not should_clear_context_pin(
-            configured_model, resolved_model, configured_base_url, base_url, configured_provider, provider)
+            configured_model, resolved_model, configured_base_url, base_url, configured_provider, _live_provider())
 
     def _custom_ctx() -> Optional[int]:
         from hermes_cli.config import get_custom_provider_context_length
         return get_custom_provider_context_length(
-            model=resolved_model, base_url=base_url, custom_providers=custom_providers)
+            model=resolved_model, base_url=base_url, custom_providers=custom_providers,
+            provider=_live_provider())
 
     _best_effort(_read_config)
     _best_effort(_read_runtime)
@@ -2387,14 +2395,14 @@ def _resolve_gateway_model_context(
 
     context_length = get_model_context_length(
         resolved_model, base_url=base_url or "", api_key=api_key or "",
-        config_context_length=config_context_length, provider=provider or "",
+        config_context_length=config_context_length, provider=_live_provider(),
         custom_providers=custom_providers)
     fell_through = is_fallback_context_length(  # Bedrock's static 128K or the generic 256K, unknown model
-        context_length, model=str(resolved_model), provider=provider or "", base_url=base_url or "")
+        context_length, model=str(resolved_model), provider=_live_provider(), base_url=base_url or "")
     context_source = ("config" if config_context_length is not None
                       else "default" if fell_through else "detected")
     return _GatewayModelContext(
-        model=resolved_model, provider=provider or "", base_url=base_url or "",
+        model=resolved_model, provider=_live_provider(), base_url=base_url or "",
         context_length=context_length, context_source=context_source)
 
 

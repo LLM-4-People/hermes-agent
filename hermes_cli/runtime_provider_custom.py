@@ -11,6 +11,7 @@ import logging
 import os
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from hermes_cli.config_providers import resolve_provider_extra_headers
 from hermes_cli.providers import custom_provider_aliases, custom_provider_slug
 from agent.custom_entry_pool import custom_entry_for_endpoint, entry_declares_credential, entry_scoped_pool
 from agent.secret_scope import get_secret_str
@@ -188,9 +189,10 @@ def _lift_model_capabilities(entry: dict[str, Any], model: Optional[str], result
 
 
 
-def _lift_extra_headers(entry: dict[str, Any], result: dict[str, Any]) -> None:
-    """Copy a validated ``extra_headers`` dict. SECURITY: values carry credentials — never log."""
-    extra_headers = _rp().normalize_extra_headers(entry.get("extra_headers"))
+def _lift_extra_headers(entry: dict[str, Any], result: dict[str, Any], *, provider_key: str = "") -> None:
+    """Copy resolved headers (``proxy`` expansion + ``extra_headers``). SECURITY: values carry
+    credentials — never log."""
+    extra_headers = resolve_provider_extra_headers(entry, provider_key=provider_key)
     if extra_headers:
         result["extra_headers"] = extra_headers
 
@@ -205,7 +207,7 @@ def _lift_common_custom_fields(entry: dict[str, Any], result: dict[str, Any], *,
     extra_body = entry.get("extra_body")
     if isinstance(extra_body, dict):
         result["extra_body"] = dict(extra_body)
-    _lift_extra_headers(entry, result)
+    _lift_extra_headers(entry, result, provider_key=provider_key)
     if api_mode:
         result["api_mode"] = api_mode
 
@@ -735,8 +737,9 @@ def _apply_custom_provider_extras(custom_provider: dict[str, Any], target_model:
         result["model"] = model_name
     _lift_model_capabilities(custom_provider, model_name, result)
 
-    if custom_provider.get("extra_headers"):
-        result["extra_headers"] = dict(custom_provider["extra_headers"])
+    headers = resolve_provider_extra_headers(custom_provider)
+    if headers:
+        result["extra_headers"] = headers
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = {**(result.get("request_overrides") or {}), **request_overrides}

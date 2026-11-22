@@ -43,11 +43,17 @@ def _stub_rpc(return_value):
     """Return an async mock for SignalAdapter._rpc that captures call params."""
     captured = []
 
-    async def mock_rpc(method, params, rpc_id=None):
-        captured.append({"method": method, "params": dict(params)})
+    async def mock_rpc(method, params, rpc_id=None, **kwargs):
+        captured.append({"method": method, "params": dict(params), "kwargs": kwargs})
         return return_value
 
     return mock_rpc, captured
+
+
+def _sparse_file(path, size: int) -> None:
+    """Create a file of *size* bytes without writing them (keeps the oversize tests fast)."""
+    with open(path, "wb") as f:
+        f.truncate(size)
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +378,8 @@ class TestSignalSendImageFile:
         assert captured[0]["method"] == "send"
         assert captured[0]["params"]["account"] == adapter.account
         assert captured[0]["params"]["recipient"] == ["+155****4567"]
-        assert captured[0]["params"]["attachments"] == [str(img_path)]
+        attachment = captured[0]["params"]["attachments"][0]
+        assert attachment.startswith("data:image/png;filename=chart.png;base64,")
         assert captured[0]["params"]["message"] == ""  # caption=None → ""
         # Typing indicator must be stopped before sending
         adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
@@ -387,18 +394,29 @@ class TestSignalSendImageFile:
         adapter._stop_typing_indicator = AsyncMock()
 
         img_path = tmp_path / "huge.png"
-        img_path.write_bytes(b"x")
+        _sparse_file(img_path, 200 * 1024 * 1024)
 
-        def mock_stat(self, **kwargs):
-            class FakeStat:
-                st_size = 200 * 1024 * 1024  # 200 MB
-            return FakeStat()
-
-        with patch.object(Path, "stat", mock_stat):
-            result = await adapter.send_image_file(chat_id="+155****4567", image_path=str(img_path))
+        result = await adapter.send_image_file(chat_id="+155****4567", image_path=str(img_path))
 
         assert result.success is False
         assert "too large" in result.error.lower()
+
+
+    @pytest.mark.asyncio
+    async def test_send_image_file_path_mode_for_shared_volumes(self, monkeypatch, tmp_path):
+        """``inline_attachments: never`` keeps path uploads for a shared Hermes/signal-cli volume."""
+        adapter = _make_signal_adapter(monkeypatch, inline_attachments="never")
+        mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        img_path = tmp_path / "chart.png"
+        img_path.write_bytes(b"\x89PNG" + b"\x00" * 100)
+
+        result = await adapter.send_image_file(chat_id="+155****4567", image_path=str(img_path))
+
+        assert result.success is True
+        assert captured[0]["params"]["attachments"] == [str(img_path)]
 
 
 class TestSignalRecipientResolution:
@@ -453,7 +471,8 @@ class TestSignalSendVoice:
 
         assert result.success is True
         assert captured[0]["method"] == "send"
-        assert captured[0]["params"]["attachments"] == [str(audio_path)]
+        attachment = captured[0]["params"]["attachments"][0]
+        assert attachment.startswith("data:audio/ogg;filename=reply.ogg;base64,")
         assert captured[0]["params"]["message"] == ""  # caption=None → ""
         adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
         assert 1234567890 in adapter._recent_sent_timestamps
@@ -466,15 +485,9 @@ class TestSignalSendVoice:
         adapter._stop_typing_indicator = AsyncMock()
 
         audio_path = tmp_path / "huge.ogg"
-        audio_path.write_bytes(b"x")
+        _sparse_file(audio_path, 200 * 1024 * 1024)
 
-        def mock_stat(self, **kwargs):
-            class FakeStat:
-                st_size = 200 * 1024 * 1024
-            return FakeStat()
-
-        with patch.object(Path, "stat", mock_stat):
-            result = await adapter.send_voice(chat_id="+155****4567", audio_path=str(audio_path))
+        result = await adapter.send_voice(chat_id="+155****4567", audio_path=str(audio_path))
 
         assert result.success is False
         assert "too large" in result.error.lower()
@@ -500,7 +513,8 @@ class TestSignalSendVideo:
 
         assert result.success is True
         assert captured[0]["method"] == "send"
-        assert captured[0]["params"]["attachments"] == [str(vid_path)]
+        attachment = captured[0]["params"]["attachments"][0]
+        assert attachment.startswith("data:video/mp4;filename=demo.mp4;base64,")
         assert captured[0]["params"]["message"] == ""  # caption=None → ""
         adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
         assert 1234567890 in adapter._recent_sent_timestamps
@@ -624,18 +638,56 @@ class TestSignalSendDocumentViaHelper:
         adapter._stop_typing_indicator = AsyncMock()
 
         doc_path = tmp_path / "huge.pdf"
-        doc_path.write_bytes(b"x")
+        _sparse_file(doc_path, 200 * 1024 * 1024)
 
-        def mock_stat(self, **kwargs):
-            class FakeStat:
-                st_size = 200 * 1024 * 1024
-            return FakeStat()
-
-        with patch.object(Path, "stat", mock_stat):
-            result = await adapter.send_document(chat_id="+155****4567", file_path=str(doc_path))
+        result = await adapter.send_document(chat_id="+155****4567", file_path=str(doc_path))
 
         assert result.success is False
         assert "too large" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_send_document_uses_the_platform_file_name_keyword(self, monkeypatch, tmp_path):
+        """``/save`` passes ``file_name``; the data URI must show it, not the cache basename."""
+        adapter = _make_signal_adapter(monkeypatch)
+        mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        doc_path = tmp_path / "cache-name.dat"
+        doc_path.write_bytes(b"hello")
+
+        result = await adapter.send_document(
+            chat_id="+155****4567", file_path=str(doc_path), file_name="report.pdf")
+
+        assert result.success is True
+        assert captured[0]["params"]["attachments"][0].startswith(
+            "data:application/pdf;filename=report.pdf;base64,")
+
+    @pytest.mark.asyncio
+    async def test_single_inline_attachment_budgets_the_serialized_payload(
+            self, monkeypatch, tmp_path):
+        """A 24 MiB inline file uploads ~32 MiB of base64, so the timeout must be 64s, not the
+        60s floor the decoded size would produce."""
+        from plugins.platforms.signal.signal_media import attachment_payload_size
+        from plugins.platforms.signal.signal_rate_limit import (
+            SIGNAL_UPLOAD_MIN_THROUGHPUT, _signal_send_timeout)
+
+        adapter = _make_signal_adapter(monkeypatch)
+        mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        doc_path = tmp_path / "big.bin"
+        _sparse_file(doc_path, 24 * 1024 * 1024)
+
+        result = await adapter.send_document(chat_id="+155****4567", file_path=str(doc_path))
+
+        assert result.success is True
+        attachment = captured[0]["params"]["attachments"][0]
+        serialized = attachment_payload_size(attachment)
+        assert captured[0]["kwargs"]["timeout"] == pytest.approx(
+            _signal_send_timeout(1, total_bytes=serialized))
+        assert serialized / SIGNAL_UPLOAD_MIN_THROUGHPUT > 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -1126,6 +1178,7 @@ class TestSignalSendMultipleImages:
         assert params["recipient"] == ["+155****4567"]
         assert params["message"] == ""
         assert len(params["attachments"]) == 5
+        assert all(a.startswith("data:image/png;filename=img_") for a in params["attachments"])
         # raise_on_rate_limit must be opted into so the retry loop sees 429s
         assert captured[0]["kwargs"].get("raise_on_rate_limit") is True
 

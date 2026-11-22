@@ -37,6 +37,8 @@ async def prepare_compress(authority, live, payload, prepared):
     from agent.model_metadata import estimate_request_tokens_rough
     from hermes_cli.partial_compress import (
         rejoin_compressed_head_and_tail, split_history_for_partial_compress, summarize_compress_preview)
+    from hermes_cli.config import get_compatible_custom_providers
+    from hermes_cli.providers import live_provider_identity
     from utils import is_truthy_value
     request = compress_request(payload)
     snapshot = prepared['snapshot']
@@ -84,11 +86,13 @@ async def prepare_compress(authority, live, payload, prepared):
                         _end_engine(owner, snapshot['target'], messages)
                     raise
             compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
-                api_key=runtime.get('api_key') or '', provider=runtime.get('provider') or '',
+                api_key=runtime.get('api_key') or '',
+                provider=live_provider_identity(
+                    runtime.get('provider'), runtime.get('requested_provider')) or '',
                 api_mode=runtime.get('api_mode') or '', quiet_mode=True, abort_on_summary_failure=True,
                 protect_first_n=options.get('protect_first_n', 3), protect_last_n=options.get('protect_last_n', 20),
                 min_tail_user_messages=max(1, _parse_config_int(options.get('min_tail_user_messages', 1), 1)),
-                custom_providers=config.get('custom_providers'))
+                custom_providers=get_compatible_custom_providers(config))
             compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
                                                focus_topic=request.focus_topic, memory_context=memory_context)
             if not any(m.get('_compressed_summary') for m in compressed):
@@ -166,7 +170,7 @@ def _configured_context_length(config, model, provider, base_url, custom_provide
             route, config, model_cfg, custom_providers, configured, base_url)
     if configured is None and custom_providers:
         configured = get_custom_provider_context_length(
-            model=model, base_url=base_url, custom_providers=custom_providers)
+            model=model, base_url=base_url, custom_providers=custom_providers, provider=provider)
     return int(configured) if configured else None
 
 
@@ -192,8 +196,9 @@ def _plugin_engine(authority, policy, config, model, runtime, resident, target, 
     if isinstance(thresholds, dict) and thresholds:  # before update_model, like agent init
         engine.model_thresholds = {str(k): float(v) for k, v in thresholds.items()}
     from hermes_cli.config import get_compatible_custom_providers
+    from hermes_cli.providers import live_provider_identity
     base_url, api_key = runtime.get('base_url') or '', runtime.get('api_key') or ''
-    provider = runtime.get('provider') or ''
+    provider = live_provider_identity(runtime.get('provider'), runtime.get('requested_provider'))
     providers = get_compatible_custom_providers(config)
     context_length = get_model_context_length(
         model, base_url=base_url, api_key=api_key, provider=provider, custom_providers=providers,

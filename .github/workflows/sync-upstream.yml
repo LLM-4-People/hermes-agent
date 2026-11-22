@@ -1,0 +1,289 @@
+name: Sync upstream
+
+# Automatic upstream tracking. Every three hours, merge NousResearch/hermes-agent's main into a
+# dedicated branch, run the downstream gate (the same script CI runs), audit the merged
+# workflows, and open or update a pull request. `main` is never written directly: a human merges
+# the PR, which then triggers the normal push-triggered image build.
+#
+# Trust boundary: the verify job runs merged upstream code with a read-only token and no cache
+# writes. It never holds a write credential. The publish job runs on a fresh runner, receives the
+# verified branch as a git bundle, and pushes from a bare repository (no working tree, no hooks).
+# A conflict aborts the merge and a separate job opens/updates an issue.
+
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Merge and verify without pushing the branch or opening a PR.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Merge and verify upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      sha: ${{ steps.merge.outputs.sha }}
+    steps:
+      - name: Checkout main
+        # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up the locked PM test environment from main
+        # The local composite action and the toolchain come from the trusted main checkout. The
+        # merged tree is verified with that environment; a dependency-changing merge that cannot
+        # run is a gate failure, not a reason to execute merged setup code with any credential.
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+          prune-python-cache: true
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream is already merged."
+            exit 0
+          fi
+
+          merge_or_abort() {
+            if git merge --no-edit "$1"; then
+              return 0
+            fi
+            git diff --name-only --diff-filter=U > /tmp/upstream-sync-conflicts.txt || true
+            git merge --abort || true
+            {
+              echo "### Upstream merge conflicts"
+              echo
+              cat /tmp/upstream-sync-conflicts.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          }
+
+          # Reuse the open PR branch when it exists so its commits are preserved and the push is a
+          # fast-forward; otherwise branch from main. Never rewrite the branch.
+          if git fetch origin "automation/upstream-sync:refs/remotes/origin/automation/upstream-sync" 2>/dev/null; then
+            git switch -C automation/upstream-sync origin/automation/upstream-sync
+            merge_or_abort origin/main
+          else
+            git switch -C automation/upstream-sync origin/main
+          fi
+
+          merge_or_abort upstream/main
+
+          sha=$(git rev-parse HEAD)
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "MERGED_TREE=$(git show -s --format=%T HEAD)" >> "$GITHUB_ENV"
+          echo "Merged upstream into $sha"
+          {
+            echo "### Upstream sync branch ready"
+            echo
+            echo "Commit: \`$sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Capture the merged workflow files before the gate runs
+        if: steps.merge.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: upstream-workflows
+          path: |
+            .github/workflows
+            .github/actions
+          retention-days: 1
+
+      - name: Verify the merged tree
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          ./scripts/downstream-verify.sh
+          test "$(git show -s --format=%T HEAD)" = "$MERGED_TREE"
+
+      - name: Bundle the verified branch
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ steps.merge.outputs.sha }}"
+          test "$(git show -s --format=%T HEAD)" = "$MERGED_TREE"
+          git bundle create /tmp/upstream-sync.bundle automation/upstream-sync --not origin/main
+          git bundle verify /tmp/upstream-sync.bundle
+
+      - name: Upload the verified branch and conflicts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: upstream-sync
+          path: |
+            /tmp/upstream-sync.bundle
+            /tmp/upstream-sync-conflicts.txt
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Report dry run
+        if: steps.merge.outputs.changed == 'true' && inputs.dry_run == true
+        env:
+          SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          {
+            echo "### Dry run"
+            echo
+            echo "Merged and verified \`$SHA\`; branch and PR were not updated."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    name: Audit merged workflows
+    needs: verify
+    if: needs.verify.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout main for trusted tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Download the merged workflow files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: upstream-workflows
+          # upload-artifact roots a multi-path artifact at the common parent (``.github``), so the
+          # downloaded tree must be re-anchored there for ``root: merged`` to resolve.
+          path: merged/.github
+
+      - name: Audit fork-owned workflows
+        uses: ./.github/actions/workflow-lint
+        with:
+          root: merged
+
+  publish:
+    name: Push the verified branch and open the PR
+    needs:
+      - verify
+      - lint
+    if: needs.verify.outputs.changed == 'true' && inputs.dry_run != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Download the verified branch
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: upstream-sync
+          path: /tmp/upstream-sync
+
+      - name: Push without checking out merged code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git init --bare /tmp/push.git
+          cd /tmp/push.git
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch origin main
+          git fetch origin automation/upstream-sync || true
+          # A bare repository has no working tree and no hooks from the merged commit.
+          git fetch /tmp/upstream-sync/upstream-sync.bundle \
+            '+refs/heads/automation/upstream-sync:refs/heads/automation/upstream-sync'
+          test "$(git rev-parse refs/heads/automation/upstream-sync)" = "$SHA"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            refs/heads/automation/upstream-sync:refs/heads/automation/upstream-sync
+
+      - name: Open or update the sync pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh label create upstream-sync --force --color BFD4F2 \
+            --description "Automatic upstream sync" >/dev/null
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body=$(printf 'Automated merge of upstream/main into main.\n\n- Merged commit: %s\n- Gate: scripts/downstream-verify.sh (green before this PR was opened)\n- Workflow audit: merged tree\n- Run: %s\n\nReview the diff and merge. Merging triggers the normal image publish.' "$SHA" "$run_url")
+          existing=$(gh pr list --head automation/upstream-sync --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "chore: sync upstream main" --body "$body"
+            pr_url=$(gh pr view "$existing" --json url --jq .url)
+          else
+            pr_url=$(gh pr create --base main --head automation/upstream-sync \
+              --title "chore: sync upstream main" --label upstream-sync --body "$body")
+          fi
+          {
+            echo "### Upstream sync PR"
+            echo
+            echo "$pr_url"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  report-failure:
+    name: Report sync failure
+    needs:
+      - verify
+      - lint
+      - publish
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Download the conflict report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: upstream-sync
+          path: /tmp/upstream-sync
+          if-no-files-found: ignore
+
+      - name: Open or update the sync failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh label create upstream-sync --force --color BFD4F2 \
+            --description "Automatic upstream sync" >/dev/null
+          conflicts=""
+          if [ -s /tmp/upstream-sync/upstream-sync-conflicts.txt ]; then
+            conflicts=$(printf '\n\nConflicting files:\n%s' "$(cat /tmp/upstream-sync/upstream-sync-conflicts.txt)")
+          fi
+          body=$(printf 'The automatic upstream sync failed. main was left unchanged.\n\nRun: %s%s\n\nResolve locally, push the fix to the automation branch or rerun once fixed.' "$RUN_URL" "$conflicts")
+          existing=$(gh issue list --state open --label upstream-sync --search 'Upstream sync failed in:title' --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Upstream sync failed" --label upstream-sync --body "$body"
+          fi
