@@ -181,8 +181,12 @@ workspace; absent or empty cwd remains unpinned.
 | `name` (property) | Always | **Yes** |
 | `is_available()` | Agent init, before activation | **Yes** — no network calls |
 | `initialize(session_id, **kwargs)` | Agent startup | **Yes** |
-| `get_tool_schemas()` | After init, for tool injection | **Yes** |
+| `get_tool_schemas()` | During tool catalogue reads and after init for tool injection | **Yes** |
 | `handle_tool_call(tool_name, args, **kwargs)` | When agent uses your tools | **Yes** (if you have tools) |
+
+The API tool catalogue may read `get_tool_schemas()` before `initialize()`. Return your tool
+definitions without opening a session or contacting the backend. During this read Hermes captures
+the provider and discards tool, hook, skill and command registrations.
 
 ### Config
 

@@ -6,11 +6,15 @@ general plugin system: ``context.engine`` in config.yaml names the active engine
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from plugins import plugin_loader as _loader
+
+if TYPE_CHECKING:
+    from agent.context_engine import ContextEngine
 
 logger = logging.getLogger(__name__)
 
@@ -59,25 +63,45 @@ def find_engine_dir(name: str) -> Optional[Path]:
     return user if user and user.is_dir() and _is_context_engine_dir(user) else None
 
 
-def load_context_engine(name: str) -> Optional[ContextEngine]:
+def inspect_context_engine(name: str, *, inspection) -> Optional[ContextEngine]:
+    """Read a directory engine, or clone an already registered general engine without discovery."""
+    from hermes_cli.plugin_host import is_hosted_object
+    from hermes_cli.plugins import get_plugin_context_engine
+
+    engine = load_context_engine(name, inspection=inspection)
+    if engine is None:
+        candidate = get_plugin_context_engine(discover=False)
+        if candidate is None or (inspection.host is not None and not is_hosted_object(candidate)):
+            return None  # A previously active in-process engine cannot run under the new host policy.
+        if candidate.name == name:
+            return candidate.clone_for_agent()
+    return engine
+
+
+def load_context_engine(name: str, *, inspection=None) -> Optional[ContextEngine]:
     """Load a ContextEngine instance by name; None if not found or it fails to load."""
     engine_dir = find_engine_dir(name)
     if engine_dir is None:
         logger.debug("Context engine '%s' not found in bundled or user plugins", name)
         return None
     return _loader.load_named(
-        name, engine_dir, _load_engine_from_dir, kind="Context engine", noun="engine", logger=logger
+        name, engine_dir, lambda path: _load_engine_from_dir(path, inspection=inspection),
+        kind="Context engine", noun="engine", logger=logger
     )
 
 
-def _load_engine_from_dir(engine_dir: Path) -> Optional[ContextEngine]:
+def _load_engine_from_dir(engine_dir: Path, *, inspection=None) -> Optional[ContextEngine]:
     """Import an engine module and extract its ContextEngine (register(ctx) or subclass)."""
     from agent.context_engine import ContextEngine
     name = engine_dir.name
     is_bundled = _loader.is_direct_child(engine_dir, _CONTEXT_ENGINE_PLUGINS_DIR)
-    module_name = f"{__package__}.{name}" if is_bundled else f"{_USER_NAMESPACE}.{name}"
+    module_name = f"{__package__}.{name}"
+    if not is_bundled:
+        # Keep identically named engines and their relative imports separate across profile homes.
+        digest = hashlib.sha256(str(engine_dir.resolve()).encode()).hexdigest()[:16]
+        module_name = f"{_USER_NAMESPACE}.{name}__source_{digest}"
     from hermes_cli.plugin_isolation import user_plugin_host
-    host = None if is_bundled else user_plugin_host()
+    host = None if is_bundled else (inspection.host if inspection is not None else user_plugin_host())
     if host is not None:
         return host.load_instance(engine_dir, module_name=module_name, capture="register_context_engine",
                                   base_ref="agent.context_engine:ContextEngine")
@@ -85,7 +109,8 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional[ContextEngine]:
         module_name, engine_dir, parents=(__package__.rpartition(".")[0], __package__), logger=logger,
         synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
     return mod and _loader.instance_from_module(
-        mod, collector=_EngineCollector(engine_name=name), collected_attr="engine",
+        mod, collector=_loader.SchemaInspectionContext() if inspection is not None else _EngineCollector(name),
+        collected_attr="engine",
         base_cls=ContextEngine, name=name, logger=logger)
 
 

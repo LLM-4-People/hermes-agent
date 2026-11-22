@@ -213,6 +213,31 @@ def test_a_profile_hook_teardown_leaves_a_concurrent_load_on_the_shared_host(hos
     assert provider.read_config_fields(str(work)) == {"values": {"workspace": "w"}}
 
 
+@pytest.mark.platforms("any")
+def test_schema_inspection_leaves_hosted_provider_and_handlers_in_place(hosted_home):
+    from plugins.memory import load_memory_provider
+    from plugins.plugin_loader import inspect_provider_tool_names
+    from tools.registry import registry
+
+    config = {"plugins": {"isolation": "host"}, "memory": {"provider": "hostedprov"}}
+    for path in (hosted_home / "plugins").glob("*/__init__.py"):
+        # A process-specific schema distinguishes the read-only load from both the live host
+        # and the gateway. register(ctx) additionally publishes a registry tool on activation.
+        path.write_text(_INIT.replace("return []", 'return [{"name": f"lookup_{os.getpid()}"}]'))
+    manager = plugins_mod.get_plugin_manager()
+    provider = load_memory_provider("hostedprov")
+    entry = registry.get_entry("hostedprov_probe", scope=manager.scope_key)
+    assert entry is not None
+    shared_host = manager._running_plugin_host()
+    live_names = {schema["name"] for schema in provider.get_tool_schemas()}
+    inspected = inspect_provider_tool_names(config, "memory")
+    assert len(inspected) == 1 and next(iter(inspected)).startswith("lookup_")
+    assert inspected.isdisjoint(live_names | {f"lookup_{os.getpid()}"})
+    assert manager._running_plugin_host() is shared_host
+    assert registry.get_entry("hostedprov_probe", scope=manager.scope_key) is entry
+    assert {schema["name"] for schema in provider.get_tool_schemas()} == live_names
+
+
 _REF = """
 from agent.context_references import ContextCompletionItem, ContextReferenceProvider
 
