@@ -984,14 +984,21 @@ async def test_user_language_accept_language_and_extended_device_capabilities(tm
     from agent.run_instructions import effective_system_prompt
     from tools.mobile_device_bridge import DEVICE_ACTION_ALIASES, validate_device_capabilities
 
-    # Extended Android OS draft/navigation capabilities & aliases.
-    ext_caps = ["sms_draft", "map_navigation", "clipboard_write", "contact_draft"]
+    # Extended Android OS draft/navigation & ambient intelligence capabilities & aliases.
+    ext_caps = [
+        "sms_draft", "map_navigation", "clipboard_write", "contact_draft",
+        "notifications_digest", "notification_reply", "media_control", "calendar_read",
+    ]
     cleaned, err = validate_device_capabilities(ext_caps)
     assert err is None and cleaned == ext_caps
     assert DEVICE_ACTION_ALIASES["sms"] == "sms_draft"
     assert DEVICE_ACTION_ALIASES["nav"] == "map_navigation"
     assert DEVICE_ACTION_ALIASES["copy"] == "clipboard_write"
     assert DEVICE_ACTION_ALIASES["add_contact"] == "contact_draft"
+    assert DEVICE_ACTION_ALIASES["notifications"] == "notifications_digest"
+    assert DEVICE_ACTION_ALIASES["reply_notification"] == "notification_reply"
+    assert DEVICE_ACTION_ALIASES["media"] == "media_control"
+    assert DEVICE_ACTION_ALIASES["agenda"] == "calendar_read"
     prompt_ext = build_mobile_companion_instructions(ext_caps, user_language="fr")
     for cap in ext_caps:
         assert cap in prompt_ext

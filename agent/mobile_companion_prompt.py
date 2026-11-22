@@ -38,6 +38,10 @@ _CAPABILITY_GUIDANCE: dict[str, str] = {
     "email_draft": 'email_draft -> request_device_action(action_type="email_draft", reason="...", params={"to":"...","subject":"...","body":"..."})',
     "contacts_pick": 'contacts_pick -> request_device_action(action_type="contacts_pick", reason="...")',
     "contact_draft": 'contact_draft -> request_device_action(action_type="contact_draft", reason="...", params={"name":"...","phone":"...","email":"..."})',
+    "notifications_digest": 'notifications_digest -> request_device_action(action_type="notifications_digest", reason="...", params={"limit":20})',
+    "notification_reply": 'notification_reply -> request_device_action(action_type="notification_reply", reason="...", params={"key":"...","reply_text":"..."})',
+    "media_control": 'media_control -> request_device_action(action_type="media_control", reason="...", params={"command":"status|play|pause|next|previous"})',
+    "calendar_read": 'calendar_read -> request_device_action(action_type="calendar_read", reason="...", params={"days_ahead":7})',
     "ui_surfaces_v2": (
         'ui_surfaces_v2 -> mobile_ui_patch(ops=[{"op":"upsert_widget","title":"...","template":"metric|checklist|briefing|status|quick_actions",'
         '"accent":"teal|green|blue|amber|coral","items":[{"label":"...","value":"..."}],"home_screen_safe":true}]) '

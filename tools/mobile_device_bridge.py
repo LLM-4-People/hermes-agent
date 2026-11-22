@@ -40,6 +40,10 @@ ALLOWED_DEVICE_CAPABILITIES = frozenset({
     "email_draft",
     "contacts_pick",
     "contact_draft",
+    "notifications_digest",
+    "notification_reply",
+    "media_control",
+    "calendar_read",
     "ui_surfaces_v2",
 })
 
@@ -74,6 +78,17 @@ DEVICE_ACTION_ALIASES: dict[str, str] = {
     "contact": "contacts_pick",
     "contacts": "contacts_pick",
     "add_contact": "contact_draft",
+    "notifications": "notifications_digest",
+    "notifs": "notifications_digest",
+    "unread": "notifications_digest",
+    "reply_notification": "notification_reply",
+    "quick_reply": "notification_reply",
+    "media": "media_control",
+    "music": "media_control",
+    "now_playing": "media_control",
+    "agenda": "calendar_read",
+    "schedule": "calendar_read",
+    "free_busy": "calendar_read",
 }
 
 ALLOWED_DEVICE_RESULT_STATUSES = frozenset({"completed", "denied", "unavailable"})

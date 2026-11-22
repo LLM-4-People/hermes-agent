@@ -1403,60 +1403,10 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             # need not yield to already-scheduled commentary/tool callbacks.
             loop.call_soon(run.put_event, _run_event(run_id, f"run.{status}", **fields, **extra))
 
-    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
-    _profile_key = resolve_device_profile_key(self, run.request_profile)
-    _device_broker = ensure_device_bridge_broker(self)
-
-    def _device_cb(event_name: str, payload: dict[str, Any]) -> None:
-        event_fields = {k: v for k, v in payload.items() if k != "run_id"}
-
-        def _on_loop() -> None:
-            pending = _device_broker.list_pending(_profile_key, run_id)
-            cur_status = self._run_statuses.get(run_id, {}).get("status", "running")
-            if cur_status not in TERMINAL_STATUSES | {"stopping"}:
-                next_status = "waiting_for_device" if pending else "running"
-                self._set_run_status(
-                    run_id, next_status, last_event=event_name,
-                    **({"pending_device_requests": pending} if pending else {}),
-                )
-                emit_run_progress(
-                    run_id=run_id, status=next_status, session_id=run.session_id,
-                    profile=_profile_key, stage=event_name, pending_device=bool(pending),
-                )
-            run.put_event(_run_event(run_id, event_name, **event_fields))
-
-        try:
-            loop.call_soon_threadsafe(_on_loop)
-        except RuntimeError:
-            logger.debug("device bridge SSE loop closed for run=%s event=%s", run_id, event_name)
-
-    _device_broker.register_run_listener(_profile_key, run_id, _device_cb)
-
-    def _emit_ui(revision: dict[str, Any]) -> None:
-        suggestions = revision.get("suggested_actions")
-
-        def _on_loop() -> None:
-            if suggestions:
-                cur = self._run_statuses.get(run_id, {})
-                if cur.get("status") not in TERMINAL_STATUSES:
-                    self._set_run_status(run_id, str(cur.get("status") or "running"), suggested_actions=suggestions)
-            if run_id in self._run_streams:
-                run.put_event(_run_event(run_id, "ui.patch", **revision))
-
-        try:
-            loop.call_soon_threadsafe(_on_loop)
-        except RuntimeError:
-            logger.debug("ui.patch SSE loop closed for run=%s", run_id)
-
-    def _emit_delivery(delivery: dict[str, Any]) -> None:
-        def _on_loop() -> None:
-            if run_id in self._run_streams:
-                run.put_event(_run_event(run_id, "mobile.delivery", **delivery))
-
-        try:
-            loop.call_soon_threadsafe(_on_loop)
-        except RuntimeError:
-            logger.debug("mobile.delivery SSE loop closed for run=%s", run_id)
+    from gateway.platforms.api_server_device_bridge import bind_mobile_run_bridge
+    _profile_key, _device_broker, _emit_ui, _emit_delivery = bind_mobile_run_bridge(
+        self, run, loop, run_event=_run_event, terminal_statuses=TERMINAL_STATUSES
+    )
 
     try:
         # Shutdown landed between admission and the task's first tick: nothing to
@@ -1654,14 +1604,8 @@ async def _handle_get_run(self, request: web.Request, *, _api_server) -> web.Res
         return err
     if getattr(self.gateway_runner, "session_authority", None) is None:
         status = _standalone_approval_status(self, request, run_id, status, project=_api_server._approval_request_event)
-    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker, resolve_device_profile_key
-    profile_key = resolve_device_profile_key(self, _api_server._api_request_profile.get())
-    pending_dev = ensure_device_bridge_broker(self).list_pending(profile_key, run_id)
-    if pending_dev:
-        status = dict(status)
-        status["pending_device_requests"] = pending_dev
-        if status.get("status") == "running":
-            status["status"] = "waiting_for_device"
+    from gateway.platforms.api_server_device_bridge import attach_pending_device_requests
+    status = attach_pending_device_requests(self, _api_server._api_request_profile.get(), run_id, status)
     return web.json_response(status)
 
 

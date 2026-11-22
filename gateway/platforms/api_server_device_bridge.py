@@ -44,6 +44,96 @@ def resolve_device_profile_key(adapter, request_profile: str | None = None) -> s
     return str(pid) if pid else "default"
 
 
+def bind_mobile_run_bridge(
+    adapter,
+    run,
+    loop,
+    *,
+    run_event,
+    terminal_statuses: frozenset[str],
+):
+    """Register live SSE/status callbacks for device bridge, UI patches, and mobile deliveries."""
+    from tools.mobile_deliver import emit_run_progress
+
+    run_id = run.run_id
+    profile_key = resolve_device_profile_key(adapter, run.request_profile)
+    broker = ensure_device_bridge_broker(adapter)
+
+    def _device_cb(event_name: str, payload: dict[str, Any]) -> None:
+        event_fields = {k: v for k, v in payload.items() if k != "run_id"}
+
+        def _on_loop() -> None:
+            pending = broker.list_pending(profile_key, run_id)
+            cur_status = adapter._run_statuses.get(run_id, {}).get("status", "running")
+            if cur_status not in terminal_statuses | {"stopping"}:
+                next_status = "waiting_for_device" if pending else "running"
+                adapter._set_run_status(
+                    run_id,
+                    next_status,
+                    last_event=event_name,
+                    **({"pending_device_requests": pending} if pending else {}),
+                )
+                emit_run_progress(
+                    run_id=run_id,
+                    status=next_status,
+                    session_id=run.session_id,
+                    profile=profile_key,
+                    stage=event_name,
+                    pending_device=bool(pending),
+                )
+            run.put_event(run_event(run_id, event_name, **event_fields))
+
+        try:
+            loop.call_soon_threadsafe(_on_loop)
+        except RuntimeError:
+            logger.debug("device bridge SSE loop closed for run=%s event=%s", run_id, event_name)
+
+    broker.register_run_listener(profile_key, run_id, _device_cb)
+
+    def _emit_ui(revision: dict[str, Any]) -> None:
+        suggestions = revision.get("suggested_actions")
+
+        def _on_loop() -> None:
+            if suggestions:
+                cur = adapter._run_statuses.get(run_id, {})
+                if cur.get("status") not in terminal_statuses:
+                    adapter._set_run_status(
+                        run_id, str(cur.get("status") or "running"), suggested_actions=suggestions
+                    )
+            if run_id in adapter._run_streams:
+                run.put_event(run_event(run_id, "ui.patch", **revision))
+
+        try:
+            loop.call_soon_threadsafe(_on_loop)
+        except RuntimeError:
+            logger.debug("ui.patch SSE loop closed for run=%s", run_id)
+
+    def _emit_delivery(delivery: dict[str, Any]) -> None:
+        def _on_loop() -> None:
+            if run_id in adapter._run_streams:
+                run.put_event(run_event(run_id, "mobile.delivery", **delivery))
+
+        try:
+            loop.call_soon_threadsafe(_on_loop)
+        except RuntimeError:
+            logger.debug("mobile.delivery SSE loop closed for run=%s", run_id)
+
+    return profile_key, broker, _emit_ui, _emit_delivery
+
+
+def attach_pending_device_requests(adapter, request_profile: str | None, run_id: str, status: dict[str, Any]) -> dict[str, Any]:
+    """Overlay live pending device bridge requests onto a polled run status payload."""
+    profile_key = resolve_device_profile_key(adapter, request_profile)
+    pending_dev = ensure_device_bridge_broker(adapter).list_pending(profile_key, run_id)
+    if not pending_dev:
+        return status
+    merged = dict(status)
+    merged["pending_device_requests"] = pending_dev
+    if merged.get("status") == "running":
+        merged["status"] = "waiting_for_device"
+    return merged
+
+
 def _error_no_store(_openai_error, message: str, *, code: str, status: int) -> web.Response:
     return web.json_response(_openai_error(message, code=code), status=status, headers=_NO_STORE)
 
