@@ -5,19 +5,21 @@ scripts/. `skills_list` returns name/description only; `skill_view` returns full
 linked files. Sibling modules (skills_tool_setup / _plugin / _dedup) re-export here."""
 
 import contextvars
+import glob
 import json
 import logging
 import os
 import time
 from contextlib import contextmanager, suppress
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
 from agent.skill_utils import (
-    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, is_skill_support_path as _is_skill_support_path)
+    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, _hermes_metadata, is_skill_support_path as _is_skill_support_path,
+    skill_lookup_path_error)
 from tools.skills_tool_setup import (
     SkillReadinessStatus, _build_setup_note, _capture_required_environment_variables,
     _get_required_environment_variables, _is_env_var_persisted, _is_remote_env_backend)
@@ -74,15 +76,16 @@ def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
             _dir_tree_signature(os.path.join(root, name), sig, depth - 1)
 
 
-def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
+def _skills_scan_signature(roots, disabled) -> tuple:
     """Stat-based change signature over every directory the catalog walks; platform is read via
     ``agent.skill_utils.sys`` so test patches are honored."""
     from agent import skill_utils as _skill_utils
     platform = getattr(getattr(_skill_utils, "sys", None), "platform", "")
     sig: list = []
-    for d in dirs_to_scan:
-        _dir_tree_signature(str(d), sig)
-    return (tuple(sig), frozenset(disabled), platform)
+    for _tier, directory in roots:
+        _dir_tree_signature(str(directory), sig)
+    root_policy = tuple((tier, os.path.realpath(directory)) for tier, directory in roots)
+    return (tuple(sig), frozenset(disabled), platform, root_policy)
 
 
 HERMES_HOME = get_hermes_home()  # all skills live in ~/.hermes/skills/ (seeded from bundled)
@@ -99,20 +102,6 @@ def _skills_dir() -> Path:
 
 _secret_capture_callback = None
 _LOOKUP_HINT = "Use a skill name or relative path within the skills directory."
-
-
-def skill_lookup_path_error(name: str) -> Optional[str]:
-    """Error if lookup *name* could escape the search roots it is joined onto. Windows drive
-    paths are rejected too: their ``:`` would be misread as a plugin namespace separator."""
-    from tools.path_security import has_traversal_component
-    if not isinstance(name, str):
-        return "Skill name must be a string."
-    win = PureWindowsPath(candidate := name.strip())
-    if PurePosixPath(candidate).is_absolute() or win.is_absolute() or win.drive:
-        return "Skill name must be a relative path within the skills directory."
-    if has_traversal_component(candidate):
-        return "Skill name cannot contain '..' path traversal components."
-    return None
 
 
 def load_env() -> dict[str, str]:
@@ -183,6 +172,32 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     return None
 
 
+def _skill_description(frontmatter: dict, body: str) -> str:
+    description = frontmatter.get("description")
+    if isinstance(description, str) and description:
+        return description
+    return next((line for line in map(str.strip, body.splitlines()) if line and not line.startswith("#")), "")
+
+
+def _optional_view_metadata(frontmatter: dict) -> dict:
+    fields = {}
+    if isinstance(compatibility := frontmatter.get("compatibility"), str) and compatibility:
+        fields["compatibility"] = compatibility
+    if isinstance(metadata := frontmatter.get("metadata"), dict):
+        public = {}
+        for key, value in metadata.items():
+            if not isinstance(key, str) or (key == "hermes" and not isinstance(value, dict)):
+                continue
+            try:
+                json.dumps(value, allow_nan=False)
+            except (TypeError, ValueError, RecursionError):
+                # YAML also permits dates, sets and cyclic aliases. The view exposes JSON metadata.
+                continue
+            public[key] = value
+        fields["metadata"] = public
+    return fields
+
+
 def _parse_tags(tags_value) -> list[str]:
     """Tags from frontmatter: a parsed list, "[a, b]", or "a, b"."""
     if not tags_value:
@@ -226,7 +241,9 @@ def skill_search_dirs() -> tuple[list[tuple[int, Path]], Path]:
     return roots, active_skills_dir
 
 
-def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False) -> list[dict[str, Any]]:
+def _skill_catalog(
+    *, skip_disabled: bool = False, include_hidden: bool = False, platform: str | None = None
+) -> list[dict[str, Any]]:
     """Every scanned skill resolved by ``agent.skill_utils.resolve_skill_catalog`` (status /
     load_name / tier / path), visible ones only unless *include_hidden*; cached per session.
     Resolution runs over ALL files first — skill_view ignores platform/disabled gates when
@@ -234,9 +251,9 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
     from agent.skill_utils import (
         TIER_PROJECT, is_disabled_entry, iter_project_skill_files, iter_skill_index_files, resolve_skill_catalog)
     cache_key = ("with_disabled" if skip_disabled else "filtered", include_hidden)
-    disabled = set() if skip_disabled else _get_disabled_skill_names()
+    disabled = set() if skip_disabled else _get_disabled_skill_names(platform)
     roots, _ = skill_search_dirs()
-    signature = _skills_scan_signature([d for _t, d in roots], disabled)
+    signature = _skills_scan_signature(roots, disabled)
     now = time.monotonic()
     cached = _SKILLS_CACHE.get(cache_key)
     if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILLS_CACHE_TTL_SECONDS:
@@ -250,14 +267,12 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
             try:
-                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
-                description = frontmatter.get("description", "")
-                if not description:  # first non-heading body line (a null value stays null)
-                    description = next((ln for ln in map(str.strip, body.strip().split("\n"))
-                                        if ln and not ln.startswith("#")), description)
+                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md))
+                name = frontmatter.get("name", skill_md.parent.name)
+                if not isinstance(name, str) or not name.strip():
+                    continue
                 scanned.append({
-                    "name": frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH],
-                    "description": _truncate_description(description),
+                    "name": name, "description": _truncate_description(_skill_description(frontmatter, body)),
                     "category": _get_category_from_path(skill_md), "tier": tier, "root": scan_dir,
                     "path": skill_md, "visible": bool(skill_matches_platform(frontmatter)
                                                       and skill_matches_environment(frontmatter)
@@ -266,7 +281,7 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
                 logger.debug("Skipping skill at %s: failed to parse: %s", skill_md, e, exc_info=True)
-    skills = [s for s in resolve_skill_catalog(scanned)
+    skills = [s for s in resolve_skill_catalog(scanned, roots=roots)
               if (s.pop("visible") or include_hidden) and not is_disabled_entry(s, disabled)]
     # Keyed by the signature computed BEFORE the scan: a write racing the scan changes the
     # signature, so the next call re-scans instead of serving a torn result.
@@ -274,12 +289,13 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
     return [dict(s) for s in skills]
 
 
-def find_all_skills(*, skip_disabled: bool = False) -> list[dict[str, Any]]:
+def find_all_skills(*, skip_disabled: bool = False, platform: str | None = None) -> list[dict[str, Any]]:
     """Loadable skills (name, description, category): ``name`` is what skill_view() accepts —
     the declared name, or the exact relative path for a same-tier duplicate. Shadowed and
-    unloadable copies are left out. ``skip_disabled=True`` ignores disabled state (config UI)."""
+    unloadable copies are left out. Set ``platform`` to apply its disabled list outside a session.
+    ``skip_disabled=True`` ignores disabled state (config UI)."""
     return [{"name": s["load_name"], "description": s["description"], "category": s["category"]}
-            for s in _skill_catalog(skip_disabled=skip_disabled) if s["load_name"]]
+            for s in _skill_catalog(skip_disabled=skip_disabled, platform=platform) if s["load_name"]]
 
 
 def sort_skills(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -435,10 +451,10 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
             candidates.append((sd, smd))
 
     def _record_direct(direct_path: Path, search_root: Path) -> None:  # "mlops/axolotl" / "axolotl" or its flat .md sibling
-        flat = direct_path.with_suffix(".md")
+        flat = direct_path if direct_path.suffix == ".md" else direct_path.parent / (direct_path.name + ".md")
         if not _is_skill_support_path(direct_path) and direct_path.is_dir() and (direct_path / "SKILL.md").exists():
             _record(direct_path, direct_path / "SKILL.md")
-        elif (flat.exists() and not _is_skill_support_path(flat)
+        elif (flat.is_file() and not _is_skill_support_path(flat)
               and not _is_package_owned_markdown(flat, search_root)):
             _record(None, flat)
 
@@ -449,12 +465,12 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
         # exposes the frontmatter name, so skill_view(name) must accept it too.
         for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
             if (found_skill_md.parent.name == name
-                    or _safe_frontmatter(found_skill_md).get("name") == name):
+                    or _safe_frontmatter(found_skill_md).get("name") == name.strip()):
                 _record(found_skill_md.parent, found_skill_md)
         # Legacy flat <name>.md anywhere under the dir. Markdown owned by an ancestor
         # directory skill loads through file_path and must not shadow a real skill.
-        for found_md in search_dir.rglob(f"{name}.md"):
-            if (found_md.name != "SKILL.md" and not _is_skill_support_path(found_md)
+        for found_md in search_dir.rglob(glob.escape(name) + ".md"):
+            if (found_md.name != "SKILL.md" and found_md.is_file() and not _is_skill_support_path(found_md)
                     and not _is_package_owned_markdown(found_md, search_dir)):
                 _record(None, found_md)
     return candidates
@@ -661,7 +677,7 @@ def skill_view(
         except Exception as e:
             return _fail(f"Failed to read skill '{name}': {e}")
         _log_security_warnings(name, skill_md, content, all_dirs, active_skills_dir)
-        frontmatter = _safe_frontmatter(content=content)
+        frontmatter, body = _parse_frontmatter(content)
         if not skill_matches_platform(frontmatter):
             return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
         resolved_name = frontmatter.get("name", skill_md.parent.name)
@@ -676,8 +692,7 @@ def skill_view(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
                 hint="Use a relative path within the skill directory")
         # tags/related_skills: metadata.hermes.* (agentskills.io) first, then top-level.
-        metadata = frontmatter.get("metadata")
-        hermes_meta = (metadata.get("hermes", {}) or {}) if isinstance(metadata, dict) else {}
+        hermes_meta = _hermes_metadata(frontmatter)
         tags, related_skills = (
             _parse_tags(hermes_meta.get(k) or frontmatter.get(k, "")) for k in ("tags", "related_skills"))
         linked_files = _skill_linked_files(skill_dir)
@@ -717,7 +732,7 @@ def skill_view(
                 )
 
         result = {
-            "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
+            "success": True, "name": skill_name, "description": _skill_description(frontmatter, body),
             "tags": tags, "related_skills": related_skills, "content": rendered_content,
             "path": rel_path, "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
@@ -727,10 +742,7 @@ def skill_view(
         if deps_note:
             result["deps_note"] = deps_note
         _mark_background_review_read(skill_md)
-        if frontmatter.get("compatibility"):  # agentskills.io optional fields
-            result["compatibility"] = frontmatter["compatibility"]
-        if isinstance(metadata, dict):
-            result["metadata"] = metadata
+        result.update(_optional_view_metadata(frontmatter))
         return _json(result)
     except Exception as e:
         return tool_error(str(e), success=False)

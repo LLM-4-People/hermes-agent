@@ -50,6 +50,8 @@ scripts/run_tests.sh \
   tests/gateway/test_session_info.py \
   tests/persistence_sqlite/conversation/test_photo_previews.py \
   tests/gateway/test_hygiene_provider_identity.py \
+  tests/gateway/api_server/test_skills.py \
+  tests/tools/test_skills_tool_discovery_cache.py \
   tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_signal.py \
   tests/gateway/test_signal_inbound_attachments.py \

@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import threading
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import (
@@ -88,6 +88,8 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             if ":" in line:
                 key, value = line.split(":", 1)
                 frontmatter[key.strip()] = value.strip()
+    if isinstance(frontmatter.get("name"), str):
+        frontmatter["name"] = frontmatter["name"].strip()
     return frontmatter, body
 
 
@@ -470,12 +472,67 @@ def is_disabled_entry(entry: dict[str, Any], disabled: set[str]) -> bool:
     return not disabled.isdisjoint({str(entry["name"]), entry.get("load_name")} - {None})
 
 
-def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _catalog_legacy_candidates(roots, aliases):
+    """Legacy flat Markdown can claim a short name or a relative path suffix in skill_view.
+    Collect only aliases a directory skill could advertise, in one pass over the roots."""
+    from collections import defaultdict
+    candidates = defaultdict(list)
+    if not aliases:
+        return candidates
+    filenames = {Path(alias).name + ".md" for alias in aliases}
+    filenames.update(Path(alias).name for alias in aliases if alias.endswith(".md"))
+    for tier, root in roots:
+        for parent, subdirs, files in os.walk(root):
+            directory = Path(parent)
+            if directory != root and "SKILL.md" in files:
+                # All Markdown below a directory skill belongs to that package.
+                subdirs.clear()
+                continue
+            for filename in files:
+                if filename == "SKILL.md" or filename not in filenames:
+                    continue
+                path = directory / filename
+                relative = path.relative_to(root)
+                candidate = (tier, str(root), skill_candidate_rank(path, root), path)
+                if relative.as_posix() in aliases:  # explicit path including its .md extension
+                    candidates[relative.as_posix()].append(candidate)
+                parts = relative.with_suffix("").parts
+                for start in range(len(parts)):
+                    alias = "/".join(parts[start:])
+                    if alias in aliases:
+                        candidates[alias].append(candidate)
+    return candidates
+
+
+def skill_lookup_path_error(name: str) -> Optional[str]:
+    """Error if lookup *name* could escape the search roots it is joined onto. Windows drive
+    paths are rejected too: their ``:`` would be misread as a plugin namespace separator."""
+    from tools.path_security import has_traversal_component
+    if not isinstance(name, str):
+        return "Skill name must be a string."
+    win = PureWindowsPath(candidate := name.strip())
+    if PurePosixPath(candidate).is_absolute() or win.is_absolute() or win.drive:
+        return "Skill name must be a relative path within the skills directory."
+    if has_traversal_component(candidate):
+        return "Skill name cannot contain '..' path traversal components."
+    return None
+
+
+# Local locators must round-trip on a single JSON line without triggering plugin dispatch.
+# YAML can preserve UTF-16 surrogate escapes that JSON readers combine into a different name.
+_INVALID_LOCAL_LOCATOR_CHAR = re.compile(r"[:\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
+
+
+def _is_local_catalog_locator(alias: str) -> bool:
+    return not _INVALID_LOCAL_LOCATOR_CHAR.search(alias) and skill_lookup_path_error(alias) is None
+
+
+def resolve_skill_catalog(entries: list[dict[str, Any]], *, roots=()) -> list[dict[str, Any]]:
     """Copies of scanned skills (each with ``name``, ``tier``, ``root`` and ``path`` = its SKILL.md)
     annotated with what skill_view() resolves, using its aliases (declared name, directory name, path
     relative to the root) and :func:`pick_skill_candidate`. Adds ``relative_path`` and ``status``:
-    ``unique`` (``load_name`` = name), ``ambiguous`` (``load_name`` = the exact relative path, or None
-    when even that is shared) or ``shadowed`` (a higher tier owns the name: hidden, warned once)."""
+    ``unique``, ``ambiguous`` or ``shadowed``. The load name is a single-line, uniquely owned
+    declared name or relative path. Entries without an offerable identifier have no load name."""
     out = [dict(e) for e in entries]
     owners: dict[str, list[int]] = {}
     for i, e in enumerate(out):
@@ -483,12 +540,17 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
         e["relative_path"] = skill_dir.relative_to(e["root"]).as_posix()
         for alias in {str(e["name"]), skill_dir.name, e["relative_path"]}:
             owners.setdefault(alias, []).append(i)
+    legacy = _catalog_legacy_candidates(roots, owners)
     winner: dict[str, Optional[int]] = {}
     for alias, idxs in owners.items():
-        won, _ = pick_skill_candidate([
+        candidates = [
             (out[j]["tier"], str(out[j]["root"]), skill_candidate_rank(out[j]["path"], out[j]["root"]), out[j]["path"])
-            for j in idxs])
-        winner[alias] = None if won is None else idxs[won]
+            for j in idxs]
+        flat = legacy.get(alias, ())
+        won, _ = pick_skill_candidate([*candidates, *flat])
+        # A winning legacy file owns the alias but has no directory-skill catalog row.
+        row_ids = idxs + [-1] * len(flat)
+        winner[alias] = row_ids[won] if won is not None else None
     for i, e in enumerate(out):
         name, rel = str(e["name"]), e["relative_path"]
         higher = [j for j in owners[name] if out[j]["tier"] < e["tier"]]
@@ -501,10 +563,12 @@ def resolve_skill_catalog(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
                 if not any(provably_same_skill([e["path"], out[j]["path"]]) for j in higher):
                     logger.warning("Skill '%s' at %s is shadowed by a higher-precedence copy "
                                    "(project > local > create_dir > external_dirs)", name, e["path"])
-        elif winner[name] == i:
-            e.update(status="unique", load_name=name)
         else:
-            e.update(status="ambiguous", load_name=rel if winner[rel] == i else None)
+            # Locators are single-line identifiers. Fall back to the owned relative path
+            # when a YAML block scalar or directory name contains a control character.
+            load_name = next((alias for alias in (name, rel) if winner[alias] == i
+                              and _is_local_catalog_locator(alias)), None)
+            e.update(status="unique" if winner[name] == i else "ambiguous", load_name=load_name)
     return out
 
 

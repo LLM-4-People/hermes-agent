@@ -817,15 +817,16 @@ curl -N -X POST http://localhost:8642/api/sessions/$ID/chat/stream \
 ```bash
 curl http://localhost:8642/v1/skills \
   -H "Authorization: Bearer $API_SERVER_KEY"
-# → [{"name": "github-pr-workflow", "description": "...", "category": "..."}, ...]
+# → {"object": "list", "data": [{"name": "github-pr-workflow", "description": "...", "category": "github"}]}
 
 curl http://localhost:8642/v1/toolsets \
   -H "Authorization: Bearer $API_SERVER_KEY"
-# → [{"name": "core", "label": "...", "description": "...", "enabled": true,
-#     "configured": true, "tools": ["read_file", "write_file", ...]}, ...]
+# → {"object": "list", "platform": "api_server", "data": [
+#      {"name": "core", "label": "...", "description": "...", "enabled": true,
+#       "configured": true, "tools": ["read_file", "write_file"]}]}
 ```
 
-`/v1/skills` returns the same metadata the skills hub uses internally. `/v1/toolsets` returns toolsets resolved for the `api_server` platform with the concrete `tools` list each one expands to. Both are advertised under `endpoints.*` in `/v1/capabilities`.
+`/v1/skills` lists enabled, loadable skills from the active profile’s skill catalog, ordered by category and name. Global and `api_server` settings determine which skills are enabled. Each `name` is a locator accepted by `skill_view`. Uncategorized skills have a null `category`, and an empty catalog returns an empty `data` array. `/v1/toolsets` returns toolsets resolved for the `api_server` platform with the concrete `tools` list each one expands to. Both are advertised under `endpoints.*` in `/v1/capabilities`.
 
 ## Long-term memory scoping (`X-Hermes-Session-Key`)
 
