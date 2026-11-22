@@ -327,8 +327,29 @@ def is_nix_install_method(method: str) -> bool:
     return method == "nix" or method in _NIX_MANAGED_SYSTEMS
 
 
+_DEFAULT_DOCKER_IMAGE = "nousresearch/hermes-agent"
+
+
+def docker_image_name() -> str:
+    """Registry image this container was built from, per the baked provenance marker.
+
+    Downstream builds pass ``HERMES_IMAGE_NAME`` so ``hermes update`` points at the image actually
+    running instead of upstream's. Source installs (no marker) keep the published upstream name.
+    Never raises: a malformed marker is not permission to mutate the image, but it also must not
+    break the update guidance.
+    """
+    try:
+        from hermes_cli.image_provenance import read_image_provenance
+
+        provenance = read_image_provenance()
+        if provenance is not None and provenance.valid and provenance.image:
+            return provenance.image
+    except Exception:
+        logger.debug("image provenance unavailable for update guidance", exc_info=True)
+    return _DEFAULT_DOCKER_IMAGE
+
+
 _UPDATE_COMMAND_BY_METHOD = {
-    "docker": "docker pull nousresearch/hermes-agent:latest",
     "apt": "pkg upgrade hermes-agent",  # "apt" == Termux APT by contract; uses Termux's `pkg`.
 }
 
@@ -337,6 +358,8 @@ def recommended_update_command_for_method(method: str) -> str:
     """Return the update command or guidance for a given install method."""
     if is_nix_install_method(method):
         return _NIX_UPDATE_MSG
+    if method == "docker":
+        return f"docker pull {docker_image_name()}:latest"
     return _UPDATE_COMMAND_BY_METHOD.get(method, "hermes update")
 
 
@@ -351,26 +374,26 @@ def recommended_update_command() -> str:
 # Shared by ``cmd_update`` and ``_cmd_update_check`` (hermes_cli/main.py) so the wording never
 # forks. The published image excludes ``.git``, so the git update path can never succeed there
 # and the generic "reinstall via install.sh" fallback would install a NEW host-side Hermes.
-_DOCKER_UPDATE_MESSAGE = """\
+_DOCKER_UPDATE_MESSAGE_TEMPLATE = """\
 ✗ ``hermes update`` doesn't apply inside the Docker container.
 
-Hermes Agent runs as a published image (nousresearch/hermes-agent), not a
+Hermes Agent runs as a published image ({image}), not a
 git checkout — the container has no working tree to pull into.  Update by
 pulling a fresh image and restarting your container instead:
 
-  docker pull nousresearch/hermes-agent:latest
+  docker pull {image}:latest
   # then restart whatever started the container, e.g.:
   docker compose up -d --force-recreate hermes-agent
   # or, for ad-hoc runs, exit the current container and `docker run` again
 
 Verify the new version after restart:
-  docker run --rm nousresearch/hermes-agent:latest --version
+  docker run --rm {image}:latest --version
 
 Notes:
   • If you pinned a specific tag (e.g. ``:v0.14.0``) the ``:latest`` tag
     won't move your container — pull the newer tag you actually want, or
-    switch to ``:latest`` / ``:main`` for rolling updates.  See available
-    tags at https://hub.docker.com/r/nousresearch/hermes-agent/tags
+    switch to ``:latest`` / ``:main`` for rolling updates.  See the tags
+    published for ``{image}``.
   • On a ``-desktop`` tag (the one carrying Bot Screen)?  Keep the suffix:
     the unsuffixed image has no Xvnc/Xfce and no sudo to add them, so
     pulling it stops the bots' screens from starting.
@@ -383,7 +406,7 @@ Notes:
 
 def format_docker_update_message() -> str:
     """Return the user-facing message for ``hermes update`` inside Docker."""
-    return _DOCKER_UPDATE_MESSAGE
+    return _DOCKER_UPDATE_MESSAGE_TEMPLATE.format(image=docker_image_name())
 
 
 def format_managed_message(action: str = "modify this Hermes installation") -> str:
@@ -602,7 +625,8 @@ from hermes_cli.config_providers import (
     get_custom_provider_extra_headers, get_custom_provider_model_capability,
     get_custom_provider_session_affinity_header,
     get_custom_provider_tls_settings, is_provider_enabled, normalize_extra_headers,
-    providers_dict_to_custom_providers, stringify_provider_map)
+    normalize_proxy_headers, providers_dict_to_custom_providers, resolve_provider_extra_headers,
+    stringify_provider_map)
 # Back-compat re-exports — :mod:`hermes_cli.personality` owns personality/overlay semantics.
 from hermes_cli.personality import (
     NEUTRAL_PERSONALITY_NAMES as _NEUTRAL_PERSONALITY_NAMES,
@@ -970,12 +994,9 @@ _EXTRA_KNOWN_ROOT_KEYS = {
 }
 _KNOWN_ROOT_KEYS = frozenset(DEFAULT_CONFIG.keys()) | _EXTRA_KNOWN_ROOT_KEYS
 
-# Valid fields inside a custom_providers list entry (key_env is read at runtime by
-# runtime_provider.py and auxiliary_client.py).
-_VALID_CUSTOM_PROVIDER_FIELDS = {
-    "name", "base_url", "api_key", "api_mode", "model", "models",
-    "context_length", "rate_limit_delay", "extra_body",
-    "ssl_ca_cert", "ssl_verify", "key_env", "catalog_provider"}
+# Valid fields inside a custom_providers list entry. The provider normalizer's allowlist is the ONE
+# owner; this alias keeps older callers (and tests) asking the same question.
+_VALID_CUSTOM_PROVIDER_FIELDS = frozenset(_KNOWN_PROVIDER_KEYS)
 
 # Fields that look like they should be inside custom_providers, not at root
 _CUSTOM_PROVIDER_LIKE_FIELDS = {"base_url", "api_key", "rate_limit_delay", "api_mode"}

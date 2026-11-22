@@ -180,10 +180,14 @@ def _custom_provider_model_matches(agent_model: str, entry: dict[str, Any]) -> b
 def _custom_provider_extra_body_for_agent(
     *, provider: str, model: str, base_url: str, custom_providers: list[dict[str, Any]]
 ) -> Optional[dict[str, Any]]:
+    from hermes_cli.providers import custom_provider_aliases
+
     provider_norm = (provider or "").strip().lower()
-    if provider_norm != "custom" and not provider_norm.startswith("custom:"):
+    if not provider_norm or provider_norm == "auto":
         return None
-    provider_key_filter = provider_norm.partition(":")[2].strip()
+    # Accept both ``custom:<slug>`` and the bare configured name/key. ``custom`` alone is the
+    # anonymous endpoint and keeps the legacy URL-first scan.
+    wanted = custom_provider_aliases(provider_norm)
     target_url = _normalized_custom_base_url(base_url)
     if not target_url:
         return None
@@ -192,11 +196,9 @@ def _custom_provider_extra_body_for_agent(
     for entry in custom_providers or []:
         if not isinstance(entry, dict):
             continue
-        entry_keys = {
-            str(entry.get("provider_key", "") or "").strip().lower(),
-            str(entry.get("name", "") or "").strip().lower(),
-        }
-        if provider_key_filter and provider_key_filter not in entry_keys:
+        if provider_norm != "custom" and not (
+            wanted & custom_provider_aliases(entry.get("name", ""), entry.get("provider_key", ""))
+        ):
             continue
         if _normalized_custom_base_url(entry.get("base_url")) != target_url:
             continue
@@ -212,8 +214,12 @@ def _custom_provider_extra_body_for_agent(
 
 
 def _merge_custom_provider_extra_body(agent, custom_providers: list[dict[str, Any]]) -> None:
+    from hermes_cli.providers import live_provider_identity
+
     extra_body = _custom_provider_extra_body_for_agent(
-        provider=agent.provider, model=agent.model, base_url=agent.base_url,
+        provider=live_provider_identity(
+            agent.provider, getattr(agent, "requested_provider", "")),
+        model=agent.model, base_url=agent.base_url,
         custom_providers=custom_providers,
     )
     if not extra_body:
@@ -680,7 +686,9 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # cause 401/403 on their endpoints. See #1739.
     from agent.anthropic_credentials import anthropic_route_is_oauth
     agent._is_anthropic_oauth = anthropic_route_is_oauth(base_url, effective_key, provider=agent.provider)
-    agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+    agent._anthropic_client = build_anthropic_client(
+        effective_key, base_url, timeout=_provider_timeout,
+        provider=str(getattr(agent, "requested_provider", "") or agent.provider or ""))
     if not agent.quiet_mode:
         print(f"🤖 AI Agent initialized with model: {agent.model} (Anthropic native)")
         _print_key_banner(effective_key, "token")
@@ -878,10 +886,14 @@ def _apply_openai_header_policy(agent, client_kwargs: dict[str, Any]) -> None:
         )
         _cp_entries = get_compatible_custom_providers(load_config())
         _cp_base_url = str(client_kwargs.get("base_url") or agent.base_url or "")
-        apply_custom_provider_tls_to_client_kwargs(client_kwargs, _cp_base_url, _cp_entries)
+        # Route metadata is provider-scoped: several providers may share one proxy endpoint.
+        _cp_provider = str(getattr(agent, "requested_provider", "") or getattr(agent, "provider", "") or "")
+        apply_custom_provider_tls_to_client_kwargs(
+            client_kwargs, _cp_base_url, _cp_entries, provider=_cp_provider)
         # Per-provider extra_headers applied last so the most specific config level wins.
         # SECURITY: values may carry credentials — never log them.
-        apply_custom_provider_extra_headers_to_client_kwargs(client_kwargs, _cp_base_url, _cp_entries)
+        apply_custom_provider_extra_headers_to_client_kwargs(
+            client_kwargs, _cp_base_url, _cp_entries, provider=_cp_provider)
     except Exception:
         logger.debug("custom-provider TLS resolution skipped", exc_info=True)
 
@@ -1047,14 +1059,17 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         prompt_preview = agent.ephemeral_system_prompt[:60] + "..." if len(agent.ephemeral_system_prompt) > 60 else agent.ephemeral_system_prompt
         print(f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)")
     if agent._use_prompt_caching:
-        if agent._use_native_cache_layout and agent.provider == "anthropic":
+        from hermes_cli.providers import live_provider_identity
+        _live_provider = live_provider_identity(
+            agent.provider, getattr(agent, "requested_provider", ""))
+        if agent._use_native_cache_layout and _live_provider == "anthropic":
             source = "native Anthropic"
         elif agent._use_native_cache_layout:
             source = "Anthropic-compatible endpoint"
         else:
             source = "Claude via OpenRouter"
         from agent.prompt_caching import effective_cache_ttl
-        ttl = effective_cache_ttl(agent._cache_ttl, provider=agent.provider, model=agent.model,
+        ttl = effective_cache_ttl(agent._cache_ttl, provider=_live_provider, model=agent.model,
                                   base_url=agent.base_url or "", auto=agent._cache_ttl_auto)
         print(f"💾 Prompt caching: ENABLED ({source}, {ttl} TTL)")
 
@@ -1707,7 +1722,8 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
         with suppress(Exception):
             from hermes_cli.config import get_custom_provider_context_length
             _cp_ctx_resolved = get_custom_provider_context_length(
-                model=agent.model, base_url=agent.base_url, custom_providers=_custom_providers
+                model=agent.model, base_url=agent.base_url, custom_providers=_custom_providers,
+                provider=str(getattr(agent, "requested_provider", "") or agent.provider or ""),
             )
             if _cp_ctx_resolved:
                 _config_context_length = int(_cp_ctx_resolved)
@@ -1804,6 +1820,10 @@ def _compressor_max_tokens(agent):
 
 def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_context_length, session_db,
                           persistence=None):
+    from hermes_cli.providers import live_provider_identity
+
+    _live_provider = live_provider_identity(
+        agent.provider, getattr(agent, "requested_provider", ""))
     _selected_engine = _select_context_engine(_agent_cfg)
     if _selected_engine is not None:
         agent.context_compressor = _selected_engine
@@ -1816,7 +1836,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
         from agent.model_metadata import get_model_context_length
         _plugin_ctx_len = get_model_context_length(
             agent.model, base_url=agent.base_url, api_key=getattr(agent, "api_key", ""),
-            config_context_length=_effective_context_length, provider=agent.provider,
+            config_context_length=_effective_context_length, provider=_live_provider,
             custom_providers=_custom_providers,
         )
         # Per-model overrides BEFORE the initial update_model() so the first threshold
@@ -1825,7 +1845,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             agent.context_compressor.model_thresholds = cs.model_thresholds
         agent.context_compressor.update_model(
             model=agent.model, context_length=_plugin_ctx_len, base_url=agent.base_url,
-            api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
+            api_key=getattr(agent, "api_key", ""), provider=_live_provider, api_mode=agent.api_mode,
         )
         if not agent.quiet_mode:
             _ra().logger.info("Using context engine: %s", _selected_engine.name)
@@ -1835,7 +1855,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             protect_last_n=cs.protect_last, summary_target_ratio=cs.target_ratio,
             summary_model_override=None, quiet_mode=agent.quiet_mode, base_url=agent.base_url,
             api_key=getattr(agent, "api_key", ""), config_context_length=_effective_context_length,
-            provider=agent.provider, api_mode=agent.api_mode,
+            provider=_live_provider, api_mode=agent.api_mode,
             abort_on_summary_failure=cs.abort_on_summary_failure,
             max_tokens=_compressor_max_tokens(agent), model_thresholds=cs.model_thresholds,
             threshold_tokens_cap=cs.threshold_tokens,
@@ -1881,7 +1901,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
     agent.codex_responses_compact_threshold = cs.codex_responses_compact_threshold
     from agent.native_compaction import resolve_native_compaction_capabilities
     agent.runtime_capabilities = resolve_native_compaction_capabilities(
-        model=agent.model, base_url=agent.base_url, provider=agent.provider,
+        model=agent.model, base_url=agent.base_url, provider=_live_provider,
         is_codex_backend=(agent.provider or "").strip().lower() == "openai-codex",
     )
     agent.max_compression_attempts = cs.max_attempts

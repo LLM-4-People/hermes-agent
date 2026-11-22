@@ -1479,5 +1479,5 @@ def _saved_entry_on_other_origin(name: str, base_url: str) -> bool:
 def _extra_headers_from_config(entry: Any) -> dict[str, str]:
     if not isinstance(entry, dict):
         return {}
-    from hermes_cli.config import normalize_extra_headers
-    return normalize_extra_headers(entry.get("extra_headers"))
+    from hermes_cli.config import resolve_provider_extra_headers
+    return resolve_provider_extra_headers(entry)

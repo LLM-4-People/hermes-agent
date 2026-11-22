@@ -454,7 +454,7 @@ def test_discovered_api_key_client_classifies_on_its_concrete_provider(monkeypat
     none = lambda *_a, **_k: (None, None)
     with (
         patch.multiple(aux, _try_openrouter=none, _try_nous=none, _try_custom_endpoint=none),
-        patch("agent.auxiliary_client._openai_http_client_kwargs", lambda _url, async_mode=False: {
+        patch("agent.auxiliary_client._openai_http_client_kwargs", lambda _url, async_mode=False, **_kw: {
             "http_client": (httpx.AsyncClient if async_mode else httpx.Client)(transport=transport)}),
         patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("auto", None, None, None, None)),
         patch("agent.auxiliary_client._transient_retry_count", return_value=0),
@@ -577,7 +577,7 @@ def test_a_key_cooled_down_for_the_model_is_not_peeked_after_a_sibling_selected_
     transport = httpx.MockTransport(lambda r: sent.append(r.headers["authorization"]) or httpx.Response(200, json=ok))
     monkeypatch.setattr(aux, "_client_cache", {})
     with (patch("agent.auxiliary_client.load_pool", lambda _p: pool),
-          patch("agent.auxiliary_client._openai_http_client_kwargs", lambda _url, async_mode=False: {
+          patch("agent.auxiliary_client._openai_http_client_kwargs", lambda _url, async_mode=False, **_kw: {
               "http_client": (httpx.AsyncClient if async_mode else httpx.Client)(transport=transport)}),
           patch("agent.auxiliary_client._validate_llm_response", side_effect=lambda resp, _task, **_kw: resp)):
         call = (async_call_llm if is_async else call_llm)(provider="openrouter", model="openai/gpt-gated",

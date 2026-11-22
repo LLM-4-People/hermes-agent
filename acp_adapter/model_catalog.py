@@ -64,7 +64,8 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
         models_cfg = entry.get("models")
         declared = [m for m in dict.fromkeys([field("model"), *_declared_model_ids(models_cfg)]) if m]
 
-        native_headers = entry.get("extra_headers") or None
+        from hermes_cli.config import resolve_provider_extra_headers
+        native_headers = resolve_provider_extra_headers(entry) or None
         is_ollama_key = provider_key.lower() in {"ollama", "custom:ollama"}
         is_native_ollama = should_use_ollama_native_catalog(
             provider_key if is_ollama_key else "custom", base_url, headers=native_headers

@@ -2437,7 +2437,7 @@ display:
   spinner_token_flow: true # CLI only: append live cumulative turn tokens to the spinner timer
   runtime_footer:         # Gateway: append a runtime-context footer to final replies
     enabled: false
-    fields: ["model", "context_pct", "cwd"]
+    fields: ["model", "provider", "context_pct", "cwd"]
   status_bar:             # CLI/TUI: choose which status-bar fields are visible
     fields: []            # empty = show the default set; see below
   file_mutation_verifier: true    # Append an advisory footer when write_file/patch calls failed this turn
@@ -2568,13 +2568,13 @@ Notes:
 
 ### Runtime-metadata footer (gateway only)
 
-When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
+When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, provider, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
 
 ```yaml
 display:
   runtime_footer:
     enabled: true
-    fields: ["model", "context_pct", "cwd"]   # order shown; drop any to hide
+    fields: ["model", "provider", "context_pct", "cwd"]   # order shown; drop any to hide
 ```
 
 Supported fields:
@@ -2582,12 +2582,13 @@ Supported fields:
 | Field | Renders | Example |
 | --- | --- | --- |
 | `model` | Bare model id, vendor prefix dropped | `gpt-5.4` |
+| `provider` | Provider label; the configured entry name for a named custom provider | `Acme`, `Beta`, `OpenRouter` |
 | `context_pct` | Last-call context occupancy as a percent | `5%` |
 | `latency` | Wall-clock duration of the turn | `22s`, `1m05s` |
 | `served_model` | The model that actually answered, when it differs from the one you configured: the deployment a routing proxy reported in its `x-litellm-model-id` (or `x-litellm-model-api-base`) response header, or the fallback model Hermes switched to for the turn | `hermes-router → gpt-4o-2024-11-20` |
 | `cwd` | Home-relative working directory | `~` |
 
-The default field set is `["model", "context_pct", "cwd"]`. `latency` and `served_model` are opt-in — add them to `fields` to use them. `served_model` renders nothing when the served model is the configured one (or when the proxy sends no such header), so behind a routing proxy or an active fallback it is the field that makes the switch visible. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
+The default field set is `["model", "provider", "context_pct", "cwd"]`. `latency` and `served_model` are opt-in — add them to `fields` to use them. `served_model` renders nothing when the served model is the configured one (or when the proxy sends no such header), so behind a routing proxy or an active fallback it is the field that makes the switch visible. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
 
 The `/footer` slash command toggles this at runtime in any session.
 

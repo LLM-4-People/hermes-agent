@@ -204,6 +204,19 @@ providers:
 
 Header values routinely carry credentials — Hermes never logs them. `extra_headers` applies to OpenAI-compatible routes and to `anthropic_messages` routes (the main client, `/model` switches, rebuilds and auxiliary clients alike); `bedrock_converse` does not use it. A relay behind a WAF that rejects the SDK's default `User-Agent` (403 "Your request was blocked" or a browser-challenge page) is the typical reason to set one — Hermes reports such a 403 as a firewall/CDN block rather than an API-key rejection.
 
+**`proxy`** — a provider-scoped block for gateways that select an upstream from a request header. `proxy.base_url` is the upstream the proxy should route to; it is sent as `X-Proxy-Base-URL` unless `proxy.header` names a different header. `proxy.headers` adds further routing headers. Explicit `extra_headers` override both. Several providers may share one `api` URL; Hermes resolves their metadata by provider identity, so each sends only its own routing header:
+
+```yaml
+providers:
+  beta:
+    api: https://proxy.example.com/v1
+    key_env: BETA_PROXY_KEY
+    proxy:
+      base_url: https://upstream-b.example.com/v1
+```
+
+This is distinct from the top-level `proxy:` egress section.
+
 **`session_affinity_header`** — the NAME of a header that carries Hermes' conversation id on every request to that provider (main turn on `chat_completions`, `anthropic_messages` and `codex_responses`, plus auxiliary calls such as compression and titles). Off unless set — Hermes never sends a session identifier to an endpoint that did not ask for one. Session-aware proxies fronting a stateful backend (LiteLLM's `x-litellm-session-id`, self-hosted Claude/OpenAI gateways) otherwise have nothing to correlate an agent loop on and treat nearly every request as a new conversation, re-sending the whole history upstream on each turn. The value is opaque, stable across the turns of one conversation (including compaction), and different for every conversation:
 
 ```yaml

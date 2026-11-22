@@ -11,10 +11,19 @@ import re
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from hermes_cli.providers import custom_provider_aliases
 from hermes_cli.route_identity import normalize_route_base_url
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.config")
+
+# A provider may sit behind a routing proxy that selects its upstream from a request header. The
+# ``proxy`` block names that upstream once; ``resolve_provider_extra_headers`` expands it into the
+# wire headers every client path already applies. The header default matches the de-facto
+# ``X-Proxy-Base-URL`` convention (LiteLLM and similar routers); the name is configurable
+# so the feature stays proxy-agnostic.
+DEFAULT_PROXY_BASE_URL_HEADER = "X-Proxy-Base-URL"
+_HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 
 # ``_normalize_custom_provider_entry`` runs on every ``load_picker_context()`` call, so a warning
@@ -123,38 +132,103 @@ _KNOWN_PROVIDER_KEYS = {
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
     "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-    "catalog_provider", "session_affinity_header",
+    "catalog_provider", "session_affinity_header", "proxy",
     "gemini_api"}  # read by the gemini provider plugin (which Gemini API a model's calls use)
 
 
-def _pick_provider_base_url(entry: dict[str, Any], provider_key: str) -> str:
-    """First usable URL among ``base_url``/``url``/``api``, or "".
+def _valid_provider_url(raw_url: Any) -> str:
+    """Trim a configured URL, accepting unresolved placeholders; ``""`` when missing or invalid.
 
     URLs with unresolved ``${ENV_VAR}`` / ``{region}`` placeholders are accepted unvalidated: they
     expand at runtime, and rejecting them here would silently drop the provider.
     """
+    if not (isinstance(raw_url, str) and raw_url.strip()):
+        return ""
+    candidate = raw_url.strip()
+    if re.search(r"\{[^}]+\}", candidate):
+        return candidate
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:  # e.g. "http://[::1/v1" — one bad entry must not break every caller
+        return ""
+    return candidate if parsed.scheme and parsed.netloc else ""
+
+
+def _pick_provider_base_url(entry: dict[str, Any], provider_key: str) -> str:
+    """First usable URL among ``base_url``/``url``/``api``, or ""."""
     for url_key in ("base_url", "url", "api"):
         raw_url = entry.get(url_key)
-        if not (isinstance(raw_url, str) and raw_url.strip()):
-            continue
-        candidate = raw_url.strip()
-        # Accept URLs containing unresolved placeholder tokens — both ``${ENV_VAR}`` env-refs and bare
-        # ``{region}``-style templates — without URL validation. They are expanded at runtime, so a caller
-        # reaching this normalizer with raw (un-expanded) config would otherwise see the provider silently
-        # dropped (#14457).
-        if re.search(r"\{[^}]+\}", candidate):
+        candidate = _valid_provider_url(raw_url)
+        if candidate:
             return candidate
-        try:
-            parsed = urlparse(candidate)
-        except ValueError:  # e.g. "http://[::1/v1" — one bad entry must not break every caller
-            parsed = None
-        if parsed and parsed.scheme and parsed.netloc:
-            return candidate
-        logger.warning(
-            "providers.%s: '%s' value '%s' is not a valid URL "
-            "(no scheme or host) — skipped",
-            provider_key or "?", url_key, candidate)
+        if isinstance(raw_url, str) and raw_url.strip():
+            logger.warning(
+                "providers.%s: '%s' is not a valid URL "
+                "(no scheme or host) — skipped",
+                provider_key or "?", url_key)
     return ""
+
+
+def normalize_proxy_headers(proxy: Any, *, provider_key: str = "") -> dict[str, str]:
+    """Expand a provider ``proxy`` block into the routing headers it declares.
+
+    ``proxy`` is a provider-scoped block, not a top-level proxy setting::
+
+        proxy:
+          base_url: https://api.example.com/v1   # upstream selected by the proxy (required)
+          header: X-Proxy-Base-URL               # header carrying it (default)
+          headers: {X-Proxy-Tenant: acme}        # optional additional routing headers
+
+    The derived header is applied first; explicit ``headers`` then override it, and a provider's
+    ``extra_headers`` override both (``resolve_provider_extra_headers`` owns that precedence).
+    Values may carry credentials, so callers must never log the result.
+    """
+    if proxy is None:
+        return {}
+    if not isinstance(proxy, dict):
+        _warn_once_per_provider(provider_key, "proxy:shape",
+                                "providers.%s: 'proxy' must be a mapping — ignored", provider_key or "?")
+        return {}
+    unknown = set(proxy) - {"base_url", "header", "headers"}
+    if unknown:
+        _warn_once_per_provider(provider_key, "proxy:unknown:" + ",".join(sorted(unknown)),
+                                "providers.%s: unknown proxy keys ignored: %s",
+                                provider_key or "?", ", ".join(sorted(unknown)))
+    base_url = _valid_provider_url(proxy.get("base_url"))
+    if not base_url:
+        _warn_once_per_provider(provider_key, "proxy:base_url",
+                                "providers.%s: proxy.base_url must be a valid URL — proxy routing ignored",
+                                provider_key or "?")
+        return {}
+    header = proxy.get("header", DEFAULT_PROXY_BASE_URL_HEADER)
+    header = header.strip() if isinstance(header, str) else ""
+    if not header or not _HTTP_HEADER_NAME.match(header):
+        _warn_once_per_provider(provider_key, "proxy:header",
+                                "providers.%s: proxy.header must be a valid HTTP header name — proxy routing ignored",
+                                provider_key or "?")
+        return {}
+    headers = {header: base_url}
+    extra = proxy.get("headers")
+    if extra is not None and not isinstance(extra, dict):
+        _warn_once_per_provider(provider_key, "proxy:headers",
+                                "providers.%s: proxy.headers must be a mapping — ignored", provider_key or "?")
+    else:
+        _merge_headers_case_insensitive(headers, normalize_extra_headers(extra))
+    return headers
+
+
+def resolve_provider_extra_headers(entry: Any, *, provider_key: str = "") -> dict[str, str]:
+    """Every HTTP header a provider entry contributes: ``proxy`` expansion, then ``extra_headers``.
+
+    Explicit ``extra_headers`` win over a derived proxy header, so an operator can override the
+    routing value without removing the ``proxy`` block. This is the ONE composition point shared by
+    config normalization and runtime resolution.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    headers = normalize_proxy_headers(
+        entry.get("proxy"), provider_key=provider_key or coerce_provider_id(entry.get("provider_key")))
+    return _merge_headers_case_insensitive(headers, normalize_extra_headers(entry.get("extra_headers")))
 
 
 def _normalize_provider_models(models: Any) -> tuple[dict[str, Any], bool]:
@@ -274,7 +348,9 @@ def _normalize_custom_provider_entry(
         normalized["extra_body"] = dict(entry["extra_body"])
 
     # Per-provider extra HTTP headers may carry credentials — never log them downstream.
-    _put("extra_headers", normalize_extra_headers(entry.get("extra_headers")))
+    # The provider-scoped ``proxy`` block expands here too, so every existing consumer sees the
+    # routing header without knowing about ``proxy``.
+    _put("extra_headers", resolve_provider_extra_headers(entry, provider_key=provider_key))
     _put("session_affinity_header", _stripped("session_affinity_header"))
     _put("ssl_ca_cert", _stripped("ssl_ca_cert"))
 
@@ -370,13 +446,28 @@ def get_compatible_custom_providers(
     return compatible
 
 
+def _entry_route_aliases(entry: dict[str, Any]) -> frozenset[str]:
+    """Every identity a normalized provider entry answers to (key, display name, ``custom:<slug>``)."""
+    return custom_provider_aliases(
+        str(entry.get("name") or ""), str(entry.get("provider_key") or ""))
+
+
 def _entries_for_route(
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]],
-    config: Optional[dict[str, Any]]):
+    config: Optional[dict[str, Any]],
+    *,
+    provider: Optional[str] = None):
     """Yield entries whose normalized route identity equals *base_url*.
 
     None *custom_providers* → ``get_compatible_custom_providers(config)`` (failure → none).
+
+    *provider* is the caller's live identity (a ``providers:`` key, its display name, or a
+    ``custom:<slug>``). When it names an entry on this route, ONLY that entry is yielded: several
+    providers may share one endpoint (a router fronting many upstreams), and route metadata
+    (headers, TLS, context length, capabilities) belongs to the provider, not to the URL. A named
+    identity that is configured elsewhere never borrows this route's first entry. Bare ``custom``,
+    no identity, and a built-in name with no matching custom entry keep the legacy URL-only scan.
     """
     from hermes_cli.config import get_compatible_custom_providers
     if custom_providers is None:
@@ -389,26 +480,44 @@ def _entries_for_route(
     target_url = normalize_route_base_url(base_url)
     if not target_url:
         return
-    for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        entry_url = normalize_route_base_url(entry.get("base_url"))
-        if entry_url and entry_url == target_url:
-            yield entry
+    matches = [
+        entry for entry in custom_providers
+        if isinstance(entry, dict)
+        and (entry_url := normalize_route_base_url(entry.get("base_url")))
+        and entry_url == target_url
+    ]
+    identity = str(provider or "").strip().lower()
+    if identity and identity not in {"custom", "auto"}:
+        wanted = custom_provider_aliases(identity)
+        selected = [entry for entry in matches if wanted & _entry_route_aliases(entry)]
+        if selected:
+            yield from selected
+            return
+        # A ``custom:<name>`` is unambiguously a named entry; a bare identity that matches an entry
+        # on another route is a named entry too. Neither may inherit a sibling's metadata. A bare
+        # built-in name (e.g. ``openai`` with a user-supplied base_url) keeps the legacy scan.
+        if identity.startswith("custom:") or any(
+            isinstance(entry, dict) and wanted & _entry_route_aliases(entry)
+            for entry in custom_providers
+        ):
+            return
+    yield from matches
 
 
 def get_custom_provider_api_mode(
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
     config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None,
 ) -> str:
-    """Canonical ``api_mode`` of the first custom entry serving *base_url*, or ``""``.
+    """Canonical ``api_mode`` of the custom entry serving *base_url* (scoped to *provider*), or ``""``.
 
     Route identity is the URL, not the host: a Codex proxy on ``127.0.0.1`` declares its wire
     protocol here and nowhere else, so metadata lookups keyed on the transport read it from the
     entry instead of guessing from the hostname (#116191).
     """
-    for entry in _entries_for_route(base_url, custom_providers, config):
+    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
         for field in ("api_mode", "transport"):
             value = entry.get(field)
             if isinstance(value, str) and value.strip():
@@ -429,9 +538,11 @@ def _route_model_cfgs(
     model: str,
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]],
-    config: Optional[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    """Yield the ``models.<model>`` mapping of every entry matching *base_url*."""
-    for entry in _entries_for_route(base_url, custom_providers, config):
+    config: Optional[dict[str, Any]],
+    *,
+    provider: Optional[str] = None) -> Iterator[dict[str, Any]]:
+    """Yield the ``models.<model>`` mapping of every entry matching *base_url* and *provider*."""
+    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
         model_cfg = _route_model_cfg(entry, model)
         if model_cfg is not None:
             yield model_cfg
@@ -451,9 +562,11 @@ def _coerce_ssl_verify(value: Any) -> Optional[bool]:
 def get_custom_provider_tls_settings(
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    """Return TLS settings from a matching ``custom_providers`` / ``providers`` entry."""
-    for entry in _entries_for_route(base_url, custom_providers, config):
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> dict[str, Any]:
+    """Return TLS settings from the entry matching *base_url* and *provider*."""
+    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
         out: dict[str, Any] = {}
         ca = entry.get("ssl_ca_cert")
         if isinstance(ca, str) and ca.strip():
@@ -469,9 +582,11 @@ def apply_custom_provider_tls_to_client_kwargs(
     client_kwargs: dict[str, Any],
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> None:
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> None:
     """Attach per-provider TLS knobs to OpenAI client kwargs when matched."""
-    tls = get_custom_provider_tls_settings(base_url, custom_providers, config)
+    tls = get_custom_provider_tls_settings(base_url, custom_providers, config, provider=provider)
     if tls.get("ssl_ca_cert"):
         client_kwargs["ssl_ca_cert"] = tls["ssl_ca_cert"]
     if "ssl_verify" in tls:
@@ -489,14 +604,33 @@ def normalize_extra_headers(extra_headers: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in extra_headers.items() if v is not None}
 
 
+def _merge_headers_case_insensitive(target: dict[str, str], extra: dict[str, str]) -> dict[str, str]:
+    """Merge *extra* into *target* using HTTP's case-insensitive header namespace.
+
+    A lower-case override must replace the derived header, not become a second wire header that a
+    proxy may read first. The most specific layer's spelling wins.
+    """
+    for key, value in extra.items():
+        for existing in [name for name in target if name.lower() == key.lower()]:
+            del target[existing]
+        target[key] = value
+    return target
+
+
 def get_custom_provider_extra_headers(
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> dict[str, str]:
-    """``extra_headers`` of the first route-matching entry declaring any, else ``{}``.
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> dict[str, str]:
+    """``extra_headers`` of the route-matching entry for *provider*.
+
+    With an identity that names an entry, that entry alone decides: a provider declaring no
+    headers must not inherit a sibling's routing headers. Without an identity (or with an unknown
+    one) the legacy scan returns the first route-matching entry declaring any.
     SECURITY: values may carry credentials — callers must never log them."""
-    for entry in _entries_for_route(base_url, custom_providers, config):
-        headers = normalize_extra_headers(entry.get("extra_headers"))
+    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
+        headers = resolve_provider_extra_headers(entry)
         if headers:
             return headers
     return {}
@@ -506,10 +640,13 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
     client_kwargs: dict[str, Any],
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> None:
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> None:
     """Merge per-provider ``extra_headers`` onto OpenAI client ``default_headers`` (provider wins
     over SDK defaults, most specific level). SECURITY: values may carry credentials; never log."""
-    extra_headers = get_custom_provider_extra_headers(base_url, custom_providers, config)
+    extra_headers = get_custom_provider_extra_headers(
+        base_url, custom_providers, config, provider=provider)
     if not extra_headers:
         return
     merged = dict(client_kwargs.get("default_headers") or {})
@@ -520,13 +657,15 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
 def get_custom_provider_session_affinity_header(
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> str:
-    """Header NAME declared as ``session_affinity_header`` on the route-matching entry, else "".
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> str:
+    """Header NAME declared as ``session_affinity_header`` on the matching entry, else "".
 
     Opt-in per provider (default off): Hermes never ships a session identifier to an endpoint
     that did not ask for one (#86241).
     """
-    for entry in _entries_for_route(base_url, custom_providers, config):
+    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
         header = entry.get("session_affinity_header")
         if isinstance(header, str) and header.strip():
             return header.strip()
@@ -537,8 +676,10 @@ def get_custom_provider_context_length(
     model: str,
     base_url: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> Optional[int]:
-    """Per-model ``context_length`` override from a route-matching entry, or ``None``.
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> Optional[int]:
+    """Per-model ``context_length`` override from the matching entry, or ``None``.
 
     Before this helper existed, the lookup was duplicated in ``run_agent.py``'s startup path only; every
     other path (notably ``/model`` switch) fell back to the 128K default. See #15779.
@@ -564,14 +705,14 @@ def get_custom_provider_context_length(
             return None
         return ctx if ctx > 0 else None
 
-    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config):
+    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config, provider=provider):
         ctx = _positive_int(model_cfg.get("context_length"))
         if ctx is not None:
             return ctx
     # Entry-level ``context_length`` (a documented key) backs every model the entry serves when no
     # per-model override exists; without it the /model switch re-derivation fell to the hardcoded
     # catalog while a cold start honoured the same setting via model.context_length (#98387).
-    for entry in _entries_for_route(base_url, custom_providers, config):
+    for entry in _entries_for_route(base_url, custom_providers, config, provider=provider):
         ctx = _positive_int(entry.get("context_length"))
         if ctx is not None:
             return ctx
@@ -583,9 +724,12 @@ def get_custom_provider_model_capability(
     base_url: str,
     capability: str,
     custom_providers: Optional[list[dict[str, Any]]] = None,
-    config: Optional[dict[str, Any]] = None) -> Optional[bool]:
+    config: Optional[dict[str, Any]] = None,
+    *,
+    provider: Optional[str] = None) -> Optional[bool]:
     """Explicit boolean capability for one custom-provider model, or ``None``. Scoped to the
-    normalized route + exact runtime model id so aliases can declare capabilities."""
+    normalized route + provider identity + exact runtime model id so aliases can declare
+    capabilities."""
     from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
     if not model or not base_url or not capability:
         return None
@@ -599,7 +743,7 @@ def get_custom_provider_model_capability(
         except Exception:
             return None
 
-    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config):
+    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config, provider=provider):
         value = model_cfg.get(capability)
         if isinstance(value, bool):
             return value

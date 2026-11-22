@@ -60,3 +60,53 @@ def test_unconfigured_provider_sends_no_session_header():
             headers = build_api_kwargs(agent, _MSGS).get("extra_headers") or {}
             assert _HEADER not in headers and "x-opencode-session" not in headers
         assert _HEADER not in _aux_headers("sess-A")
+
+
+_DUAL = [
+    {
+        "name": "Provider A",
+        "provider_key": "alpha",
+        "base_url": _BASE,
+        "session_affinity_header": "X-Alpha-Session",
+    },
+    {
+        "name": "Provider B",
+        "provider_key": "beta",
+        "base_url": _BASE,
+        "session_affinity_header": "X-Beta-Session",
+    },
+]
+
+
+def _dual_providers():
+    return patch("hermes_cli.config.get_compatible_custom_providers", return_value=_DUAL)
+
+
+def _shared_agent(session_id):
+    agent = AIAgent(
+        api_key="test-key", base_url=_BASE, model="shared-model", provider="custom",
+        requested_provider="beta", quiet_mode=True, skip_context_files=True,
+        skip_memory=True, session_id=session_id,
+    )
+    return agent
+
+
+def test_requested_entry_selects_its_affinity_header_on_main_and_aux():
+    """A bare ``custom`` adapter with ``requested_provider=beta`` must send Provider B's header, not the
+    first entry's on the shared URL."""
+    with _dual_providers():
+        main_headers = build_api_kwargs(_shared_agent("sess-A"), _MSGS)["extra_headers"]
+        assert main_headers == {"X-Beta-Session": "sess-A"}
+
+        token = aux.set_runtime_main(
+            "custom", "shared-model", requested_provider="beta",
+            base_url=_BASE, session_id="sess-A",
+        )
+        try:
+            aux_headers = aux._build_call_kwargs(
+                "custom", "shared-model", _MSGS, base_url=_BASE).get("extra_headers") or {}
+        finally:
+            aux._RUNTIME_MAIN_CONTEXT.reset(token)
+
+    assert aux_headers == {"X-Beta-Session": "sess-A"}
+

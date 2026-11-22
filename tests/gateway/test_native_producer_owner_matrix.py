@@ -111,7 +111,7 @@ async def test_signal_pacing_owner_scope_keeps_acquisition_and_upload(owners, tm
         if not suppressed(name):
             assert warnings[-1] == root / "profiles" / name
         assert uploads[-1][0] == root / "profiles" / name
-        assert uploads[-1][1]["attachments"] == [str(path)]
+        assert uploads[-1][1]["attachments"][0].startswith("data:image/png;filename=")
         assert get_hermes_home() == root
     assert scheduler.acquire.await_count == 3
     assert scheduler.report_rpc_duration.await_count == 3

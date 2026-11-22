@@ -11,6 +11,8 @@ ENV_OVERRIDES = (
         fixed=(
             ("http_url", "SIGNAL_HTTP_URL"), ("account", "SIGNAL_ACCOUNT"),
             ("ignore_stories", "SIGNAL_IGNORE_STORIES", "true", is_truthy_value),
+            ("ignore_attachments", "SIGNAL_IGNORE_ATTACHMENTS", "false", is_truthy_value),
+            ("inline_attachments", "SIGNAL_INLINE_ATTACHMENTS", "always"),
         ),
     ),
     home_step(Platform.SIGNAL, "SIGNAL_HOME_CHANNEL"),

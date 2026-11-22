@@ -283,14 +283,27 @@ class GatewayTurnPersistenceMixin:
             return ""
         try:
             from gateway.runtime_footer import build_footer_line as _bfl
+            from hermes_cli.providers import provider_display_name
+            from hermes_cli.runtime_provider_custom import session_provider_identity
+
+            user_config = _load_gateway_config()
+            # "custom" is the adapter, not the operator's route: resolve custom:<slug> first, then
+            # show the configured entry name, never the internal slug.
+            identity = session_provider_identity(
+                agent_result.get("provider"), agent_result.get("requested_provider"),
+                agent_result.get("base_url"), agent_result.get("model"), config=user_config)
+            provider_label = provider_display_name(
+                identity, (user_config or {}).get("providers"),
+                (user_config or {}).get("custom_providers")) if identity else ""
             return _bfl(
-                user_config=_load_gateway_config(),
+                user_config=user_config,
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
                 cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
                 requested_model=agent_result.get("requested_model"),
                 served_model=agent_result.get("served_model"),
+                provider=provider_label,
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)

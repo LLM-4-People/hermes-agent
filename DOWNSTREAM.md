@@ -1,0 +1,94 @@
+# LLM-4-People Hermes downstream
+
+This fork tracks `NousResearch/hermes-agent` and carries a small, isolated patch set. The point
+of the layout is that upstream updates arrive automatically and merge cleanly: every downstream
+change lives in its own commit and touches as few upstream files as possible.
+
+## Downstream changes
+
+| Change | Owner files | Why |
+|---|---|---|
+| Provider-aware route metadata | `hermes_cli/config_providers.py`, `hermes_cli/runtime_provider_custom.py`, `agent/agent_init.py`, `agent/client_lifecycle.py`, `agent/anthropic_adapter.py`, `agent/auxiliary_client.py`, `agent/opencode_affinity.py`, `agent/reasoning_promotion.py`, `hermes_cli/model_switch_providers.py`, `hermes_cli/main_provider_setup.py`, `hermes_cli/model_setup_flows_custom.py`, `hermes_cli/models_local.py`, `acp_adapter/model_catalog.py` | `extra_headers`/TLS/api-mode/context/capability lookups matched by base URL, so two providers behind one proxy shared the first entry's metadata. `_entries_for_route` now selects by provider identity (key, display name, `custom:<slug>`) and every consumer passes it. |
+| `providers.<name>.proxy` | `hermes_cli/config_providers.py`, docs | First-class upstream routing for gateways: `proxy.base_url` is sent as `X-Proxy-Base-URL` (configurable via `proxy.header`), with `proxy.headers` and `extra_headers` overrides. Removes hand-written routing headers. |
+| Footer `provider` field | `gateway/runtime_footer.py`, `gateway/run_turn_runner.py`, `gateway/run_turn_persistence.py`, `gateway/slash_commands.py`, `hermes_cli/providers.py` | The gateway reply footer now renders `model · provider · ctx% · cwd`; named custom providers show their configured name (the configured label), not the internal slug. |
+| Signal media in split deployments | `plugins/platforms/signal/signal_media.py`, `adapter.py`, `standalone.py`, `gateway_env.py`, `plugin.yaml` | signal-cli resolves attachment paths in its own container. Outbound attachments are now self-contained data URIs (`SIGNAL_INLINE_ATTACHMENTS=never` restores paths for shared volumes); inbound documents keep the sender's filename/extension and images with no `contentType` are classified from magic bytes. |
+| Image identity | `Dockerfile`, `hermes_cli/config.py` | `HERMES_IMAGE_NAME` build arg is baked into `/etc/hermes/image-provenance.json`, so `hermes update` tells operators to pull this fork's image instead of upstream's. |
+
+Upstream files we do **not** modify: `.github/workflows/*` (upstream's workflows are disabled
+at the repository level; ours are additive files), `pyproject.toml`, `uv.lock`, `pm/**`. A
+`disable-upstream-workflows` job re-applies that invariant on every push to `main`, so a newly
+added upstream workflow cannot run against Blacksmith runners or Docker Hub credentials the fork
+does not have.
+
+## Automatic upstream sync
+
+`.github/workflows/sync-upstream.yml` runs every three hours:
+
+1. merge `upstream/main` into the long-lived `automation/upstream-sync` branch (reused so the
+   push is a fast-forward);
+2. set up the locked toolchain from the trusted `main` checkout, with cache writes disabled, and
+   run `scripts/downstream-verify.sh` on the merged tree (static lint + the provider-routing,
+   footer and Signal suites);
+3. capture the merged workflow files and audit them from a clean `main` checkout with the shared
+   `.github/actions/workflow-lint` action;
+4. bundle the verified commit; a separate publish job fetches the bundle into a bare repository
+   and pushes it with a credential scoped to that step. No merged code runs in the publish job;
+5. open or update the `chore: sync upstream main` pull request.
+
+`main` is never written directly by automation. Merging the PR triggers the normal push-triggered
+image build, so the published `edge` image always corresponds to a reviewed commit. A repository
+ruleset also rejects direct pushes to `main`, so the PR-only rule is mechanically enforced.
+
+A conflict aborts the merge, pushes nothing, and opens/updates the `upstream-sync` issue with the
+conflicting files. Resolve on the automation branch:
+
+```bash
+git fetch origin
+git switch automation/upstream-sync
+git merge upstream/main
+# resolve, then run the gate
+scripts/downstream-verify.sh
+git push origin automation/upstream-sync
+```
+
+`workflow_dispatch` with `dry_run: true` merges and verifies without pushing the branch or opening
+a PR.
+
+## Security scanning
+
+CodeQL runs on every push to `main` and weekly. The first `main` analysis is the fork's baseline;
+until it exists, a pull-request scan reports every pre-existing upstream alert as newly introduced
+(108 on the initial branch). The workflow therefore starts main-only, and the `pull_request`
+trigger is restored once that baseline is recorded.
+
+## Image
+
+- Registry: `ghcr.io/llm-4-people/hermes-agent`
+- `edge`, `latest` + `sha-<short>` on every green `main` push
+- `X.Y.Z`, `X.Y`, `latest`, `sha-<short>` on a valid `vX.Y.Z` tag (other `v*` tags are rejected)
+- Multi-arch: `linux/amd64`, `linux/arm64` (native GitHub arm runners)
+- Supply chain: BuildKit provenance (`mode=max`), SPDX SBOM, keyless cosign signature on the
+  manifest index.
+
+Verify a digest before deploying:
+
+```bash
+cosign verify ghcr.io/llm-4-people/hermes-agent@sha256:<digest> \
+  --certificate-identity-regexp '^https://github\.com/LLM-4-People/hermes-agent/\.github/workflows/docker-publish\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The smoke job also runs the published image and imports
+`hermes_cli.config_providers.normalize_proxy_headers`, so a green publish proves the downstream
+patch is present in the image.
+
+## Local verification
+
+```bash
+source ./activate                       # or use the CI-provided PM test environment
+scripts/downstream-verify.sh
+```
+
+The test/static gate has two shared owners: `scripts/downstream-verify.sh` for the Python checks
+and `.github/actions/workflow-lint` for the workflow audit. `downstream-ci.yml` and
+`sync-upstream.yml` both invoke them, so CI and the merge gate cannot drift.

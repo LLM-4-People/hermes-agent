@@ -73,6 +73,24 @@ def test_format_footer_skips_missing_context_length():
     assert "/tmp/wd" in out
 
 
+def test_format_footer_provider_field_renders_the_label():
+    out = format_runtime_footer(
+        model="shared-model",
+        provider="Provider A",
+        context_tokens=500,
+        context_length=1000,
+        cwd="/tmp/wd",
+    )
+    assert out == "shared-model · Provider A · 50% · /tmp/wd"
+
+
+def test_format_footer_skips_a_missing_provider_slot():
+    out = format_runtime_footer(
+        model="m", provider=None, context_tokens=5, context_length=10, cwd="/tmp/wd",
+    )
+    assert out == "m · 50% · /tmp/wd"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------
@@ -104,7 +122,7 @@ def test_resolve_platform_can_add_fields_only():
     }
     tg = resolve_footer_config(user, "telegram")
     assert tg["enabled"] is True
-    assert tg["fields"] == ["model", "context_pct", "cwd"]
+    assert tg["fields"] == ["model", "provider", "context_pct", "cwd"]
     dc = resolve_footer_config(user, "discord")
     assert dc["enabled"] is True
     assert dc["fields"] == ["context_pct"]

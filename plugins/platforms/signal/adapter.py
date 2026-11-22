@@ -7,6 +7,7 @@ import base64
 import itertools
 import json
 import logging
+import mimetypes
 import os
 import random
 import shutil
@@ -35,6 +36,10 @@ from gateway.platforms.helpers import cancel_task
 from gateway.platforms.media_cache import mime_for_ext
 from tools.audio_container import CONTAINER_TO_EXT, sniff_container
 from plugins.platforms.signal.signal_format import markdown_to_signal
+from plugins.platforms.signal.signal_media import (
+    SIGNAL_MAX_ATTACHMENT_SIZE, attachment_data_uri, attachment_payload_size, attachment_size_sync,
+    inline_attachments_enabled,
+)
 from plugins.platforms.signal.signal_rate_limit import (
     SIGNAL_BATCH_PACING_NOTICE_THRESHOLD, SIGNAL_MAX_ATTACHMENTS_PER_MSG, SIGNAL_RATE_LIMIT_MAX_ATTEMPTS,
     SignalRateLimitError, _extract_retry_after_seconds, _format_wait, _is_signal_rate_limit_error,
@@ -44,7 +49,7 @@ from utils import TRUTHY_STRINGS
 
 logger = logging.getLogger(__name__)
 
-SIGNAL_MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024  # 100 MB
+# Attachment size lives in signal_media (shared with the standalone sender and data-URI encoder).
 MAX_MESSAGE_LENGTH = 8000  # Signal message size limit
 SSE_RETRY_DELAY_INITIAL = 2.0
 SSE_RETRY_DELAY_MAX = 60.0
@@ -190,6 +195,12 @@ class SignalAdapter(BasePlatformAdapter):
         self.http_url = extra.get("http_url", "http://127.0.0.1:8080").rstrip("/")
         self.account = extra.get("account", "")
         self.ignore_stories = extra.get("ignore_stories", True)
+        self.ignore_attachments = (
+            extra.get("ignore_attachments") if extra.get("ignore_attachments") is not None
+            else (_sig_secret("SIGNAL_IGNORE_ATTACHMENTS", "false") or "false").lower() in TRUTHY_STRINGS)
+        # signal-cli reads attachment paths in ITS container; data URIs survive a split deployment.
+        self.inline_attachments = inline_attachments_enabled(extra.get(
+            "inline_attachments", _sig_secret("SIGNAL_INLINE_ATTACHMENTS", "always")))
         # Allowlists are per-profile (scoped reads); group policy derives from the group allowlist's
         # presence. The DM allowlist mirrors run.py's SIGNAL_ALLOWED_USERS so reaction hooks (which
         # fire before run.py's auth gate) can skip unauthorized senders; "*" = open.
@@ -392,10 +403,11 @@ class SignalAdapter(BasePlatformAdapter):
             text = text.replace("  ", " ").strip()  # collapse only the doubled space; newlines preserved
         return True, text
 
-    async def _collect_attachments(self, attachments_data: list) -> tuple[list[str], list[str]]:
-        """Fetch + cache inbound attachments; returns (media_urls, media_types)."""
+    async def _collect_attachments(self, attachments_data: list) -> tuple[list[str], list[str], list[str]]:
+        """Fetch + cache inbound attachments; returns (media_urls, media_types, media_filenames)."""
         media_urls: list[str] = []
         media_types: list[str] = []
+        media_filenames: list[str] = []
         for att in attachments_data:
             att_id, att_size = att.get("id"), att.get("size", 0)
             if not att_id:
@@ -404,13 +416,23 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: attachment too large (%d bytes), skipping", att_size)
                 continue
             try:
-                cached_path, ext = await self._fetch_attachment(att_id)
+                filename = att.get("filename") or ""
+                cached_path, ext = await self._fetch_attachment(
+                    att_id, filename=filename, content_type=att.get("contentType") or "")
                 if cached_path:
+                    declared_type = str(att.get("contentType") or "").split(";", 1)[0].strip().lower()
                     media_urls.append(cached_path)
-                    media_types.append(att.get("contentType") or _ext_to_mime(ext))
+                    # A sender-declared generic type must not hide the magic-byte classification:
+                    # a PNG announced as octet-stream would otherwise reach the agent as a DOCUMENT.
+                    media_types.append(
+                        _ext_to_mime(ext)
+                        if declared_type in {"", "application/octet-stream"} else declared_type)
+                    # No sender filename: let the parser derive the basename from the cache name
+                    # instead of exposing the ``doc_<uuid>_`` prefix as the display name.
+                    media_filenames.append(Path(filename).name if filename else "")
             except Exception:
                 logger.exception("Signal: failed to fetch attachment %s", att_id)
-        return media_urls, media_types
+        return media_urls, media_types, media_filenames
 
     async def _handle_envelope(self, envelope: dict) -> None:
         """Process an incoming signal-cli envelope."""
@@ -462,7 +484,7 @@ class SignalAdapter(BasePlatformAdapter):
             user_name=sender_name or sender, user_id_alt=sender_uuid if sender_uuid else None,
             chat_id_alt=group_id if is_group else None)
         attachments_data = data_message.get("attachments", [])
-        media_urls, media_types = [], []
+        media_urls, media_types, media_filenames = [], [], []
         # The fetch copies a sender-chosen file into Hermes' cache (AAC is remuxed through ffmpeg): only the
         # gateway's explicit True permits it (dm_allow_from misses pairing and global allowlists). signal-cli
         # has already stored it unless its daemon runs with --ignore-attachments. The text still dispatches so
@@ -470,7 +492,7 @@ class SignalAdapter(BasePlatformAdapter):
         if attachments_data and not getattr(self, "ignore_attachments", False):
             # source.is_bot (bot_users) so a peer bot gets the gateway's bot verdict (loop-guard cooldown).
             if self._is_sender_authorized(sender, source.chat_type, chat_id, is_bot=source.is_bot) is True:
-                media_urls, media_types = await self._collect_attachments(attachments_data)
+                media_urls, media_types, media_filenames = await self._collect_attachments(attachments_data)
             else:
                 logger.debug("Signal: skipping attachments for unauthorized sender %s", redact_phone(sender))
         # Skip contentless envelopes (profile key updates, empty messages) that still carry a
@@ -492,7 +514,7 @@ class SignalAdapter(BasePlatformAdapter):
         # raw_message keeps sender + timestamp_ms so processing hooks can build sendReaction targets.
         event = MessageEvent(
             source=source, text=text or "", message_type=msg_type, media_urls=media_urls,
-            media_types=media_types, timestamp=timestamp,
+            media_types=media_types, media_filenames=media_filenames, timestamp=timestamp,
             raw_message={"sender": sender, "timestamp_ms": ts_ms, "quote": quote_data if quote_data else None},
             reply_to_message_id=reply_to_id, reply_to_text=quote_data.get("text"),
             reply_to_author_id=reply_to_author,
@@ -584,8 +606,13 @@ class SignalAdapter(BasePlatformAdapter):
             params["recipient"] = [await self._resolve_recipient(chat_id) if resolve else chat_id]
         return params
 
-    async def _fetch_attachment(self, attachment_id: str) -> tuple:
-        """Fetch an attachment via JSON-RPC and cache it. Returns (path, ext)."""
+    async def _fetch_attachment(self, attachment_id: str, *, filename: str = "",
+                                content_type: str = "") -> tuple:
+        """Fetch an attachment via JSON-RPC and cache it. Returns (path, ext).
+
+        The sender's filename is authoritative for the cache extension: DOCX/XLSX/PPTX share the
+        ZIP magic, so magic-only detection would hand the agent a ``.zip`` path for a Word file.
+        """
         result = await self._rpc("getAttachment", {"account": self.account, "id": attachment_id})
         if not result:
             return None, ""
@@ -595,14 +622,27 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: attachment response missing 'data' key")
                 return None, ""
         raw_data = base64.b64decode(result)
+        if len(raw_data) > SIGNAL_MAX_ATTACHMENT_SIZE:
+            logger.warning("Signal: decoded attachment too large (%d bytes), skipping", len(raw_data))
+            return None, ""
         ext = _guess_extension(raw_data)
+        declared_ext = Path(filename).suffix.lower() if filename else ""
+        if not declared_ext and content_type:
+            declared_ext = (mimetypes.guess_extension(content_type.split(";", 1)[0].strip()) or "").lower()
+        if declared_ext and ext in (".zip", ".bin"):
+            ext = declared_ext
         # Android voice notes are raw ADTS AAC, which Whisper-style STT rejects; remux losslessly
         # to .m4a. Without ffmpeg the raw file is cached as-is (no downstream remux fallback).
         if ext == ".aac":
             raw_data, ext = (await asyncio.to_thread(_remux_aac_to_m4a, raw_data)) or (raw_data, ext)
-        cache = (cache_image_from_bytes_async if _is_image_ext(ext)
-                 else cache_audio_from_bytes_async if _is_audio_ext(ext) else cache_document_from_bytes_async)
-        return await cache(raw_data, ext), ext
+        if _is_image_ext(ext):
+            return await cache_image_from_bytes_async(raw_data, ext), ext
+        if _is_audio_ext(ext):
+            return await cache_audio_from_bytes_async(raw_data, ext), ext
+        doc_name = Path(filename).name if filename else f"attachment{ext}"
+        if not Path(doc_name).suffix:
+            doc_name += ext
+        return await cache_document_from_bytes_async(raw_data, doc_name), ext
 
     async def _rpc(self, method: str, params: dict, rpc_id: str | None = None, *, log_failures: bool = True,
                    raise_on_rate_limit: bool = False, timeout: float = 30.0) -> Any:
@@ -701,9 +741,10 @@ class SignalAdapter(BasePlatformAdapter):
             return chunks
         return [(f"{txt} ({idx}/{len(chunks)})", st) for idx, (txt, st) in enumerate(chunks, start=1)]
 
-    async def _rpc_send(self, params: dict[str, Any], fail_error: str) -> tuple[Any, Optional[SendResult]]:
+    async def _rpc_send(self, params: dict[str, Any], fail_error: str, *,
+                        timeout: float = 30.0) -> tuple[Any, Optional[SendResult]]:
         """Run a ``send`` RPC, validate and track it; ``(result, None)`` or ``(None, failed SendResult)``."""
-        if (result := await self._rpc("send", params)) is None:
+        if (result := await self._rpc("send", params, timeout=timeout)) is None:
             return None, SendResult(success=False, error=fail_error)
         success, err_msg = self._validate_send_result(result)
         if not success:
@@ -817,22 +858,32 @@ class SignalAdapter(BasePlatformAdapter):
         delivered = False
         for idx, att_batch in enumerate(att_batches, start=1):
             n = len(att_batch)
+            if self.inline_attachments:
+                try:
+                    att_batch = list(await asyncio.gather(
+                        *(attachment_data_uri(path) for path in att_batch)))
+                except ValueError as exc:
+                    logger.warning("Signal: attachment encoding failed: %s", exc)
+                    return SendResult(success=False, error=str(exc))
             estimated = scheduler.estimate_wait(n)
             logger.debug("Signal batch %d/%d: %d attachments, estimated wait=%.1fs", idx, n_batches, n, estimated)
             if estimated >= SIGNAL_BATCH_PACING_NOTICE_THRESHOLD:
                 await self._notify_batch_pacing(chat_id, idx, n_batches, estimated)
-            if await self._send_attachment_batch(scheduler, dict(base_params, attachments=att_batch), n,
-                                                 f"{idx}/{n_batches}"):
+            if await self._send_attachment_batch(
+                    scheduler, dict(base_params, attachments=att_batch), n, f"{idx}/{n_batches}",
+                    total_bytes=sum(attachment_payload_size(a) for a in att_batch)):
                 delivered = True
         return SendResult(
             success=delivered,
             error=None if delivered else "all Signal attachment batches failed")
 
-    async def _send_attachment_batch(self, scheduler, params: dict[str, Any], n: int, label: str) -> bool:
+    async def _send_attachment_batch(self, scheduler, params: dict[str, Any], n: int, label: str, *,
+                                     total_bytes: int = 0) -> bool:
         """Send one attachment batch with rate-limit pacing and a single transient retry. Tokens are
         deducted only on validated success (None = server never accepted it); 429s feed the scheduler.
         Returns True when the server accepted the batch."""
-        send_timeout, max_attempts = _signal_send_timeout(n), SIGNAL_RATE_LIMIT_MAX_ATTEMPTS
+        send_timeout, max_attempts = (
+            _signal_send_timeout(n, total_bytes=total_bytes), SIGNAL_RATE_LIMIT_MAX_ATTEMPTS)
         for attempt in range(1, max_attempts + 1):
             await scheduler.acquire(n)
             t0 = time.monotonic()
@@ -883,29 +934,42 @@ class SignalAdapter(BasePlatformAdapter):
             return SendResult(success=False, error={
                 "download": str(detail), "missing": "Image file not found",
                 "oversize": f"Image too large ({detail} bytes)"}[reason])
-        return await self._send_file(chat_id, file_path, caption, "RPC send with attachment failed")
+        return await self._send_file(chat_id, file_path, caption, "RPC send with attachment failed",
+                                     media_label="Image")
 
-    async def _send_file(self, chat_id: str, file_path: str, caption: Optional[str], fail_error: str) -> SendResult:
+    async def _send_file(self, chat_id: str, file_path: str, caption: Optional[str], fail_error: str, *,
+                         filename: Optional[str] = None, media_label: str = "File") -> SendResult:
         """Send one local file as a Signal attachment via the ``send`` RPC."""
+        try:
+            total_bytes = attachment_size_sync(file_path)
+        except ValueError as exc:
+            return SendResult(success=False, error=f"{media_label}: {exc}")
+        if self.inline_attachments:
+            try:
+                attachment = await attachment_data_uri(file_path, filename=filename)
+            except ValueError as exc:
+                return SendResult(success=False, error=str(exc))
+        else:
+            attachment = file_path
         params = await self._with_target(
-            {"account": self.account, "message": caption or "", "attachments": [file_path]}, chat_id)
-        _, err = await self._rpc_send(params, fail_error)
+            {"account": self.account, "message": caption or "", "attachments": [attachment]}, chat_id)
+        # Upload-scaled timeout: a 100 MB attachment needs more than the 60s floor.
+        _, err = await self._rpc_send(
+            params, fail_error, timeout=_signal_send_timeout(1, total_bytes=total_bytes))
         return err or SendResult(success=True)
 
     async def _send_attachment(self, chat_id: str, file_path: str, media_label: str,
-                               caption: Optional[str] = None) -> SendResult:
+                               caption: Optional[str] = None, *,
+                               filename: Optional[str] = None) -> SendResult:
         """Send any local file as a Signal attachment (shared by send_document/image_file/voice/video)."""
         await self._stop_typing_indicator(chat_id)
-        try:
-            file_size = Path(file_path).stat().st_size
-        except FileNotFoundError:
-            return SendResult(success=False, error=f"{media_label} file not found: {file_path}")
-        if file_size > SIGNAL_MAX_ATTACHMENT_SIZE:
-            return SendResult(success=False, error=f"{media_label} too large ({file_size} bytes)")
-        return await self._send_file(chat_id, file_path, caption, f"RPC send {media_label.lower()} failed")
+        return await self._send_file(
+            chat_id, file_path, caption, f"RPC send {media_label.lower()} failed",
+            filename=filename, media_label=media_label)
 
-    async def send_document(self, chat_id, file_path, caption=None, filename=None, **kwargs) -> SendResult:
-        return await self._send_attachment(chat_id, file_path, "File", caption)
+    async def send_document(self, chat_id, file_path, caption=None, file_name=None, **kwargs) -> SendResult:
+        """Platform contract uses ``file_name``; Signal's encoder shows it as the attachment name."""
+        return await self._send_attachment(chat_id, file_path, "File", caption, filename=file_name)
 
     async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, **kwargs) -> SendResult:
         """Native Signal attachment for the gateway MEDIA: delivery path."""

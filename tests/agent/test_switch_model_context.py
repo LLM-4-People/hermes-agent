@@ -335,9 +335,10 @@ def test_lmstudio_switch_uses_destination_context_and_verified_runtime(monkeypat
     def fake_compatible(_cfg):
         return [{"name": "lmstudio", "base_url": "http://127.0.0.1:1234/v1"}]
 
-    def fake_provider_context(*, model, base_url, custom_providers):
+    def fake_provider_context(*, model, base_url, custom_providers, provider=""):
         assert model == "lmstudio/new-model"
         assert base_url == "http://127.0.0.1:1234/v1"
+        assert provider == "lmstudio"
         return 120_000
 
     def fake_lmstudio_load(self, config_context_length=None):

@@ -1739,6 +1739,9 @@ class GatewayInboundMixin(
             _msg_configured_model = _msg_model_cfg  # (no dict → no pin was read; ctx is already None)
         if _msg_model != _msg_configured_model:
             _msg_config_ctx = None
+        from hermes_cli.providers import live_provider_identity
+        _msg_provider = live_provider_identity(
+            _msg_runtime.get("provider"), _msg_runtime.get("requested_provider"))
         if _msg_config_ctx is not None:
             try:
                 from hermes_cli.route_identity import should_clear_context_pin_async
@@ -1746,7 +1749,7 @@ class GatewayInboundMixin(
                 if await should_clear_context_pin_async(
                     None, None,  # model match already checked above
                     _msg_model_cfg.get("base_url"), _msg_base_url,
-                    _msg_model_cfg.get("provider"), _msg_runtime.get("provider"),
+                    _msg_model_cfg.get("provider"), _msg_provider,
                 ):
                     _msg_config_ctx = None
             except Exception:
@@ -1757,10 +1760,11 @@ class GatewayInboundMixin(
 
                 _msg_config_ctx = get_custom_provider_context_length(
                     model=_msg_model, base_url=_msg_base_url, custom_providers=_msg_custom_providers,
+                    provider=_msg_provider,
                 ) or _msg_config_ctx
         return await get_model_context_length_async(
             _msg_model, base_url=_msg_base_url, api_key=_msg_runtime.get("api_key") or "",
-            config_context_length=_msg_config_ctx, provider=_msg_runtime.get("provider") or "",
+            config_context_length=_msg_config_ctx, provider=_msg_provider,
             custom_providers=_msg_custom_providers,
         )
 

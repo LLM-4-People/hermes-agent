@@ -38,11 +38,13 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
 
     model = str(getattr(agent, "model", "") or "")
     custom_providers = getattr(agent, "_custom_providers", None)
+    requested = str(getattr(agent, "requested_provider", "") or "").strip().lower()
     configured = get_custom_provider_model_capability(
         model=model,
         base_url=base_url,
         capability=_ANSWER_IN_REASONING_CAPABILITY,
         custom_providers=custom_providers,
+        provider=requested or provider,
     )
     if configured is not None:
         return configured
@@ -51,14 +53,10 @@ def answer_in_reasoning_capability(agent: Any) -> bool:
     # Several entries may share one endpoint (LiteLLM/vLLM router): only the live ``custom:<slug>``
     # entry counts; without one, every flagged sibling on the endpoint must opt in. Startup, gateway
     # and TUI keep ``provider="custom"`` and the named identity in ``requested_provider``.
-    from hermes_cli.providers import custom_provider_slug
-
-    requested = str(getattr(agent, "requested_provider", "") or "").strip().lower()
-    ids = {custom_provider_slug(p) for p in (provider, requested) if p.startswith("custom:")}
-    entries = list(_entries_for_route(base_url, custom_providers, None))
-    live = [e for e in entries
-            if custom_provider_slug(e.get("name"), e.get("provider_key")) in ids]
-    flags = {v for e in live or entries
+    # The route owner resolves the live identity (and falls back to every sibling on the endpoint
+    # when no identity matches).
+    entries = list(_entries_for_route(base_url, custom_providers, None, provider=requested or provider))
+    flags = {v for e in entries
              if isinstance(v := (e.get("capabilities") or {}).get(_ANSWER_IN_REASONING_CAPABILITY), bool)}
     if flags:
         return flags == {True}

@@ -1481,6 +1481,7 @@ class TestSendSignalChunking:
         # Only the existing file made it into the RPC
         params = fake.calls[0]["payload"]["params"]
         assert len(params["attachments"]) == 1
+        assert params["attachments"][0].startswith("data:image/png;filename=ok.png;base64,")
 
 
 # ── _send_via_adapter standalone fallback ────────────────────────────────

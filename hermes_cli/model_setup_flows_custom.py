@@ -277,7 +277,7 @@ def _configured_model_ids(cfg_models) -> list[str]:
 def _discover_named_custom_models(provider_info: dict, api_key: str, configured_models: list, explicit_catalog: bool):
     """Live catalog probe for a named custom endpoint (native ``/api/tags`` for Ollama).
     Returns ``(models, native_catalog_empty)``; persists the live catalog as a side effect."""
-    from hermes_cli.config import normalize_extra_headers
+    from hermes_cli.config import resolve_provider_extra_headers
     from hermes_cli.models import fetch_api_models, _get_ollama_native_headers
     from hermes_cli.models_local import (
         fetch_ollama_local_models,
@@ -296,7 +296,7 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     if api_mode:
         fetch_kwargs["api_mode"] = api_mode
     native_catalog_provider = "ollama" if provider_key.lower() == "ollama" or name.strip().lower() == "ollama" else "custom"
-    extra_headers = normalize_extra_headers(provider_info.get("extra_headers")) or {}
+    extra_headers = resolve_provider_extra_headers(provider_info)
     candidate_headers = _get_ollama_native_headers(base_url, api_key=api_key)
     for key in tuple(candidate_headers):
         if any(key.lower() == existing.lower() for existing in extra_headers):

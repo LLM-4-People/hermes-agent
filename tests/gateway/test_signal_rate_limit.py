@@ -123,3 +123,19 @@ class TestFifoAcquire:
         # A had a full bucket (no wait). B waited a full refill.
         assert results[0][1] == 0.0
         assert results[1][1] == pytest.approx(s.capacity / s.refill_rate)
+
+
+def test_send_timeout_scales_with_attachment_bytes():
+    """The budget uses the serialized base64 length, not the decoded file size, and is capped."""
+    from plugins.platforms.signal.signal_rate_limit import (
+        SIGNAL_MAX_SEND_TIMEOUT, SIGNAL_UPLOAD_MIN_THROUGHPUT, _signal_send_timeout)
+
+    n = 100 * 1024 * 1024
+    serialized = 4 * ((n + 2) // 3)  # base64 length of one 100 MiB file
+    assert _signal_send_timeout(0) == 30.0
+    assert _signal_send_timeout(1) == 60.0
+    assert _signal_send_timeout(1, total_bytes=serialized) == pytest.approx(
+        serialized / SIGNAL_UPLOAD_MIN_THROUGHPUT)
+    assert _signal_send_timeout(32, total_bytes=32 * serialized) == SIGNAL_MAX_SEND_TIMEOUT
+    assert _signal_send_timeout(20, total_bytes=1024) == pytest.approx(100.0)
+

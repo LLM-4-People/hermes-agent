@@ -543,6 +543,55 @@ def custom_provider_aliases(display_name: str, provider_key: str = "") -> frozen
     return frozenset(aliases)
 
 
+def live_provider_identity(provider: Any, requested_provider: Any = "") -> str:
+    """The route identity for metadata lookups: the requested entry when the adapter is generic.
+
+    Hermes keeps ``provider="custom"`` as the billing adapter class for every named custom entry and
+    stores the chosen entry in ``requested_provider``. A bare adapter name therefore must not be
+    used to resolve provider-scoped metadata on a shared endpoint.
+    """
+    adapter = str(provider or "").strip()
+    requested = str(requested_provider or "").strip()
+    if adapter.lower() in {"", "custom", "auto"}:
+        return requested or adapter
+    return adapter
+
+
+def provider_display_name(
+    provider_id: str,
+    user_providers: Optional[dict[str, Any]] = None,
+    custom_providers: Optional[list[dict[str, Any]]] = None,
+) -> str:
+    """Human label for a live route: built-in label, else the configured entry's name.
+
+    ``custom:<slug>`` rows must show the name the operator configured (``Provider B``), not the
+    internal slug. Scan the configured entries by their aliases first: the config key and the
+    display name may differ (``providers.acme.name = Acme``), and the live identity may be either.
+    """
+    target = str(provider_id or "").strip()
+    if target.lower() in {"", "custom", "auto"}:
+        return get_label(target)
+    wanted = custom_provider_aliases(target)
+    for entries in (
+        (user_providers or {}).items() if isinstance(user_providers, dict) else (),
+        ((entry.get("provider_key", ""), entry) for entry in custom_providers or () if isinstance(entry, dict)),
+    ):
+        for key, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if wanted & custom_provider_aliases(
+                str(entry.get("name") or ""), str(entry.get("provider_key") or key or "")):
+                return str(entry.get("name") or key or target)
+    candidates = [target]
+    if target.lower().startswith("custom:"):
+        candidates.append(target.split(":", 1)[1])
+    for candidate in candidates:
+        pdef = resolve_provider_full(candidate, user_providers, custom_providers)
+        if pdef is not None and pdef.name:
+            return pdef.name
+    return get_label(target)
+
+
 def resolve_custom_provider(name: str, custom_providers: Optional[list[dict[str, Any]]]) -> Optional[ProviderDef]:
     """Resolve a provider from the user's config.yaml ``custom_providers`` list. A stored bare
     ``"custom"`` (corrupt state from a prior model-switch bug) falls back to the first valid entry

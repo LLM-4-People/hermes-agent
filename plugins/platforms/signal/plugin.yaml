@@ -41,6 +41,14 @@ optional_env:
     description: "Ignore Signal stories (true/false, default: true)"
     prompt: "Ignore stories? (true/false)"
     password: false
+  - name: SIGNAL_IGNORE_ATTACHMENTS
+    description: "Do not download inbound attachments (true/false, default: false)"
+    prompt: "Ignore attachments? (true/false)"
+    password: false
+  - name: SIGNAL_INLINE_ATTACHMENTS
+    description: "Send attachments as self-contained data URIs (always, default) or filesystem paths (never; requires a shared volume with signal-cli)"
+    prompt: "Inline attachments? (always/never)"
+    password: false
   - name: SIGNAL_HOME_CHANNEL
     description: "Default chat (phone number or group:<id>) for cron / notification delivery"
     prompt: "Home channel"

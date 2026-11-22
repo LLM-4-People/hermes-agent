@@ -1080,14 +1080,25 @@ class GatewaySlashCommandsMixin(
         if new_state:
             # Preview the model the next turn runs: the turn's own resolver (session /model >
             # channel_overrides > config.yaml); an unresolvable route still previews the config model.
+            preview_runtime: dict = {}
             try:
-                preview_model, _ = self._resolve_session_agent_runtime(source=event.source, user_config=user_config)
+                preview_model, preview_runtime = self._resolve_session_agent_runtime(
+                    source=event.source, user_config=user_config)
             except Exception:  # health: allow BLE001 -- a broken route must not break /footer on
                 logger.debug("Footer preview: session runtime unresolvable", exc_info=True)
                 preview_model = _resolve_gateway_model(user_config)
+            from hermes_cli.providers import provider_display_name
+            from hermes_cli.runtime_provider_custom import session_provider_identity
+
+            preview_identity = session_provider_identity(
+                preview_runtime.get("provider"), preview_runtime.get("requested_provider"),
+                preview_runtime.get("base_url"), preview_model, config=user_config)
+            preview_provider = provider_display_name(
+                preview_identity, user_config.get("providers"), user_config.get("custom_providers")
+            ) if preview_identity else ""
             preview = format_runtime_footer(
                 model=preview_model or None, context_tokens=0, context_length=None,
-                fields=effective.get("fields") or ["model", "context_pct", "cwd"])
+                provider=preview_provider, fields=effective["fields"])
             if preview:
                 example = t("gateway.footer.example_line", preview=preview)
         return t("gateway.footer.saved", state=_state(new_state), example=example)

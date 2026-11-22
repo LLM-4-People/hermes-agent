@@ -114,12 +114,13 @@ def opencode_session_headers(
 def custom_provider_session_affinity_headers(
     base_url: Optional[str],
     session_id: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> dict[str, str]:
     """Return ``{<session_affinity_header>: <key>}`` when the route's provider entry declares one, else ``{}``."""
     try:
         from hermes_cli.config import get_custom_provider_session_affinity_header
 
-        header = get_custom_provider_session_affinity_header(str(base_url or ""))
+        header = get_custom_provider_session_affinity_header(str(base_url or ""), provider=provider)
     except Exception:
         return {}
     if not header:
@@ -140,7 +141,7 @@ def merge_session_affinity_headers(
     Targets with neither source configured are left untouched.
     """
     headers = opencode_session_headers(provider, base_url, session_id)
-    headers.update(custom_provider_session_affinity_headers(base_url, session_id))
+    headers.update(custom_provider_session_affinity_headers(base_url, session_id, provider=provider))
     if headers:
         existing = kwargs.get("extra_headers")
         merged = dict(existing) if isinstance(existing, dict) else {}

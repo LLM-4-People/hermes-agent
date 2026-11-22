@@ -1808,8 +1808,9 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin, CLIHandoffMixin):
     def _handle_footer_command(self, cmd_original: str) -> None:
         """Toggle or inspect ``display.runtime_footer.enabled`` (``/footer [on|off|status]``)."""
         from hermes_cli.config import load_config
+        from hermes_cli.config_defaults import DEFAULT_RUNTIME_FOOTER_FIELDS
         footer_cfg = (((load_config() or {}).get("display") or {}).get("runtime_footer") or {})
-        fields = footer_cfg.get("fields") or ["model", "context_pct", "cwd"]
+        fields = footer_cfg.get("fields") or list(DEFAULT_RUNTIME_FOOTER_FIELDS)
         self._toggle_setting(
             _command_arg(cmd_original, lower=True), bool(footer_cfg.get("enabled", False)),
             usage=_t("footer.usage"), status_line=f"\n  {_t('footer.fields', fields=', '.join(fields))}",

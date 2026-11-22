@@ -50,7 +50,8 @@ def _route_identity() -> tuple:
         url, model = str(entry.get("base_url") or ""), route[1] or str(entry.get("model") or "")
         named = (url, str(entry.get("model") or ""))
     # The context pin the probe reads for this model at this URL (a matching entry's per-model, else entry-level).
-    pin = get_custom_provider_context_length(model=model, base_url=url) if url and model else None
+    pin = get_custom_provider_context_length(
+        model=model, base_url=url, provider=provider) if url and model else None
     return route + named + (str(pin or ""),)
 
 
