@@ -234,19 +234,29 @@ def terminal_run_status(result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     budget) is ``failed``, so ``completed: true`` never rides next to ``partial: true``."""
     interrupted = bool(result.get("interrupted"))
     finished = (
-        not interrupted and not result.get("failed") and not result.get("partial")
+        not interrupted and not result.get("failed") and not result.get("error") and not result.get("partial")
         and result.get("completed") is not False
     )
     status = "cancelled" if interrupted else "completed" if finished else "failed"
     fields: dict[str, Any] = {
         "completed": finished, "partial": bool(result.get("partial")), "interrupted": interrupted,
     }
-    if not finished and result.get("turn_exit_reason"):
-        fields["turn_exit_reason"] = str(result["turn_exit_reason"])
+    if not finished:
+        fields.update(_terminal_diagnostics(status, result))
     if result.get("pending_steer"):
         # Undelivered steer text rides on every terminal event/status for client replay.
         fields["pending_steer"] = result["pending_steer"]
     return status, fields
+
+
+def _terminal_diagnostics(status, result):
+    from gateway.platforms.api_server import _redact_api_error_text
+    fields = {}
+    if reason := result.get("turn_exit_reason"):
+        fields["turn_exit_reason"] = _redact_api_error_text(reason, limit=500)
+    if status == "failed" and (result.get("failed") or result.get("error")):
+        fields["error"] = _redact_api_error_text(result.get("error") or "agent run failed", limit=500)
+    return fields
 
 
 def _run_not_found(_openai_error, run_id: str) -> web.Response:
@@ -592,6 +602,7 @@ class _RunLaunch:
     request_profile: Any
     turn_author: Optional[dict[str, Any]] = None  # memory-attribution label only; grants nothing
     admission: Any = None
+    tool_options: Optional[dict] = None
     walked_from: Optional[str] = None  # the swept stored session the chain moved past (``bind_api_steps``)
 
     @property
@@ -760,7 +771,7 @@ async def _admit_run_to_authority(
             launch.admission = await admit_api_turn_async(self, user_message=launch.user_message,
                 conversation_history=launch.conversation_history, active_run_id=run_id,
                 run_owner_scope=self._run_owners[run_id],
-                turn_author=launch.turn_author,
+                turn_author=launch.turn_author, **(launch.tool_options or {}),
                 history_from_session=session_history_delivery,
                 session_history_delivery='1' if session_history_delivery else '',
                 bind_declared_conversation=_declared_selected, walked_from=launch.walked_from,
@@ -775,13 +786,47 @@ async def _admit_run_to_authority(
             return None
         # A refused admission owns no run: drop every reservation so an exact
         # retry is refused again instead of replaying a run nobody executes.
-        _forget_run(
-            self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
-            self._run_statuses, self._run_owners, self._run_idempotency_ids)
-        if idempotency_key:
-            self._run_idempotency_store.forget(idempotency_scope, idempotency_key)
+        _release_refused_run(self, run_id, idempotency_scope, idempotency_key)
         return store_error_response(_openai_error, exc)
     return None
+
+
+async def _read_run_tool_options(body, _openai_error):
+    from gateway.platforms.api_server_request_options import InvalidRunToolSelection, RUN_TOOL_FIELDS, RunToolPolicyUnavailable, run_tool_options
+    if not any(field in body for field in RUN_TOOL_FIELDS):
+        return {}, None
+    try:
+        options = await asyncio.to_thread(run_tool_options, body)
+        return options, None
+    except InvalidRunToolSelection as exc:
+        return None, _json_error(_openai_error, str(exc), code="invalid_toolset_selection", status=400)
+    except RunToolPolicyUnavailable as exc:
+        return None, _json_error(_openai_error, str(exc), code="tool_policy_unavailable", status=503)
+
+
+def _release_refused_run(self, run_id, idempotency_scope, idempotency_key):
+    _forget_run(self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
+                self._run_statuses, self._run_owners, self._run_idempotency_ids)
+    if idempotency_key:
+        self._run_idempotency_store.forget(idempotency_scope, idempotency_key)
+
+
+async def _admit_selected_run(self, launch, selected_session_id, scope, key, _openai_error):
+    from gateway.platforms.api_server_authority_runs import store_error_response
+    try:
+        delivered = await self._admit_to_live_bot_chat(
+            launch.session_id, launch.user_message, launch.turn_author,
+            **({"allow_delivery": False} if launch.tool_options else {})
+        ) if selected_session_id else None
+    except AuthorityRefusal as exc:
+        _release_refused_run(self, launch.run_id, scope, key)
+        return None, store_error_response(_openai_error, exc)
+    _retarget_to_delivered_chat(self, launch, delivered)
+    if delivered is None and getattr(self.gateway_runner, 'session_authority', None) is not None:
+        return None, await _admit_run_to_authority(
+            self, launch, launch.run_id, launch.session_history_delivery, launch.declared_selected,
+            scope, key, _openai_error)
+    return delivered, None
 
 
 async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Response:
@@ -791,10 +836,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     gateway_session_key, key_err = self._parse_session_key_header(request)
     if key_err is not None:
         return key_err
-    try:
-        body = await request.json()
-    except Exception:
-        return _json_error(_openai_error, "Invalid JSON", status=400)
+    body, error = await self._read_json_body(request)
+    if error is not None:
+        return error
     body, room_error = await self._normalize_room_dispatch(request, body)
     if room_error is not None:
         return room_error
@@ -839,6 +883,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             retention_until=_room_retention_until(request))
         if outcome == "conflict" or (outcome == "reused" and record is not None):
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
+    selection, error = await _read_run_tool_options(body, _openai_error)
+    if error is not None:
+        return error
     # Enforce concurrency only for a genuinely new run.
     limited = self._concurrency_limited_response()
     if limited is not None:
@@ -892,21 +939,17 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
-        request_profile=_api_server._api_request_profile.get(),
+        request_profile=_api_server._api_request_profile.get(), tool_options=selection,
         turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None)
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
     # receipt drives this run's status, so `peer run` keeps its run_id and `peer status` still works.
     # Under session authority the same call admits the turn to the Bot Chat's own FIFO, which is
     # why it is decided BEFORE ``admit_api_turn`` would bind the chat as an API conversation.
-    admitted = await self._admit_to_live_bot_chat(session_id, user_message, turn_author) if selected_session_id else None
-    _retarget_to_delivered_chat(self, launch, admitted)
-    if admitted is None and getattr(self.gateway_runner, 'session_authority', None) is not None:
-        refused = await _admit_run_to_authority(
-            self, launch, run_id, session_history_delivery, _declared_selected,
-            idempotency_scope, idempotency_key, _openai_error)
-        if refused is not None:
-            return refused
+    admitted, refused = await _admit_selected_run(self, launch, selected_session_id,
+                                                  idempotency_scope, idempotency_key, _openai_error)
+    if refused is not None:
+        return refused
     self._activate_admitted_request()
     if admitted is not None:
         task = self._active_run_tasks[run_id] = asyncio.create_task(
@@ -1151,19 +1194,23 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 result, usage = await observe_api_turn(
                     run.admission, stream_delta_callback=_text_cb,
                     tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
+            from gateway.platforms.api_server_authority_runs import canonical_run_usage
+            usage = canonical_run_usage(usage)
             # The canonical turn has no agent object here; the served pair rides on the
             # committed usage/result runtime metadata when the turn recorded one.
             served_runtime = ((usage or {}).get("runtime") if isinstance(usage, dict) else None) or (
                 result.get("runtime") if isinstance(result, dict) else None) or {}
         else:
-            with self._profile_scope(run.request_profile):
+            from gateway.platforms.api_server_request_options import prepare_run_tool_scope
+            with self._profile_scope(run.request_profile), await prepare_run_tool_scope(run.tool_options):
+                run_context = contextvars.copy_context()
                 agent = self._create_agent(
                     stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
                     interim_assistant_callback=_interim_cb, **run.agent_kwargs)
             self._active_run_agents[run_id] = agent
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
             result, usage, served_runtime = await _submit_api_worker(
-                loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+                loop, lambda: run_context.run(_run_agent_sync, self, run, agent, approval_notify, _api_server=_api_server))
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):
@@ -1175,7 +1222,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             _finish("cancelled", fields)
         elif result.get("failed"):
             # Non-retryable client errors (401/400) return failed=True rather than raising.
-            _finish("failed", fields, error=_redact_api_error_text(result.get("error") or "agent run failed"))
+            _finish("failed", fields)
         else:
             # ``runtime`` rides on both the pollable status and the run.completed event via _finish, in the
             # canonical shape every other api_server surface emits (route_source/requested, cleaned ids).

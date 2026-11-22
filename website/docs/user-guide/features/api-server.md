@@ -477,6 +477,25 @@ In addition to `/v1/chat/completions` and `/v1/responses`, the server exposes a 
 
 Create a new agent run. Returns a `run_id` that can be used to subscribe to progress events.
 
+A client can restrict a run to selected toolsets when `features.run_toolset_selection` is true in
+`GET /v1/capabilities`. Submit `allowed_toolsets` as an array of distinct, enabled toolset names
+from `GET /v1/toolsets`. For example, `{"input":"Summarize this thread","allowed_toolsets":[]}`
+starts a conversation-only run. Omitting the field uses the profile defaults. A malformed or
+unknown selection returns HTTP 400. If the server cannot read its tool policy, it returns HTTP 503.
+Tool availability and approval policy still apply.
+With `features.run_tool_exclusions`, the optional `excluded_tools` array removes individual
+tools by their canonical names. For example, `"allowed_toolsets":["file"],"excluded_tools":["write_file","patch"]`
+keeps the file toolset's other operations. An exclusion takes precedence even when two selected
+toolsets provide the same tool. The restriction follows this run through worker threads and nested Hermes tool dispatch.
+Changing the tools advertised to a provider between turns can reduce prompt-cache reuse.
+A Bot Chat owned by a separate client uses its own tool policy and refuses restricted runs.
+Room grants continue to use the target member's signed execution policy.
+
+When a terminal run reports `usage.scope` as `run`, its output count covers that admission.
+Pair it with the observed end-to-end elapsed time to display a run-wide output rate. A session
+resource exposes `actual_cost_usd`, `estimated_cost_usd`, `cost_status`, and `cost_source`
+for the conversation. Amounts accumulate across calls. Status and source describe the latest reported observation.
+
 ```json
 {
   "run_id": "run_abc123",

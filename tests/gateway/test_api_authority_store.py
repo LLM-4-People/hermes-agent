@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from gateway.config import PlatformConfig
 from gateway.platforms.api_server import APIServerAdapter
 from gateway.session_authority import SessionAuthority
+from persistence.conversation.usage import UsageDelta
 from tests.fixtures.storage_read import session_row
 from tests.fixtures.storage_seed import seed_session
 from tests.gateway.fixtures.storage_handles import close_storage_handles, storage_handle
@@ -33,6 +34,9 @@ def owned_api(tmp_path, monkeypatch):
 async def test_bound_api_borrows_selected_authority_store(owned_api):
     adapter, db = owned_api
     seed_session(db, 'owned-session', 'api_server')
+    db.usage.queue_usage('owned-session', UsageDelta(actual_cost_usd=0.25, cost_status='actual', cost_source='provider'))
+    db.usage.queue_usage('owned-session', UsageDelta(estimated_cost_usd=0.10, cost_status='estimated', cost_source='local'))
+    assert db.usage.flush_usage()
     store = adapter.gateway_runner.session_authority.persistence
     assert adapter._ensure_store() is store
     assert await adapter._ensure_store_async() is store
@@ -44,7 +48,10 @@ async def test_bound_api_borrows_selected_authority_store(owned_api):
         reply = await client.get('/api/sessions/owned-session',
                                  headers={'Authorization': 'Bearer owned-api-test-secret'})
         assert reply.status == 200, await reply.text()
-        assert (await reply.json())['session']['id'] == 'owned-session'
+        session = (await reply.json())['session']
+        assert session['id'] == 'owned-session'
+        assert session['actual_cost_usd'] == 0.25 and session['estimated_cost_usd'] == 0.10
+        assert session['cost_status'] == 'estimated' and session['cost_source'] == 'local'
     adapter._close_cached_session_dbs()
     assert session_row(db, 'owned-session')['id'] == 'owned-session'
 

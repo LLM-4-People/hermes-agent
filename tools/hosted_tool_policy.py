@@ -1,4 +1,8 @@
-"""What a hosted scope may run: an allowlist of tools, and one switch for host-state features.
+"""Tool execution restrictions for hosted scopes and per-run tool selections.
+
+A client may narrow the operator's toolsets for its run. The effective tool names follow the
+execution context into child agents and workers. The model's advertised schemas and executor
+both consult the selection. Provider-injected tools additionally require their own agent handler.
 
 In a hosted scope nothing tenant-supplied may execute on this host or touch its filesystem, and no
 agent may read or write state this host keeps for its profile. Two decisions enforce that. Each is
@@ -18,12 +22,13 @@ until someone shows it acts only through the agent's sandbox:
   host's state for the profile, or run here (:data:`HOST_FEATURES`). Every one is off in a hosted
   scope; each site asks this one function. They come back per agent through storage ports.
 
-A local install (no scope, or a local one) is untouched: neither set is consulted, and every
-function here answers "allowed".
+A local install uses its normal tool policy unless the run supplies a selection.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 # Tools whose every effect goes through the agent's ScopedEnvironment and nothing on this host:
@@ -64,6 +69,74 @@ HOST_FEATURES = frozenset({
     "transcription",              # audio read and speech engines run here
     "delegation",                 # child agents started outside a tool call (/review)
 })
+
+
+_RUN_TOOLS = ContextVar("run_tools", default=None)
+
+
+@contextmanager
+def restrict_tools(toolsets, names, exclusions):
+    parent = _RUN_TOOLS.get()
+    chosen, allowed = frozenset(toolsets), frozenset(names)
+    excluded = frozenset(exclusions)
+    if parent is not None:
+        excluded |= parent[2]
+        chosen, allowed = chosen & parent[0], allowed & parent[1]
+    token = _RUN_TOOLS.set((chosen, allowed, excluded))
+    try:
+        yield
+    finally:
+        _RUN_TOOLS.reset(token)
+
+
+def scoped_toolsets(toolsets):
+    selection = _RUN_TOOLS.get()
+    if selection is None:
+        return toolsets
+    return sorted(selection[0] if toolsets is None else selection[0].intersection(toolsets))
+
+
+def run_tool_names():
+    selection = _RUN_TOOLS.get()
+    return selection[1] if selection is not None else None
+
+
+def run_policy_key():
+    selection = _RUN_TOOLS.get()
+    return [sorted(part) for part in selection] if selection is not None else None
+
+
+def _run_permits(name, selection, agent):
+    toolsets, names, excluded = selection
+    if name in excluded:
+        return False
+    if name in names:
+        return True
+    if agent is None or name not in getattr(agent, "valid_tool_names", ()):
+        return False
+    # These two providers attach tools directly to an agent after registry discovery. A grant
+    # follows only that agent's real handler. Registry and inline dispatch keep their own fence.
+    from agent.inline_tool_executors import is_context_engine_tool, is_memory_provider_tool
+    return (("memory" in toolsets and is_memory_provider_tool(agent, name))
+            or ("context_engine" in toolsets and is_context_engine_tool(agent, name)))
+
+
+def scoped_tool_schemas(agent, schemas):
+    selection = _RUN_TOOLS.get()
+    if selection is None or not schemas:
+        return schemas
+    return [schema for schema in schemas if _run_permits(schema["function"]["name"], selection, agent)]
+
+
+def run_tool_refusal(name: str, agent=None) -> Optional[str]:
+    selection = _RUN_TOOLS.get()
+    if selection is not None and not _run_permits(name, selection, agent):
+        return f"The tool {name!r} is outside this run's selected toolsets."
+    return None
+
+
+def tool_execution_refusal(name: str, agent=None) -> Optional[str]:
+    return hosted_tool_refusal(name) or run_tool_refusal(name, agent)
 
 
 class HostedToolRefused(PermissionError):

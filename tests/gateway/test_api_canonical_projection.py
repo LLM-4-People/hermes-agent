@@ -404,3 +404,30 @@ async def test_canonical_sse_projects_the_turn_reasoning(api, owner, path, body,
         text = await response.text()
     assert response.status == 200, text
     assert marker in text and 'THINKING' in text, text
+
+
+@pytest.mark.asyncio
+async def test_failed_run_poll_and_sse_share_bounded_public_diagnostics(api, owner):
+    from gateway.platforms.api_server_authority_runs import run_projection
+    from gateway.session_results import execution_result
+
+    admitted = admit_api_turn(api, session_id="failed-run", request_id="failure-id",
+                              user_message="hello", conversation_history=[])
+    launch, queue = _launch(api, admitted, run_id="failure-id")
+    secret = "sk-" + "x" * 40
+
+    async def handle(event):
+        execution_result.get()["result"] = {
+            "failed": True, "error": f"provider key {secret} " + ("e" * 1500),
+            "turn_exit_reason": f"provider error {secret} " + ("r" * 1500)}
+        return ""
+
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)
+    failed = next(event for event in _events(queue) if event["event"] == "run.failed")
+    polled = run_projection(api, "failure-id")
+    assert polled["status"] == "failed"
+    for key in ("error", "turn_exit_reason"):
+        assert polled[key] == failed[key]
+        assert len(polled[key]) == 500 and secret not in polled[key]

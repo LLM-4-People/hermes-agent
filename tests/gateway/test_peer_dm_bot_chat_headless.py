@@ -469,3 +469,14 @@ def test_a_local_bot_chat_is_never_displaceable_without_a_lineage_read(headless,
     monkeypatch.setattr(db.lineage, 'tip', lambda sid: reads.append(sid) or sid)
     assert displaceable_bot_chat(headless.authority, {'id': 'x', 'chat_id': 'local-abc', 'source': 'gui'}) is None
     assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_restricted_peer_run_refuses_a_handoff_before_the_owner_receives_input(headless):
+    old = _api_bot_chat(headless.authority.persistence)
+    for _ in range(2):
+        response = await headless.cli.post("/v1/runs", headers={"Idempotency-Key": "declined"},
+                                            json={"input": "hello", "session_id": old, "allowed_toolsets": []})
+        assert response.status == 409
+        assert (await response.json())["error"]["code"] == "bot_chat_parameters_unsupported"
+    assert not headless.executed
