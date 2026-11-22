@@ -121,3 +121,5 @@ scripts/downstream-verify.sh
 The test/static gate has two shared owners: `scripts/downstream-verify.sh` for the Python checks
 and `.github/actions/workflow-lint` for the workflow audit. `downstream-ci.yml` and
 `sync-upstream.yml` both invoke them, so CI and the merge gate cannot drift.
+
+<!-- pii-guard verification branch; not for merge -->
