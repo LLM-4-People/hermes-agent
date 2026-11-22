@@ -845,6 +845,18 @@ async def _admit_selected_run(self, launch, selected_session_id, scope, key, _op
     return delivered, None
 
 
+async def _resolve_selected_session_and_attachments(
+    self, selected_session_id, run_id, body, user_message, _openai_error,
+):
+    from gateway.platforms.api_server_workspace import apply_run_attachments
+
+    if selected_session_id:
+        selected_session_id = await _resolve_live_session_id(self, str(selected_session_id))
+    session_id = selected_session_id or run_id
+    user_message, att_err = await apply_run_attachments(str(session_id), body, user_message, _openai_error)
+    return selected_session_id, session_id, user_message, att_err
+
+
 async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Response:
     """POST /v1/runs — start an agent run, return run_id immediately."""
     _openai_error = _api_server._openai_error
@@ -918,9 +930,11 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     # A client-addressed id from before a compression rotation must adopt the live tip (#98619):
     # history loads from it, the turn writes to it, and a detached delivery row persisted to it
     # is what the next same-id run consumes below.
-    if selected_session_id:
-        selected_session_id = await _resolve_live_session_id(self, str(selected_session_id))
-    session_id = selected_session_id or run_id
+    selected_session_id, session_id, user_message, att_err = await _resolve_selected_session_and_attachments(
+        self, selected_session_id, run_id, body, user_message, _openai_error
+    )
+    if att_err is not None:
+        return att_err
     # History loads for the session the request actually selected — including one resolved from
     # a declared X-Hermes-Session-Key, whose persisted delivery rows must reach the next
     # same-key run's context (#98619).  previous_response_id continuations keep their
