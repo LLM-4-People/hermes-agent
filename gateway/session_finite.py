@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from session_rules.photo_previews import api_photo_preview
+
 from persistence.core.errors import AuthorityRefusal
 
 _finite_turn = ContextVar('finite_turn', default=None)
@@ -76,6 +78,6 @@ async def execute_finite_admission(authority, ref, row):
     with finite_turn_scope(row['payload'].get('finite', False), row['payload'].get('unattended') is True), \
             surface_turn_scope(row['payload'].get('surface_v1')), \
             display_turn_scope(row['admission_id'], row['payload'].get('display_v1')), \
-            submission_turn_scope(row['admission_id'], row.get('request_id')), \
+            submission_turn_scope(row['admission_id'], row.get('request_id'), api_photo_preview(row['payload'])), \
             cli_turn_scope(row['admission_id'], row['payload'].get('cli_turn_v1')):
         return await execute_admission(authority, ref, row)

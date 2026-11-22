@@ -64,9 +64,11 @@ def test_session_listings_search_messages_only_through_the_timestamp_index(tmp_p
 
     assert rows and all(r["preview"] for r in rows)
     reads = [s for s in statements if s.lstrip().split(None, 1)[0].upper() in ("SELECT", "WITH")]
-    plan_conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    plans = [row[3] for sql in reads for row in plan_conn.execute("EXPLAIN QUERY PLAN " + sql)]
-    plan_conn.close()
+    plan_db = StoreHolder(path, read_only=True)
+    try:
+        plans = [row[3] for sql in reads for row in plan_db._read_all("EXPLAIN QUERY PLAN " + sql)]
+    finally:
+        plan_db.close()
     message_searches = [p for p in plans if re.match(r"(SEARCH|SCAN) (m|_act_m)\b", p)]
     # Preview (m) and last-active (_act_m) both run, and both only through idx_messages_session.
     assert {p.split()[1] for p in message_searches} == {"m", "_act_m"}, plans

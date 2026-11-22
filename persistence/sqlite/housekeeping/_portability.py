@@ -21,6 +21,7 @@ from persistence.housekeeping.maintenance import (
     SessionExportRow, SessionLineageExport,
 )
 from session_rules.session_ids import new_session_id
+from ._photo_export import stamp_exported_photo_previews
 from utils import safe_json_loads
 
 from .._backend import translated
@@ -420,6 +421,7 @@ class SessionPortability:
                        include_inactive: bool = False) -> SessionExport:
         messages = get_messages(holder, session["id"], include_inactive=include_inactive,
                                 include_compacted=include_compacted)
+        stamp_exported_photo_previews(holder, {session["id"]: messages})
         return SessionExport(session=_export_row(session), messages=tuple(map(_transcript_row, messages)))
 
     @classmethod
@@ -469,6 +471,7 @@ class SessionPortability:
                 messages_by_session[row["session_id"]].append(
                     _row_to_message_dict(holder, row, warn_context="get_messages", summary_flag=True)
                 )
+        stamp_exported_photo_previews(holder, messages_by_session)
         return tuple(SessionExport(session=_export_row(session),
                                    messages=tuple(map(_transcript_row, messages_by_session[session["id"]])))
                      for session in sessions)

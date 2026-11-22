@@ -8,6 +8,7 @@ from persistence.sqlite._schema_ddl import _BRANCH_CHILD_SQL, _RESET_CHILD_SQL, 
 from persistence.sqlite.conversation._store.rules import (
     AUTO_LOAD_SCAFFOLD_SQL_LIKE, EPOCH_MAX, EPOCH_MIN, SKILL_SCAFFOLD_SQL_LIKE,
 )
+from session_rules.photo_previews import PREVIEW_HEAD_CHARS
 from session_rules.turns import (
     LEGACY_SUMMARY_PREFIX, SKILL_EXCERPT_JOINT, SUMMARY_PREFIX, _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER,
     _SUMMARY_END_MARKER,
@@ -17,9 +18,6 @@ from session_rules.turns import (
 # Session preview = head of the first user message (shown when a session has no title).  A /skill invocation
 # embeds the whole skill body, so scaffolded rows take a wider excerpt (whole message under budget, else head +
 # tail where the typed instruction lands) and ``_shape_preview`` recovers the typed command from it.
-_PREVIEW_HEAD_CHARS = 63
-
-
 _PREVIEW_SCAFFOLD_WINDOW = 400
 
 
@@ -113,15 +111,31 @@ _PREVIEW_RAW_SELECT = (
     f" THEN SUBSTR({_PREVIEW_CONTENT_SQL}, 1, {_PREVIEW_SCAFFOLD_WINDOW}) || '{SKILL_EXCERPT_JOINT}'"
     f" || SUBSTR({_PREVIEW_CONTENT_SQL}, -{_PREVIEW_SCAFFOLD_WINDOW})"
     f" WHEN {_PREVIEW_SCAFFOLDED_SQL} THEN SUBSTR({_PREVIEW_CONTENT_SQL}, 1, {_PREVIEW_SCAFFOLD_WINDOW * 2})"
-    f" ELSE SUBSTR({_sql_ltrim_whitespace(_PREVIEW_CONTENT_SQL)}, 1, {_PREVIEW_HEAD_CHARS}) END")
+    f" ELSE SUBSTR({_sql_ltrim_whitespace(_PREVIEW_CONTENT_SQL)}, 1, {PREVIEW_HEAD_CHARS}) END")
 
 
-def _sql_preview_raw(session_id_expr: str = "s.id") -> str:
-    """Correlated ``_preview_raw`` column: the first eligible user message of *session_id_expr*.
-    ``INDEXED BY`` walks the session in timestamp order and stops at the first eligible row; with planner
-    stats older than idx_messages_session_id, SQLite otherwise reads and sorts the whole session (#119403)."""
-    return (f"COALESCE((SELECT {_PREVIEW_RAW_SELECT} FROM messages m INDEXED BY idx_messages_session"
-        f" WHERE m.session_id = {session_id_expr} AND m.role = 'user' AND m.content IS NOT NULL"
+# For ordinary text the original indexed query stays on its cheap, bounded path. A marker
+# outside the preview cannot be visible, unless leading whitespace brings it into the window.
+_PREVIEW_MAY_SHOW_PHOTO = f"""typeof(m.content) = 'text' AND (instr(substr(m.content, 1, {PREVIEW_HEAD_CHARS + 16}), '[') > 0
+    OR substr(m.content, 1, 1) IN (char(9), char(10), char(13), ' '))
+    AND instr(m.content, '[Image attached') > 0 AND instr(m.content, '[screenshot') > 0"""
+
+
+def _sql_preview_raw(has_admissions: bool, session_alias: str = "s") -> str:
+    """Walk only the first eligible user row in timestamp order; look up an old photo's owner by its unique ID."""
+    # Read the underlying bytes of archived JSON. Some legacy JSON strings contain
+    # isolated surrogates which SQLite's JSON functions would return as invalid UTF-8.
+    user_photo = "stored_photo_preview(CAST(m.display_metadata AS BLOB))"
+    admission = """(SELECT CAST(a.payload_json AS BLOB) FROM session_admissions a
+        WHERE a.admission_id = m.platform_message_id AND a.target_session_id = m.session_id)""" if has_admissions else "NULL"
+    archived = f"archived_photo_preview(m.content, {session_alias}.source, {admission})"
+    # The ordinary head/scaffold/compaction rules also apply to recovered captions. Confine
+    # the extra subquery to rare receipt-shaped rows; COALESCE skips the ledger for stamped turns.
+    shaped = _PREVIEW_RAW_SELECT.replace("m.content", "caption.content")
+    photo = f"(SELECT {shaped} FROM (SELECT coalesce({user_photo}, {archived}) AS content LIMIT 1) caption LIMIT 1)"
+    return (f"COALESCE((SELECT CASE WHEN {_PREVIEW_MAY_SHOW_PHOTO} THEN {photo} ELSE {_PREVIEW_RAW_SELECT} END"
+        f" FROM messages m INDEXED BY idx_messages_session"
+        f" WHERE m.session_id = {session_alias}.id AND m.role = 'user' AND m.content IS NOT NULL"
         f" AND {_PREVIEW_ELIGIBLE_SQL} ORDER BY m.timestamp, m.id LIMIT 1), '') AS _preview_raw")
 
 

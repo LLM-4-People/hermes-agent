@@ -1031,7 +1031,7 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
             last_id, first = 0, True
             while True:
                 messages = [row.as_wire_row() for row in store.messages.read_transcript(
-                    sid, TranscriptRead(view=TranscriptView.ALL, limit=500, after_id=last_id))]
+                    sid, TranscriptRead(view=TranscriptView.ALL, limit=500, after_id=last_id, for_export=True))]
                 for message in messages:
                     yield ("" if first else ",") + _compact_json(message)
                     first = False
