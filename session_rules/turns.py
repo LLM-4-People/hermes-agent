@@ -729,6 +729,17 @@ def project_compaction_message_for_display(message: dict[str, Any]) -> Optional[
     return projected
 
 
+def transcript_message_visible(message: dict[str, Any]) -> bool:
+    """Whether the client transcript draws this stored row after projecting its compaction carrier."""
+    if message.get("role") == "session_meta":
+        return False
+    if (message.get("display_kind") == "hidden"
+            and (message.get("display_metadata") or {}).get("notification_category") == "diagnostic"):
+        return False
+    projected = project_compaction_message_for_display(message)
+    return projected is not None and projected.get("display_kind") != "hidden"
+
+
 # Unanswered text a merged user row held before the current turn was absorbed
 # (agent_runtime_helpers._merge_consecutive_users); the persist override keeps it.
 # It repeats the row's own content, so pricing it would double the estimate.

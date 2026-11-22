@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Iterator, Optional, Sequence
 
 from persistence import ProfileScope, RowVisibility
@@ -91,6 +92,16 @@ class MessageReadsMixin(MessageBase):
             chosen = [p for p in pairs if keep(p[1]) and (request.after_id is None or p[1].id > int(request.after_id))]
         page = _page(chosen, limit=request.limit, offset=request.offset, latest=request.latest)
         return tuple(row.as_transcript_row(sid) for sid, row in page)
+
+    def read_transcript_page(self, session_id, request, *, visible_only=False):
+        from persistence.conversation.messages import TranscriptPage
+        from session_rules.turns import transcript_message_visible
+        rows = self.read_transcript(session_id, replace(request, limit=None, offset=0))
+        if visible_only:
+            rows = tuple(row for row in rows if transcript_message_visible(row.as_wire_row()))
+        page = _page(rows, limit=request.limit, offset=request.offset, latest=request.latest)
+        root = self._ids(self._backend.scope, session_id, request.include_lineage)[0]
+        return TranscriptPage(tuple(page), len(rows), SessionId(root))
 
     def active_message_ids(self, session_id: SessionId) -> tuple[MessageId, ...]:
         scope = self._backend.scope

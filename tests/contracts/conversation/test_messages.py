@@ -1021,6 +1021,25 @@ def test_reference_rewind_user_turn_classifies_the_post_read_refusals():
 
 
 
+@pytest.mark.parametrize("view", [TranscriptView.ACTIVE, TranscriptView.DISPLAY])
+@pytest.mark.parametrize("latest", [True, False])
+def test_transcript_page_counts_the_same_lineage_projection_it_pages(backend, scope_a, view, latest):
+    """Compaction copies, archive/rewind, visible filtering and offsets use one row set."""
+    from session_rules.turns import transcript_message_visible
+    repo = backend.open(scope_a).messages
+    lineage_script().apply(backend, scope_a)
+    raw = repo.read_transcript(CHILD, TranscriptRead(view=view, include_lineage=True))
+    for visible in (False, True):
+        expected = [r for r in raw if not visible or transcript_message_visible(r.as_wire_row())]
+        for offset in (0, 1, len(expected), len(expected) + 1):
+            request = TranscriptRead(view=view, include_lineage=True, limit=2, offset=offset, latest=latest)
+            page = repo.read_transcript_page(CHILD, request, visible_only=visible)
+            assert page.total == len(expected)
+            assert page.root_id == SESSION
+            wanted = expected[::-1][offset:offset + 2][::-1] if latest else expected[offset:offset + 2]
+            assert list(page.rows) == wanted
+
+
 def test_read_transcript_display_shows_each_carried_message_once(backend, scope_a):
     """CONTRACT: DISPLAY carries compaction history plus the live set, each logical message once with the live row preferred; ACTIVE is the live set only; the summary marker rides as ``_compressed_summary``."""
     store_a = backend.open(scope_a)

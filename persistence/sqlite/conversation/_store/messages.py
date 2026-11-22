@@ -1092,7 +1092,7 @@ def _fold_summary_carrier(row, key: Any, first_by_uid: dict) -> Any:
 
 
 def _dedupe_display_generations(holder: StoreHolder, rows, *, drop_removed: bool = False,
-                                first_ids: Optional[dict] = None):
+                                first_ids: Optional[dict] = None, indexed_keys: bool = False):
     """Collapse compaction generations so each logical message appears once (the protected tail is copied
     into each generation: same role/content/timestamp, different ``active``/id); prefer the live row, then
     the newest. The ONE definition every display projection shares. *rows* must be ordered by ``id``.
@@ -1103,6 +1103,11 @@ def _dedupe_display_generations(holder: StoreHolder, rows, *, drop_removed: bool
     (a micro-compaction merge also stands for the rows it absorbed). *first_ids* gets each kept row's id ->
     its message's first durable row id, a removed copy's included (a carried tail's superseded original):
     the key no compaction or rotation moves."""
+    def row_key(row):
+        if indexed_keys:
+            return row["display_identity"]
+        return _display_dedupe_key(holder, row)
+
     seen: dict[tuple[Any, ...], Any] = {}
     first_id: dict[tuple[Any, ...], int] = {}
     uid_key: dict[Any, tuple[Any, ...]] = {}  # message_uid -> the display key of its first copy
@@ -1124,9 +1129,10 @@ def _dedupe_display_generations(holder: StoreHolder, rows, *, drop_removed: bool
             # A removed row is read without its body (``_removed_identity_rows``): its stored display identity.
             gone = not row["active"] and not row["compacted"]
             stored = row["display_identity"] if gone else None
-            key = None if stored else _display_dedupe_key(holder, row)
-            hashed = stored or (_display_identity(key) if key is not None and (
-                gone or row["timestamp"] in removed_ts) else None)
+            key = None if stored else row_key(row)
+            hashed = stored
+            if key is not None and (gone or row["timestamp"] in removed_ts):
+                hashed = key if indexed_keys else _display_identity(key)
             copies = [*((hashed,) if hashed else ()), *(
                 ("uid", uid) for uid in (row["message_uid"], *_uid_list(row["absorbed_message_uids"])) if uid)]
             removed.update(dict.fromkeys(copies, gone))
@@ -1136,7 +1142,7 @@ def _dedupe_display_generations(holder: StoreHolder, rows, *, drop_removed: bool
                 continue
         if _is_model_only_row(holder, row) or row["id"] in later_copies:
             continue
-        key = key or _display_dedupe_key(holder, row)
+        key = key or row_key(row)
         # Only the summary carrier folds by uid: other rewritten copies (a pruned tool stub) must keep
         # their archived original visible.
         key = _fold_summary_carrier(row, key, uid_key)
@@ -1216,36 +1222,40 @@ def _ensure_display_order(holder: StoreHolder, session_id: str) -> bool:
     return bool(holder._execute_write(_do))
 
 
+def _legacy_display_ids(holder: StoreHolder, conn, session_id, active_clause):
+    """Ordered representative IDs from old schemas, retaining only fixed-width identity keys."""
+    representatives: dict[bytes, tuple[int, int]] = {}
+    has_session_index = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        ("idx_messages_session_id",),
+    ).fetchone() is not None
+    index_hint = "INDEXED BY idx_messages_session_id" if has_session_index else "NOT INDEXED"
+    rows = conn.execute(
+        "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, active, "
+        f"display_kind, display_metadata FROM messages {index_hint} "
+        f"WHERE session_id = ?{active_clause} ORDER BY id ASC",
+        (session_id,))
+    for row in rows:
+        if _is_model_only_row(holder, row):
+            continue
+        identity = _display_identity(_display_dedupe_key(holder, row))
+        current = representatives.get(identity)
+        candidate = (row["active"], row["id"])
+        if current is None or candidate > current:
+            representatives[identity] = candidate
+    rows.close()
+
+    return [row_id for _, row_id in representatives.values()]
+
+
 def _legacy_display_page(holder: StoreHolder, session_id: str, *, active_clause: str, limit: Optional[int], offset: int,
                          latest: bool) -> list[Any]:
     """Project a legacy read-only display page without retaining transcript payloads."""
-    representatives: dict[bytes, tuple[int, int]] = {}
     with holder._read_ctx() as conn:
         conn.execute("BEGIN")
         try:
-            has_session_index = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
-                ("idx_messages_session_id",),
-            ).fetchone() is not None
-            index_hint = "INDEXED BY idx_messages_session_id" if has_session_index else "NOT INDEXED"
-            rows = conn.execute(
-                "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, active, "
-                f"display_kind, display_metadata FROM messages {index_hint} "
-                f"WHERE session_id = ?{active_clause} ORDER BY id ASC",
-                (session_id,))
-            for row in rows:
-                if _is_model_only_row(holder, row):
-                    continue
-                identity = _display_identity(_display_dedupe_key(holder, row))
-                current = representatives.get(identity)
-                candidate = (row["active"], row["id"])
-                if current is None or candidate > current:
-                    representatives[identity] = candidate
-            rows.close()
-
-            identities = list(representatives)
-            identities = identities[::-1][offset:][:limit][::-1] if latest else identities[offset:][:limit]
-            selected_ids = [representatives[identity][1] for identity in identities]
+            ids = _legacy_display_ids(holder, conn, session_id, active_clause)
+            selected_ids = ids[::-1][offset:][:limit][::-1] if latest else ids[offset:][:limit]
             selected = {}
             for start in range(0, len(selected_ids), 900):
                 chunk = selected_ids[start:start + 900]

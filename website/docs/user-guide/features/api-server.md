@@ -776,6 +776,13 @@ External UIs can manage Hermes sessions over REST without standing up the dashbo
 | `POST` | `/api/sessions/{id}/chat` | Run one synchronous agent turn |
 | `POST` | `/api/sessions/{id}/chat/stream` | SSE wrapper over a single turn — emits `assistant.delta`, `assistant.commentary` (mid-turn commentary: `message_id`, `text`, `already_streamed`; never folded into `assistant.completed`), `tool.started`, `tool.completed`, `tool.failed` (a tool that finished with an error), then a terminal `run.completed` / `run.failed` / `run.cancelled` event that matches how the turn ended (see [Terminal run status](../../developer-guide/programmatic-integration.md#terminal-run-status)) |
 
+The gateway message page includes `session_id` for the resolved continuation, `thread_id` for
+the root of its compression lineage, and nullable `thread_title` from the continuation or its root.
+A fork starts its own thread. `pagination.total` counts the selected history before `offset`
+and `limit`. With `visible_only=true`, the gateway removes session metadata and hidden display
+rows before counting and paging. `pagination.visible_only` confirms the selected mode.
+Default pages preserve those rows and their offsets.
+
 `/v1/capabilities` advertises the full surface via `session_*` feature flags and `endpoints.session_*` entries so external UIs can detect support and fall back safely. Inline images are supported in `chat` and `chat/stream` payloads (multimodal-aware path).
 
 ```bash

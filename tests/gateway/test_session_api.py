@@ -146,6 +146,8 @@ async def test_session_messages_default_to_latest_bounded_page(adapter, session_
         "offset": 0,
         "order": "latest",
         "returned": 500,
+        "total": 501,
+        "visible_only": False,
     }
     assert payload["data"][0]["content"] == "msg 1"
     assert payload["data"][-1]["content"] == "msg 500"
@@ -274,6 +276,39 @@ async def test_session_messages_returns_compression_ancestors(adapter, session_d
         "after compression",
     ]
     assert [m["role"] for m in payload["data"]] == ["user", "assistant", "user"]
+
+
+@pytest.mark.asyncio
+async def test_visible_message_page_count_and_title_follow_only_the_selected_thread(adapter, session_db):
+    root = seed_session(session_db, "titled-root", "api_server")
+    session_db.sessions.set_title(root, "Root title")
+    seed_messages(session_db, root, {"role": "user", "content": "one"},
+                  {"role": "session_meta", "content": "metadata"})
+    session_db.sessions.end(root, "compression")
+    child = seed_session(session_db, "untitled-tip", "api_server", parent_session_id=root)
+    seed_messages(session_db, child, {"role": "assistant", "content": "internal", "display_kind": "hidden"},
+                  {"role": "assistant", "content": "two"})
+    async with TestClient(TestServer(_create_session_app(adapter))) as client:
+        async def read(sid, query):
+            response = await client.get(f"/api/sessions/{sid}/messages?{query}")
+            assert response.status == 200, await response.text()
+            return await response.json()
+        for sid in (root, child):
+            raw = await read(sid, "limit=1&order=latest")
+            assert (raw["session_id"], raw["thread_id"], raw["thread_title"]) == (child, root, "Root title")
+            assert raw["pagination"]["total"] == 4 and not raw["pagination"]["visible_only"]
+            for offset, expected in ((0, ["two"]), (1, ["one"]), (2, []), (20, [])):
+                page = await read(sid, f"visible_only=true&limit=1&order=latest&offset={offset}")
+                assert page["pagination"]["total"] == 2 and page["pagination"]["visible_only"]
+                assert [row["content"] for row in page["data"]] == expected
+        session_db.sessions.set_title(child, "Tip title")
+        assert (await read(root, "limit=0"))["thread_title"] == "Tip title"
+        fork = await client.post(f"/api/sessions/{child}/fork", json={"title": "Branch title"})
+        assert fork.status == 201, await fork.text()
+        fork_id = (await fork.json())["session"]["id"]
+        page = await read(fork_id, "visible_only=true")
+        assert page["thread_id"] == fork_id and page["thread_title"] == "Branch title"
+        assert page["pagination"]["total"] == len(page["data"])
 
 
 @pytest.mark.asyncio
