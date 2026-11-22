@@ -1,4 +1,5 @@
 """Run-owned system instructions survive admission recovery without becoming session defaults."""
+from contextvars import copy_context
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -7,7 +8,7 @@ import pytest
 
 from agent.codex_runtime import _codex_developer_instructions
 from agent.background_review import _same_model_parity_kwargs
-from agent.run_instructions import effective_system_prompt
+from agent.run_instructions import effective_system_prompt, run_instruction_scope
 from gateway.run_turn_runner import TurnRunner
 from gateway.session_api_turn import admit_api_turn, api_execution, api_settings, prepare_api_execution
 from gateway.turn_context import TurnContext
@@ -95,3 +96,14 @@ async def test_run_http_prompt_and_idempotent_execution(monkeypatch):
         assert (await client.post('/v1/runs', json={**body, 'run_instructions':'changed'}, headers=headers)).status == 409
     assert calls == ['system\n\ndurable\n\none send']
     assert _codex_developer_instructions(agent) == 'system\n\ndurable'
+
+
+
+def test_delayed_callbacks_and_other_agents_cannot_reuse_the_scope():
+    parent = SimpleNamespace(ephemeral_system_prompt='base')
+    child = SimpleNamespace(ephemeral_system_prompt='review')
+    with run_instruction_scope(parent, 'current'):
+        delayed = copy_context()
+        assert effective_system_prompt(child, 'system') == 'system\n\nreview'
+        assert delayed.run(effective_system_prompt, parent, 'system') == 'system\n\nbase\n\ncurrent'
+    assert delayed.run(effective_system_prompt, parent, 'system') == 'system\n\nbase'
