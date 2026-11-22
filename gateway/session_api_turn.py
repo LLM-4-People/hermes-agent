@@ -9,6 +9,7 @@ import re
 import uuid
 
 from gateway.platforms.api_server_request_options import RUN_TOOL_FIELDS, parse_run_tool_options, run_tool_scope
+from agent.run_instructions import valid_run_instructions
 from gateway.config import Platform
 from gateway.session_api import bind_api_steps, restore_api_session, run_steps, run_steps_off_loop
 from gateway.session_authority import admission_row
@@ -59,7 +60,8 @@ def check_api_turn(authority, ref, payload):
         # 'browser_control' is accepted and ignored: admissions persisted while the removed
         # browser-extension control existed may carry it and must still recover.
         if (set(data) - {'history', 'settings', 'turn_author', 'media', 'run_owner_scope', 'browser_control',
-                         'relay_metadata', 'resume_unanswered'}
+                         'relay_metadata', 'resume_unanswered', 'run_instructions'}
+                or ('run_instructions' in data and not valid_run_instructions(data['run_instructions']))
                 or data.get('resume_unanswered', True) is not True
                 or not {'history', 'settings'} <= set(data)
                 or not isinstance(data.get('relay_metadata', {}), dict)
@@ -175,6 +177,8 @@ def admit_api_steps(adapter, **kwargs):
         settings['route'] = {k: v for k, v in route.items() if k != 'api_key'}
     payload = json.loads(canonical_json({'text': kwargs['user_message'], 'api_turn_v1': {
         'history': None if kwargs.get('history_from_session') else kwargs['conversation_history'], 'settings': settings}}))
+    if kwargs.get('run_instructions'):
+        payload['api_turn_v1']['run_instructions'] = kwargs['run_instructions']
     run_owner_scope = kwargs.get('run_owner_scope')
     if run_owner_scope is not None:
         if not _valid_owner_scope(run_owner_scope):
@@ -241,7 +245,8 @@ def _admit_api_payload(authority, adapter, sid, request_id, payload, settings, d
     # payload-less (internal) turns, committed with the admitted turn rather than by the drain (N50).
     session_settings = payload['api_turn_v1']['settings']
     target = ApiTargetClaim(settings={k: v for k, v in session_settings.items() if k not in RUN_TOOL_FIELDS},
-                            client_key=bool(kwargs.get('request_id')))
+                            client_key=bool(kwargs.get('request_id')),
+                            inherit_api_prompt=bool(kwargs.get('run_instructions')) and kwargs.get('ephemeral_system_prompt') is None)
     row, _created = yield lambda: store.admissions.admit(
         epoch=authority.epoch, principal_id='api', session_id=sid, request_id=request_id, payload=payload,
         gate=authority.gate_refusal(), api_target=target)
@@ -436,6 +441,7 @@ def prepare_api_execution(authority, ref, payload):
     return {'adapter': adapter, 'settings': settings, 'history': data['history'] if data else None,
             'content': content, 'turn_author': data.get('turn_author') if data else None,
             'relay_metadata': data.get('relay_metadata') if data else None,
+            'run_instructions': data.get('run_instructions') if data else None,
             'resume_unanswered': bool(data and data.get('resume_unanswered'))}
 
 

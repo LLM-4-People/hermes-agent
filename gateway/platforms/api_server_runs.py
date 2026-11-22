@@ -28,6 +28,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response, room_run_claims
+from agent.run_instructions import run_instruction_scope, valid_run_instructions
 from gateway.turn_executor import _UnboundedThreadExecutor
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 from persistence import AuthorityRefusal
@@ -611,6 +612,8 @@ class _RunLaunch:
     tool_options: Optional[dict] = None
     walked_from: Optional[str] = None  # the swept stored session the chain moved past (``bind_api_steps``)
 
+    run_instructions: Optional[str] = None
+
     @property
     def approval_session_key(self) -> str:
         # Isolated per run: session ids are conversation scopes, not authorization namespaces.
@@ -755,8 +758,11 @@ def _run_idempotency_identity(self, request, body, gateway_session_key, idempote
     ).encode()).hexdigest()
 
 
-def _run_user_message(raw_input, _openai_error) -> tuple:
+def _run_user_message(body, _openai_error) -> tuple:
     """POST /v1/runs ``input`` -> ``(user_message, error_response_or_None)``."""
+    if "run_instructions" in body and not valid_run_instructions(body["run_instructions"]):
+        return None, _json_error(_openai_error, "run_instructions must be UTF-8 text", code="invalid_run_instructions", status=400)
+    raw_input = body.get("input")
     if not raw_input:
         return None, _json_error(_openai_error, "Missing 'input' field", status=400)
     if isinstance(raw_input, str):
@@ -781,7 +787,7 @@ async def _admit_run_to_authority(
             launch.admission = await admit_api_turn_async(self, user_message=launch.user_message,
                 conversation_history=launch.conversation_history, active_run_id=run_id,
                 run_owner_scope=self._run_owners[run_id],
-                turn_author=launch.turn_author, **(launch.tool_options or {}),
+                turn_author=launch.turn_author, run_instructions=launch.run_instructions, **(launch.tool_options or {}),
                 history_from_session=session_history_delivery,
                 session_history_delivery='1' if session_history_delivery else '',
                 bind_declared_conversation=_declared_selected, walked_from=launch.walked_from,
@@ -826,7 +832,7 @@ async def _admit_selected_run(self, launch, selected_session_id, scope, key, _op
     try:
         delivered = await self._admit_to_live_bot_chat(
             launch.session_id, launch.user_message, launch.turn_author,
-            **({"allow_delivery": False} if launch.tool_options else {})
+            **({"allow_delivery": False} if launch.tool_options or launch.run_instructions else {})
         ) if selected_session_id else None
     except AuthorityRefusal as exc:
         _release_refused_run(self, launch.run_id, scope, key)
@@ -861,12 +867,12 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         return _json_error(
             _openai_error, "Idempotency-Key must be 1-255 visible ASCII characters",
             code="invalid_idempotency_key", status=400)
-    idempotency_scope, idempotency_fingerprint = _run_idempotency_identity(
-        self, request, body, gateway_session_key, idempotency_key)
     raw_input = body.get("input")
-    user_message, input_err = _run_user_message(raw_input, _openai_error)
+    user_message, input_err = _run_user_message(body, _openai_error)
     if input_err is not None:
         return input_err
+    idempotency_scope, idempotency_fingerprint = _run_idempotency_identity(
+        self, request, body, gateway_session_key, idempotency_key)
     try:
         turn_author = _api_server._request_turn_author(body)
     except ValueError as exc:
@@ -949,7 +955,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
-        request_profile=_api_server._api_request_profile.get(), tool_options=selection,
+        request_profile=_api_server._api_request_profile.get(), tool_options=selection, run_instructions=body.get("run_instructions"),
         turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None)
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -1051,9 +1057,9 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             # Passed only when set: a human turn keeps today's call shape.
             author_kwargs = {"turn_author": run.turn_author} if run.turn_author is not None else {}
-            r = agent.run_conversation(
-                user_message=run.user_message, conversation_history=run.conversation_history,
-                task_id=effective_task_id, **author_kwargs)
+            with run_instruction_scope(agent, run.run_instructions):
+                r = agent.run_conversation(user_message=run.user_message, conversation_history=run.conversation_history,
+                                           task_id=effective_task_id, **author_kwargs)
         finally:
             # Clear ownership now so a later stop can't reap work this run left running.
             _api_server._clear_turn_process_ownership(agent)

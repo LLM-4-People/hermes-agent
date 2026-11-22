@@ -16,7 +16,7 @@ from persistence.authority.vocabulary import ADMISSION_QUEUE_MAX, ADMITTED_REQUE
 from persistence.authority.admissions import raise_gate
 from persistence.core.errors import AuthorityRefusal
 
-from ._admission_owner import authorize_admission, close_discarded_turn
+from ._admission_owner import authorize_admission, close_discarded_turn, resolve_api_prompt
 from ._runtime import (
     _CANCEL_QUEUED,
     _admission,
@@ -93,14 +93,15 @@ def admit_session_input(holder, *, epoch: int, principal_id: str, session_id: st
         if queued >= ADMISSION_QUEUE_MAX:
             raise AuthorityRefusal('queue_full')
         raise_gate(gate)
+        target, admitted_payload = resolve_api_prompt(conn, session_id, api_target, encoded)
         authorize_admission(holder, conn, epoch=epoch, principal_id=principal_id, session_id=session_id,
                             request_id=request_id, replaces=replaces, supersedes=supersedes,
-                            api_target=api_target, rewrite=rewrite, hosted=hosted, fold=fold)
+                            api_target=target, rewrite=rewrite, hosted=hosted, fold=fold)
         admission_id = uuid.uuid4().hex
         conn.execute('''INSERT INTO session_admissions(admission_id,request_id,principal_id,
             target_session_id,lineage_json,payload_json,payload_digest,intent,status,owner_epoch)
             VALUES(?,?,?,?,?,?,?,?,'queued',?)''',
-            (admission_id, request_id, principal_id, session_id, json.dumps([session_id]), encoded, digest, intent, epoch))
+            (admission_id, request_id, principal_id, session_id, json.dumps([session_id]), admitted_payload, digest, intent, epoch))
         return _row(_admission(conn, admission_id)), True
     return holder._execute_write(write)
 

@@ -188,7 +188,7 @@ def _transcript_row(row: Mapping[str, Any]) -> TranscriptRow:
     return TranscriptRow(
         id=MessageId(int(row["id"])), session_id=SessionId(row["session_id"]),
         visibility=_visibility(row.get("active"), row.get("compacted")), observed=bool(row.get("observed")),
-        compressed_summary=row.get("_compressed_summary") is True, **fields)
+        compressed_summary=row.get("_compressed_summary") is True, api_admission_id=row.get("api_admission_id"), **fields)
 
 
 def _sidecar(value: Any) -> Any:

@@ -7,6 +7,7 @@ settlement, and the gateway's admission reads.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import sqlite3
 
 from persistence.authority.admissions import ActiveReplace, CarrierRewind, RetryRewriteRefused
@@ -93,6 +94,20 @@ def _fold_queued(conn, admission_id, session_id, skip):
 
 # The state_meta key prefix of an API session's stored turn settings.
 _SETTINGS_PREFIX = 'gateway.api.settings.v1.'
+
+
+def resolve_api_prompt(conn, session_id, target, encoded):
+    """Snapshot the prior durable prompt for a scoped-only run inside the admission write.
+    The retry digest stays tied to the original request, independently of later settings."""
+    if target is None or not target.inherit_api_prompt:
+        return target, encoded
+    saved = conn.execute('SELECT value FROM state_meta WHERE key=?', (_SETTINGS_PREFIX + session_id,)).fetchone()
+    base = json.loads(saved[0]).get('ephemeral_system_prompt') if saved else None
+    if not base:
+        return target, encoded
+    payload = json.loads(encoded)
+    payload['api_turn_v1']['settings']['ephemeral_system_prompt'] = base
+    return replace(target, settings={**target.settings, 'ephemeral_system_prompt': base}), _json(payload)
 
 
 def _admit_target(session_id, request_id, settings, conn, *, client_key=True):
