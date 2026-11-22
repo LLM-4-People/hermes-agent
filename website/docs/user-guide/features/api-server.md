@@ -805,7 +805,7 @@ the root of its compression lineage, and nullable `thread_title` from the contin
 A fork starts its own thread. `pagination.total` counts the selected history before `offset`
 and `limit`. With `visible_only=true`, the gateway removes session metadata and hidden display
 rows before counting and paging. `pagination.visible_only` confirms the selected mode.
-A visible user row can include `api_admission_id` when its stored input identity matches an
+A visible user row can include `api_admission_id` when its stored input identity matches a
 uniquely identifiable executed API admission for the same physical session. Compare it with `admission_id` from the
 authenticated run status to locate that turn even when two requests have identical text.
 Assistant rows have their own message IDs. A missing admission field means the gateway has

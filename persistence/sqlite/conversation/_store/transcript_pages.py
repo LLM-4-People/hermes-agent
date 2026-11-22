@@ -97,6 +97,29 @@ def _lineage_page(holder, conn, segments, request, visible_only):
     return ids[request.offset:None if request.limit is None else request.offset + request.limit], total
 
 
+# Rewound generations may share a platform id. Inspect the existing message index once per
+# distinct admission on this page, stopping after the second eligible input proves ambiguity.
+# CROSS JOIN keeps those page markers outside the indexed ledger probe as the ledger grows.
+_ELIGIBLE_INPUTS = """FROM messages twin
+    WHERE twin.session_id=a.target_session_id AND twin.platform_message_id=a.admission_id
+      AND twin.role='user' AND twin.observed=0 AND (twin.active=1 OR twin.compacted=1)
+      AND twin.display_kind IS NOT 'hidden'"""
+_PAGE_WITH_INPUTS = f"""WITH page AS MATERIALIZED (SELECT key, value FROM json_each(?)),
+    markers AS MATERIALIZED (
+        SELECT DISTINCT m.session_id, m.platform_message_id FROM page p JOIN messages m ON m.id=p.value
+        WHERE m.role='user' AND m.observed=0 AND m.platform_message_id IS NOT NULL),
+    owners AS MATERIALIZED (
+        SELECT a.target_session_id, a.admission_id, (SELECT twin.id {_ELIGIBLE_INPUTS} LIMIT 1) AS input_row
+        FROM markers k CROSS JOIN session_admissions a ON a.admission_id=k.platform_message_id
+        JOIN sessions s ON s.id=k.session_id
+        WHERE a.target_session_id=k.session_id AND a.principal_id='api' AND a.generation IS NOT NULL
+          AND s.source='api_server' AND NOT EXISTS (SELECT 1 {_ELIGIBLE_INPUTS} LIMIT 1 OFFSET 1))
+    SELECT m.*, o.admission_id AS api_admission_id FROM page p JOIN messages m ON m.id=p.value
+    LEFT JOIN owners o ON o.admission_id=m.platform_message_id AND o.target_session_id=m.session_id
+                      AND m.role='user' AND m.observed=0 AND (o.input_row IS NULL OR o.input_row=m.id)
+    ORDER BY p.key"""
+
+
 def get_transcript_page(holder, sid, request, visible_only):
     segments = _resume_lineage_ids(holder, sid) if request.include_lineage else [sid]
 
@@ -106,20 +129,9 @@ def get_transcript_page(holder, sid, request, visible_only):
             ids, total = _segment_page(holder, conn, sid, request, visible_only)
         else:
             ids, total = _lineage_page(holder, conn, segments, request, visible_only)
-        # Inspect only this page's selected human inputs. The gateway records the canonical
-        # admission as their inbound platform id; other platforms use that column for their own ids.
-        evidence = """, CASE WHEN m.role='user' AND m.platform_message_id IS NOT NULL AND m.observed=0
-                              THEN (SELECT a.admission_id FROM session_admissions a
-                                    JOIN sessions s ON s.id=a.target_session_id
-                                    WHERE a.admission_id=m.platform_message_id AND a.target_session_id=m.session_id
-                                      AND a.principal_id='api' AND a.generation IS NOT NULL AND s.source='api_server'
-                                      AND NOT EXISTS (SELECT 1 FROM messages twin
-                                          WHERE twin.session_id=m.session_id AND twin.platform_message_id=m.platform_message_id
-                                            AND twin.id!=m.id AND twin.role='user' AND twin.observed=0
-                                            AND (twin.active=1 OR twin.compacted=1) AND twin.display_kind IS NOT 'hidden'))
-                         END AS api_admission_id""" if visible_only and holder.has_session_admissions else ""
-        rows = conn.execute(f"SELECT m.*{evidence} FROM json_each(?) p JOIN messages m ON m.id = p.value ORDER BY p.key",
-                            (json.dumps(ids),))
+        sql = (_PAGE_WITH_INPUTS if visible_only and holder.has_session_admissions else
+               "SELECT m.* FROM json_each(?) p JOIN messages m ON m.id=p.value ORDER BY p.key")
+        rows = conn.execute(sql, (json.dumps(ids),))
         return [_row_to_message_dict(holder, row, warn_context="transcript page", summary_flag=True)
                 for row in rows], total, segments[0]
     return _in_one_read(holder, read)

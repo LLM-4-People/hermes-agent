@@ -75,3 +75,74 @@ def test_read_only_profile_from_before_the_admission_ledger(tmp_path):
         assert "api_admission_id" not in rows[0]
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='session_admissions'").fetchone() is None
+
+
+def test_page_resolves_a_repeated_marker_independently_of_page_length(owner):
+    import sqlite3
+    from contextlib import closing
+
+    from persistence.conversation.messages import NewMessage, TranscriptRead
+    from persistence.sqlite._holder import StoreHolder
+    from persistence.sqlite.conversation._store.transcript_pages import get_transcript_page
+    from persistence_assembly import store_location
+
+    store = owner.persistence
+    sid = seed_session(store, "rewound-copies", "api_server")
+    marker = seed_admission(store, sid, "request", "terminal", "completed", principal_id="api")
+    def generations(prefix, count):
+        return [NewMessage(role="user", content=f"{prefix} {i}", platform_message_id=marker) for i in range(count)]
+
+    store.messages.append_batch(sid, generations("Historic", 1400))
+    rewind = store.messages.rewind_user_turn(sid, 0)
+    assert rewind.rewound_count == 1400
+    store.messages.append_batch(sid, generations("Current", 70))
+
+    def page_work(limit):
+        ticks = 0
+
+        def count_steps():
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        with closing(StoreHolder(store_location(store.scope), read_only=True)) as reader:
+            reader._conn.set_progress_handler(count_steps, 100)
+            try:
+                rows, total, _ = get_transcript_page(reader, sid, TranscriptRead(limit=limit), visible_only=True)
+            finally:
+                reader._conn.set_progress_handler(None, 0)
+        assert total == 70 and len(rows) == limit
+        assert all(row.get("api_admission_id") is None for row in rows)
+        return ticks
+
+    # Both pages traverse the same old generations for their single ambiguous marker.
+    wide = page_work(60)
+    assert wide < 4 * page_work(1)
+
+    # Adding another session's ledger entries must not change that scan into a ledger walk.
+    other = seed_session(store, "other-session", "api_server")
+    with closing(sqlite3.connect(store_location(store.scope))) as conn:
+        conn.executemany(
+            """INSERT INTO session_admissions (admission_id, request_id, principal_id, target_session_id,
+                   lineage_json, payload_json, payload_digest, intent, status, generation)
+               VALUES (?, ?, 'api', ?, '[]', '{}', 'test', 'queue', 'terminal', 1)""",
+            ((f"unrelated-{i}", str(i), other) for i in range(4000)),
+        )
+        conn.commit()
+    assert page_work(60) < 1.5 * wide
+
+
+def test_rewound_copies_do_not_obscure_a_single_active_admission(owner):
+    from persistence.conversation.messages import NewMessage, TranscriptRead, TranscriptView
+
+    store = owner.persistence
+    sid = seed_session(store, "rewound-then-active", "api_server")
+    marker = seed_admission(store, sid, "request", "terminal", "completed", principal_id="api")
+    store.messages.append_batch(sid, [NewMessage(role="user", content=f"Old {i}", platform_message_id=marker) for i in range(5)])
+    assert store.messages.rewind_user_turn(sid, 0).rewound_count == 5
+    store.messages.append_batch(sid, [NewMessage(role="user", content="Live", platform_message_id=marker)])
+
+    visible = store.messages.read_transcript_page(sid, TranscriptRead(), visible_only=True)
+    assert visible.total == 1 and visible.rows[0].api_admission_id == marker
+    with_history = store.messages.read_transcript_page(sid, TranscriptRead(view=TranscriptView.ALL), visible_only=True)
+    assert [row.api_admission_id for row in with_history.rows] == [None] * 5 + [marker]
