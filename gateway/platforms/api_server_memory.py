@@ -346,23 +346,32 @@ def _sync_search_sessions(
 ) -> dict[str, Any]:
     source_filter = None if source == "all" else [source]
     role_filter = [role] if role else None
-    fetch_limit = min(200, max(limit + offset, 50)) if session_id else limit
-    fetch_offset = 0 if session_id else offset
-    hits = store.search.search_messages(
-        query,
-        source_filter=source_filter,
-        role_filter=role_filter,
-        limit=fetch_limit,
-        offset=fetch_offset,
-        sort=sort,
-    )
     if session_id:
+        fetch_limit = min(500, max(offset + limit + 1, 50))
+        hits = store.search.search_messages(
+            query,
+            source_filter=source_filter,
+            role_filter=role_filter,
+            limit=fetch_limit,
+            offset=0,
+            sort=sort,
+        )
         filtered = [h for h in hits if str(h.session_id or "") == session_id]
-        total = len(filtered)
+        has_more = len(filtered) > offset + limit
         page_hits = filtered[offset : offset + limit]
+        total = len(filtered)
     else:
-        page_hits = list(hits)
-        total = len(page_hits)
+        hits = store.search.search_messages(
+            query,
+            source_filter=source_filter,
+            role_filter=role_filter,
+            limit=limit + 1,
+            offset=offset,
+            sort=sort,
+        )
+        has_more = len(hits) > limit
+        page_hits = list(hits[:limit])
+        total = (offset + len(page_hits) + (1 if has_more else 0)) if page_hits else 0
 
     root_cache: dict[str, tuple[str, Optional[str]]] = {}
     items: list[dict[str, Any]] = []
@@ -393,6 +402,7 @@ def _sync_search_sessions(
         "query": query,
         "data": items,
         "total": total,
+        "has_more": has_more,
         "limit": limit,
         "offset": offset,
     }
@@ -515,6 +525,17 @@ async def handle_fork_session(adapter, request: web.Request) -> web.Response:
     selected_rows, slice_err = _slice_fork_rows(
         rows, up_to_message_id=up_to_message_id, turn_index=turn_index
     )
+    if slice_err is not None and up_to_message_id is not None and slice_err[1] == "message_not_found":
+        lineage_sid = await asyncio.to_thread(store.lineage.resolve_resume_target, source_id)
+        lineage_rows = list(
+            await store.aio.messages.read_transcript(
+                lineage_sid,
+                TranscriptRead(view=TranscriptView.DISPLAY, include_lineage=True),
+            )
+        )
+        selected_rows, slice_err = _slice_fork_rows(
+            lineage_rows, up_to_message_id=up_to_message_id, turn_index=None
+        )
     if slice_err is not None:
         status, code, msg = slice_err
         return _error_response(msg, status, code=code)
