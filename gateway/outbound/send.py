@@ -368,14 +368,22 @@ def _slack_dm_chat_id(pconfig, chat_id):
 
 
 def _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
-    """Best-effort mirror of the sent message into the target's gateway session."""
+    """Best-effort mirror of the sent message into the target's gateway session.
+
+    ``send_message`` is not an agent-callable tool (see the module note), so every mirror is text
+    the agent did not author. It lands as a USER turn: an assistant-role mirror after the agent's
+    last reply is assistant→assistant, and a strict Responses adapter rejects the earlier turn's
+    native message id with HTTP 400 "Ambiguous Responses native assistant history" (live
+    2026-11-22). The label replaces the mirror metadata that SQLite drops, matching the cron and
+    webhook delivery mirrors.
+    """
     try:
         from gateway.mirror import mirror_to_session
         from gateway.session_context import get_session_env
         return bool(mirror_to_session(
-            platform_name, chat_id, mirror_text, thread_id=thread_id,
+            platform_name, chat_id, f"[Sent to {platform_name}]\n{mirror_text}", thread_id=thread_id,
             source_label=get_session_env("HERMES_SESSION_PLATFORM", "cli"),
-            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None))
+            user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None, role="user"))
     except Exception:
         return False
 

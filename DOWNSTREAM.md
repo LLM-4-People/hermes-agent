@@ -12,6 +12,8 @@ change lives in its own commit and touches as few upstream files as possible.
 | `providers.<name>.proxy` | `hermes_cli/config_providers.py`, docs | First-class upstream routing for gateways: `proxy.base_url` is sent as `X-Proxy-Base-URL` (configurable via `proxy.header`), with `proxy.headers` and `extra_headers` overrides. Removes hand-written routing headers. |
 | Footer `provider` field | `gateway/runtime_footer.py`, `gateway/run_turn_runner.py`, `gateway/run_turn_persistence.py`, `gateway/slash_commands.py`, `hermes_cli/providers.py` | The gateway reply footer now renders `model · provider · ctx% · cwd`; named custom providers show the configured entry name, not the internal slug. |
 | Signal media in split deployments | `plugins/platforms/signal/signal_media.py`, `adapter.py`, `standalone.py`, `gateway_env.py`, `plugin.yaml` | signal-cli resolves attachment paths in its own container. Outbound attachments are now self-contained data URIs (`SIGNAL_INLINE_ATTACHMENTS=never` restores paths for shared volumes); inbound documents keep the sender's filename/extension and images with no `contentType` are classified from magic bytes. |
+| Delivery mirrors stay out of assistant history | `gateway/outbound/send.py`, `gateway/mirror.py` | `send_message` is never agent-callable, so its mirror is external text and lands as a labelled user turn. An assistant-role mirror after the agent's reply breaks strict alternation. |
+| Ambiguous native message ids | `agent/codex_responses_adapter.py` | A replayed Responses `message` id followed directly by another assistant message covers two turns; a strict Responses adapter rejects it (400 "Ambiguous Responses native assistant history"). The id is only a prefix-cache hint, so the earlier message keeps its content/status/phase and loses the id. |
 | Image identity | `Dockerfile`, `hermes_cli/config.py` | `HERMES_IMAGE_NAME` build arg is baked into `/etc/hermes/image-provenance.json`, so `hermes update` tells operators to pull this fork's image instead of upstream's. |
 
 Upstream files we do **not** modify: `.github/workflows/*` (upstream's workflows are disabled
@@ -64,10 +66,9 @@ a PR.
 
 ## Security scanning
 
-CodeQL runs on every push to `main` and weekly. The first `main` analysis is the fork's baseline;
-until it exists, a pull-request scan reports every pre-existing upstream alert as newly introduced
-(108 on the initial branch). The workflow therefore starts main-only, and the `pull_request`
-trigger is restored once that baseline is recorded.
+CodeQL runs on every push to `main`, every pull request targeting `main`, and weekly. The first
+`main` analysis is the fork's baseline; pull-request scans compare against it and only report
+genuinely new alerts. If the baseline is ever deleted, start main-only again until it is recorded.
 
 ## Image
 

@@ -62,6 +62,13 @@ scripts/run_tests.sh \
   -q
 
 # That file imports the Discord and Slack SDKs at module load, which need the optional
-# `messaging` extra. Select only the Signal class so the locked test environment stays minimal.
+# `messaging` extra. Select only the Signal class and the delivery-mirror regression so the
+# locked test environment stays minimal.
 scripts/run_tests.sh tests/gateway/outbound/test_send_message_tool.py \
-  -k TestSendSignalChunking -q
+  -k "TestSendSignalChunking or test_successful_send_mirrors_as_labelled_user_turn" -q
+
+# Delivery mirrors and Responses replay: an external send must not land as an assistant turn, and
+# a replayed native message id must not sit next to another assistant message.
+scripts/run_tests.sh tests/gateway/test_mirror.py -q
+scripts/run_tests.sh tests/agent/test_codex_responses_adapter.py \
+  -k test_native_message_id_dropped_before_another_assistant_message -q

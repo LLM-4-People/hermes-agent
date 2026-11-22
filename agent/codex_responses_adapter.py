@@ -775,9 +775,33 @@ def _chat_messages_to_responses_input(
     # provenance-tagged content directly instead of trying to recover it from whatever shape the conversion
     # produced (#90976).
     if not native_compaction_eligible:
-        return items
+        return _drop_ambiguous_native_message_ids(items)
     from agent.native_compaction import prune_pre_checkpoint_items
-    return prune_pre_checkpoint_items(items, item_sources=item_sources)
+    return _drop_ambiguous_native_message_ids(
+        prune_pre_checkpoint_items(items, item_sources=item_sources))
+
+
+def _drop_ambiguous_native_message_ids(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop a replayed native message ``id`` when another assistant message follows it directly.
+
+    A Responses ``message`` id names one assistant turn. A strict adapter cannot tell which turn it
+    covers when the next wire item is another assistant ``message`` and answers HTTP 400
+    ``Ambiguous Responses native assistant history`` (live 2026-11-22). Consecutive assistant
+    rows are legitimate here: ``repair_message_sequence`` deliberately leaves a codex interim next to
+    another assistant row because its native items replay verbatim. The id is a prefix-cache hint
+    only, so the earlier message keeps its content/status/phase and loses just the id; an id followed
+    by a function call/output stays because that shape is unambiguous.
+    """
+    for index, item in enumerate(items[:-1]):
+        follower = items[index + 1]
+        if (
+            isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
+            and item.get("id")
+            and isinstance(follower, dict) and follower.get("type") == "message"
+            and follower.get("role") == "assistant"
+        ):
+            item.pop("id", None)
+    return items
 
 
 class ResponsesRouteFlags(NamedTuple):
