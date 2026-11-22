@@ -241,6 +241,18 @@ class TestMarkdownStripPatch:
         assert text == "[doc](https://example.com)"
         assert len(styles) == 1 and styles[0].endswith(":MONOSPACE")
 
+    def test_list_nested_fence_link_is_not_rewritten(self):
+        md = "- Steps:\n    ```\n    [doc](https://example.com)\n    ```"
+        text, styles = _m2s(md)
+        assert "[doc](https://example.com)" in text
+        assert _find_style(styles, "MONOSPACE")
+
+    def test_blockquote_fence_link_is_not_rewritten(self):
+        md = "> ```\n> [doc](https://example.com)\n> ```"
+        text, styles = _m2s(md)
+        assert "[doc](https://example.com)" in text
+        assert _find_style(styles, "MONOSPACE")
+
     def test_inline_tilde_run_is_not_a_fence(self):
         text, styles = _m2s("Use `~~~` to open a fence and ~~~ to close it.")
         assert text == "Use ~~~ to open a fence and ~~~ to close it."

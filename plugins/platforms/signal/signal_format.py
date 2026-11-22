@@ -14,16 +14,20 @@ _TABLE_WIDTH = 40
 
 # Any fence length (CommonMark): code_fence() wraps a command that contains ``` in a longer run,
 # and a ``` inside it must not close the block.
-# Fenced code starts at line start (up to three spaces) and closes on a line that holds the same
-# fence run. Anchoring matters: an inline ``~~~`` in prose must not pair with a later one and swallow
-# the text between.
+# Fenced code starts at line start and closes on a line that holds the same fence run. The opening
+# may carry a blockquote prefix, a list marker, or list-content indentation, so a fence nested in a
+# list item or blockquote is still code. Anchoring matters: an inline ``~~~`` in prose must not pair
+# with a later one and swallow the text between.
 _CODE_BLOCK_RE = re.compile(
-    r"(?m)^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n(?P<body>.*?)"
-    r"^ {0,3}(?P=fence)[ \t]*\r?(?=\n|$)",
+    r"(?m)^[ \t]*(?:> ?)*(?:[-*+] |\d+[.)] )?[ \t]*"
+    r"(?P<fence>`{3,}|~{3,})[^\n]*\n(?P<body>.*?)"
+    r"^[ \t]*(?:> ?)*[ \t]*(?P=fence)[ \t]*\r?(?=\n|$)",
     re.DOTALL,
 )
 _FENCE_SPLIT_RE = re.compile(
-    r"(?m)(^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^ {0,3}(?P=fence)[ \t]*\r?(?=\n|$))",
+    r"(?m)(^[ \t]*(?:> ?)*(?:[-*+] |\d+[.)] )?[ \t]*"
+    r"(?P<fence>`{3,}|~{3,})[^\n]*\n.*?"
+    r"^[ \t]*(?:> ?)*[ \t]*(?P=fence)[ \t]*\r?(?=\n|$))",
     re.DOTALL,
 )
 
