@@ -378,7 +378,7 @@ async def test_mobile_deliver_cron_zero_leak_wakeup_ack_and_profile_isolation(tm
     register_delivery_wakeup_hook(wakeups.append)
     try:
         # Simulate a cron job delivering a private morning briefing with zero live adapter.
-        monkeypatch.setenv("HERMES_CRON_JOB_ID", "cron_morning_brief")
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
         with override_hermes_home(profile_a):
             out = json.loads(
                 mobile_deliver_tool(
@@ -616,8 +616,11 @@ async def test_device_bridge_approve_decline_timeout_stop_and_progress_hooks(tmp
                 await stream.read()
             assert decline_outcomes[0]["ok"] is False and decline_outcomes[0]["status"] == "denied"
 
-        # 4D. Timeout flow (1s bounded timeout).
-        monkeypatch.setenv("HERMES_MOBILE_DEVICE_TIMEOUT_SECONDS", "1.0")
+        # 4D. Timeout flow (1s bounded timeout via config.yaml).
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"mobile": {"device_bridge_timeout_seconds": 1.0}},
+        )
         timeout_outcomes = []
 
         def run_timeout(**kwargs):
@@ -640,7 +643,10 @@ async def test_device_bridge_approve_decline_timeout_stop_and_progress_hooks(tmp
             assert timeout_outcomes[0]["error"] == "device_request_timed_out"
 
         # 4E. Stop/cancel unblocks a waiting device request immediately.
-        monkeypatch.setenv("HERMES_MOBILE_DEVICE_TIMEOUT_SECONDS", "60.0")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"mobile": {"device_bridge_timeout_seconds": 60.0}},
+        )
         stop_outcomes = []
 
         def run_stopped(**kwargs):

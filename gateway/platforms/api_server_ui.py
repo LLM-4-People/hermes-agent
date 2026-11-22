@@ -20,6 +20,24 @@ logger = logging.getLogger("gateway.platforms.api_server")
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
+MOBILE_FEATURE_FLAGS: dict[str, Any] = {
+    "live_ui_modding": True,
+    "mobile_deliveries": True,
+    "device_bridge": True,
+    "run_progress_hooks": True,
+}
+
+MOBILE_CAPABILITY_ENDPOINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("run_device_result", ("POST", "/v1/runs/{run_id}/device-result", "device_bridge")),
+    ("mobile_ui_state", ("GET", "/api/mobile/ui/state", "live_ui_modding")),
+    ("mobile_ui_history", ("GET", "/api/mobile/ui/history", "live_ui_modding")),
+    ("mobile_ui_apply", ("POST", "/api/mobile/ui/revisions/{revision_id}/apply", "live_ui_modding")),
+    ("mobile_ui_revert", ("POST", "/api/mobile/ui/revisions/{revision_id}/revert", "live_ui_modding")),
+    ("mobile_deliveries", ("GET", "/api/mobile/deliveries", "mobile_deliveries")),
+    ("mobile_delivery", ("GET", "/api/mobile/deliveries/{delivery_id}", "mobile_deliveries")),
+    ("mobile_delivery_ack", ("POST", "/api/mobile/deliveries/{delivery_id}/ack", "mobile_deliveries")),
+)
+
 
 def _json_no_store(payload: dict[str, Any], *, status: int = 200) -> web.Response:
     return web.json_response(payload, status=status, headers=_NO_STORE)

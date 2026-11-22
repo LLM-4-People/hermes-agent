@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 import uuid
@@ -89,14 +88,17 @@ DEFAULT_DEVICE_TIMEOUT_SECONDS = 120.0
 def configured_device_timeout(override: Optional[float] = None) -> float:
     raw = override
     if raw is None:
-        env_val = os.environ.get("HERMES_MOBILE_DEVICE_TIMEOUT_SECONDS", "").strip()
-        if env_val:
-            try:
-                raw = float(env_val)
-            except ValueError:
-                raw = DEFAULT_DEVICE_TIMEOUT_SECONDS
-        else:
-            raw = DEFAULT_DEVICE_TIMEOUT_SECONDS
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            mobile_cfg = cfg.get("mobile") if isinstance(cfg, dict) else None
+            if isinstance(mobile_cfg, dict) and mobile_cfg.get("device_bridge_timeout_seconds") is not None:
+                raw = mobile_cfg["device_bridge_timeout_seconds"]
+        except (ImportError, OSError, ValueError) as exc:
+            logger.debug("Falling back to default device bridge timeout: %s", exc)
+            raw = None
+    if raw is None:
+        raw = DEFAULT_DEVICE_TIMEOUT_SECONDS
     try:
         val = float(raw)
     except (TypeError, ValueError):

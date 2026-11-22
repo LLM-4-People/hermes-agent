@@ -440,10 +440,12 @@ MOBILE_DELIVER_SCHEMA = {
 
 
 def _detect_delivery_origin() -> str:
-    if os.environ.get("HERMES_CRON_JOB_ID"):
-        return "cron"
+    from agent.delegation_context import is_delegated_child_context
     from gateway.session_context import get_session_env
-    if get_session_env("HERMES_DELEGATION_ID"):
+
+    if get_session_env("HERMES_CRON_SESSION") == "1":
+        return "cron"
+    if is_delegated_child_context():
         return "subagent"
     return "agent"
 

@@ -28,6 +28,10 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response, room_run_claims
+from gateway.platforms.api_server_ui import (
+    MOBILE_CAPABILITY_ENDPOINTS as _MOBILE_CAPABILITY_ENDPOINTS,
+    MOBILE_FEATURE_FLAGS as _MOBILE_FEATURE_FLAGS,
+)
 from agent.mobile_companion_prompt import combine_run_instructions, normalize_user_language
 from agent.run_instructions import run_instruction_scope, valid_run_instructions
 from tools.mobile_deliver import bind_delivery_emitter, emit_run_progress
@@ -299,6 +303,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
 
 
 def _http_routes(self) -> list[tuple[str, str, Any]]:
+    from gateway.platforms import api_server_device_bridge as _api_device_bridge
+    from gateway.platforms import api_server_ui as _api_ui
     return [
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
@@ -306,7 +312,9 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
         ("POST", "/v1/runs/{run_id}/clarify", self._handle_run_clarify),
         ("POST", "/v1/runs/{run_id}/steer", self._handle_steer_run),
         ("POST", "/v1/runs/{run_id}/resolve-unknown", self._handle_resolve_unknown_run),
-        ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run)]
+        ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run),
+        *_api_ui._http_routes(self),
+        *_api_device_bridge._http_routes(self)]
 
 
 def _idempotency_capabilities(self, *, store_type) -> dict[str, Any]:

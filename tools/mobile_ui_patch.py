@@ -362,6 +362,38 @@ def _validate_safe_id(value: Any, label: str) -> Optional[str]:
     return None
 
 
+def _normalize_widget_items(raw_items: Any, prefix: str) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
+    if not isinstance(raw_items, list) or len(raw_items) > MAX_WIDGET_ITEMS:
+        return None, f"{prefix}.items must be an array of at most {MAX_WIDGET_ITEMS} entries."
+    clean_items: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_items):
+        if isinstance(item, str) and _valid_utf8_text(item, max_len=80):
+            clean_items.append({"label": item.strip()})
+            continue
+        if not isinstance(item, dict):
+            return None, f"{prefix}.items[{idx}] must be an object or short string."
+        label = item.get("label")
+        if not _valid_utf8_text(label, max_len=80):
+            return None, f"{prefix}.items[{idx}].label must be non-empty UTF-8 text (<= 80 chars)."
+        clean_item: dict[str, Any] = {"label": label.strip()}
+        if item.get("value") is not None:
+            raw_val = item["value"]
+            val_str = str(raw_val) if isinstance(raw_val, (int, float)) and not isinstance(raw_val, bool) else raw_val
+            if not _valid_utf8_text(val_str, max_len=80, allow_empty=True):
+                return None, f"{prefix}.items[{idx}].value must be UTF-8 text (<= 80 chars)."
+            clean_item["value"] = val_str.strip()
+        if item.get("checked") is not None:
+            if not isinstance(item["checked"], bool):
+                return None, f"{prefix}.items[{idx}].checked must be a boolean."
+            clean_item["checked"] = item["checked"]
+        if item.get("action_draft") is not None:
+            if not _valid_utf8_text(item["action_draft"], max_len=240):
+                return None, f"{prefix}.items[{idx}].action_draft must be non-empty UTF-8 text (<= 240 chars)."
+            clean_item["action_draft"] = item["action_draft"].strip()
+        clean_items.append(clean_item)
+    return clean_items, None
+
+
 def validate_widget_spec(raw: Any, *, prefix: str = "widget") -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """Validate & normalize a declarative home-screen widget spec (shared SSoT for ``upsert_widget`` and ``widget_update``).
 
@@ -398,34 +430,9 @@ def validate_widget_spec(raw: Any, *, prefix: str = "widget") -> tuple[Optional[
     if subtitle is not None and not _valid_utf8_text(subtitle, max_len=120, allow_empty=True):
         return None, f"{prefix}.subtitle must be UTF-8 text (<= 120 chars)."
 
-    clean_items: list[dict[str, Any]] = []
-    raw_items = raw.get("items", [])
-    if not isinstance(raw_items, list) or len(raw_items) > MAX_WIDGET_ITEMS:
-        return None, f"{prefix}.items must be an array of at most {MAX_WIDGET_ITEMS} entries."
-    for idx, item in enumerate(raw_items):
-        if isinstance(item, str) and _valid_utf8_text(item, max_len=80):
-            clean_items.append({"label": item.strip()})
-            continue
-        if not isinstance(item, dict):
-            return None, f"{prefix}.items[{idx}] must be an object or short string."
-        label = item.get("label")
-        if not _valid_utf8_text(label, max_len=80):
-            return None, f"{prefix}.items[{idx}].label must be non-empty UTF-8 text (<= 80 chars)."
-        clean_item: dict[str, Any] = {"label": label.strip()}
-        if "value" in item and item["value"] is not None:
-            val_str = str(item["value"]) if isinstance(item["value"], (int, float)) and not isinstance(item["value"], bool) else item["value"]
-            if not _valid_utf8_text(val_str, max_len=80, allow_empty=True):
-                return None, f"{prefix}.items[{idx}].value must be UTF-8 text (<= 80 chars)."
-            clean_item["value"] = val_str.strip()
-        if "checked" in item and item["checked"] is not None:
-            if not isinstance(item["checked"], bool):
-                return None, f"{prefix}.items[{idx}].checked must be a boolean."
-            clean_item["checked"] = item["checked"]
-        if "action_draft" in item and item["action_draft"] is not None:
-            if not _valid_utf8_text(item["action_draft"], max_len=240):
-                return None, f"{prefix}.items[{idx}].action_draft must be non-empty UTF-8 text (<= 240 chars)."
-            clean_item["action_draft"] = item["action_draft"].strip()
-        clean_items.append(clean_item)
+    clean_items, items_err = _normalize_widget_items(raw.get("items", []), prefix)
+    if items_err:
+        return None, items_err
 
     spec: dict[str, Any] = {
         "widget_id": wid,
@@ -499,6 +506,148 @@ def validate_suggested_actions(raw: Any) -> tuple[Optional[list[dict[str, Any]]]
     return cleaned, None
 
 
+def _validate_upsert_surface(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    title = raw_op.get("title")
+    if not _valid_utf8_text(title, max_len=MAX_TITLE_LEN):
+        return None, f"ops[{idx}].title must be non-empty UTF-8 text (<= {MAX_TITLE_LEN} chars)."
+    raw_sid = raw_op.get("surface_id")
+    surface_id = slugify_id(title, fallback=f"surface_{idx + 1}") if (raw_sid is None or raw_sid == "") else raw_sid
+    id_err = _validate_safe_id(surface_id, f"ops[{idx}].surface_id")
+    if id_err:
+        return None, id_err
+    raw_kind = raw_op.get("kind")
+    kind = (
+        SURFACE_KIND_ALIASES.get(raw_kind.strip().lower(), raw_kind.strip().lower())
+        if isinstance(raw_kind, str)
+        else raw_kind
+    )
+    if kind not in ALLOWED_SURFACE_KINDS:
+        return None, f"ops[{idx}].kind must be one of {sorted(ALLOWED_SURFACE_KINDS)}."
+    scope = raw_op.get("scope", "atelier")
+    if scope not in ALLOWED_SCOPES:
+        return None, f"ops[{idx}].scope must be one of {sorted(ALLOWED_SCOPES)}."
+    spec = {} if raw_op.get("spec") is None else raw_op.get("spec")
+    if not isinstance(spec, dict):
+        return None, f"ops[{idx}].spec must be an object."
+    tab = raw_op.get("tab")
+    if tab is not None:
+        tab_err = _validate_safe_id(tab, f"ops[{idx}].tab")
+        if tab_err:
+            return None, tab_err
+    order = raw_op.get("order", 0)
+    if type(order) is not int or not (-1000 <= order <= 1000):
+        return None, f"ops[{idx}].order must be an integer between -1000 and 1000."
+    return {
+        "op": "upsert_surface",
+        "surface_id": surface_id,
+        "scope": scope,
+        "kind": kind,
+        "title": title.strip(),
+        "spec": spec,
+        "order": order,
+        **({"tab": tab} if tab is not None else {}),
+    }, None
+
+
+def _validate_remove_surface(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    surface_id = raw_op.get("surface_id")
+    id_err = _validate_safe_id(surface_id, f"ops[{idx}].surface_id")
+    if id_err:
+        return None, id_err
+    scope = raw_op.get("scope", "atelier")
+    if scope not in ALLOWED_SCOPES:
+        return None, f"ops[{idx}].scope must be one of {sorted(ALLOWED_SCOPES)}."
+    return {"op": "remove_surface", "surface_id": surface_id, "scope": scope}, None
+
+
+def _validate_upsert_quick_action(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    label = raw_op.get("label")
+    if not _valid_utf8_text(label, max_len=64):
+        return None, f"ops[{idx}].label must be non-empty UTF-8 text (<= 64 chars)."
+    raw_aid = raw_op.get("action_id")
+    action_id = slugify_id(label, fallback=f"action_{idx + 1}") if (raw_aid is None or raw_aid == "") else raw_aid
+    id_err = _validate_safe_id(action_id, f"ops[{idx}].action_id")
+    if id_err:
+        return None, id_err
+    action_kind = raw_op.get("action_kind", "prompt")
+    if action_kind not in ALLOWED_QUICK_ACTION_KINDS:
+        return None, f"ops[{idx}].action_kind must be one of {sorted(ALLOWED_QUICK_ACTION_KINDS)}."
+    entry: dict[str, Any] = {
+        "op": "upsert_quick_action",
+        "action_id": action_id,
+        "label": label.strip(),
+        "action_kind": action_kind,
+    }
+    if raw_op.get("icon") is not None:
+        icon_err = _validate_safe_id(raw_op["icon"], f"ops[{idx}].icon")
+        if icon_err:
+            return None, icon_err
+        entry["icon"] = raw_op["icon"]
+    if action_kind == "prompt":
+        prompt = raw_op.get("prompt")
+        if not _valid_utf8_text(prompt, max_len=MAX_PROMPT_LEN):
+            return None, f"ops[{idx}].prompt must be non-empty UTF-8 text (<= {MAX_PROMPT_LEN} chars)."
+        entry["prompt"] = prompt.strip()
+    elif action_kind == "open_destination":
+        dest = raw_op.get("destination")
+        if dest not in ALLOWED_DESTINATIONS:
+            return None, f"ops[{idx}].destination must be one of {sorted(ALLOWED_DESTINATIONS)}."
+        entry["destination"] = dest
+    elif action_kind == "toggle_surface":
+        target_surface = raw_op.get("surface_id")
+        t_err = _validate_safe_id(target_surface, f"ops[{idx}].surface_id")
+        if t_err:
+            return None, t_err
+        entry["surface_id"] = target_surface
+    return entry, None
+
+
+def _validate_remove_quick_action(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    action_id = raw_op.get("action_id")
+    id_err = _validate_safe_id(action_id, f"ops[{idx}].action_id")
+    if id_err:
+        return None, id_err
+    return {"op": "remove_quick_action", "action_id": action_id}, None
+
+
+def _validate_upsert_widget(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    widget_spec, widget_err = validate_widget_spec(raw_op, prefix=f"ops[{idx}]")
+    if widget_err:
+        return None, widget_err
+    return {"op": "upsert_widget", **widget_spec}, None
+
+
+def _validate_remove_widget(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    widget_id = raw_op.get("widget_id")
+    id_err = _validate_safe_id(widget_id, f"ops[{idx}].widget_id")
+    if id_err:
+        return None, id_err
+    return {"op": "remove_widget", "widget_id": widget_id}, None
+
+
+def _validate_set_theme_override(raw_op: dict[str, Any], idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    cleaned_theme, theme_err = validate_theme_override(raw_op.get("theme"))
+    if theme_err:
+        return None, f"ops[{idx}]: {theme_err}"
+    return {"op": "set_theme_override", "theme": cleaned_theme}, None
+
+
+def _validate_clear_theme_override(_raw_op: dict[str, Any], _idx: int) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    return {"op": "clear_theme_override"}, None
+
+
+_OP_VALIDATORS: dict[str, Callable[[dict[str, Any], int], tuple[Optional[dict[str, Any]], Optional[str]]]] = {
+    "upsert_surface": _validate_upsert_surface,
+    "remove_surface": _validate_remove_surface,
+    "upsert_quick_action": _validate_upsert_quick_action,
+    "remove_quick_action": _validate_remove_quick_action,
+    "upsert_widget": _validate_upsert_widget,
+    "remove_widget": _validate_remove_widget,
+    "set_theme_override": _validate_set_theme_override,
+    "clear_theme_override": _validate_clear_theme_override,
+}
+
+
 def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
     """Validate and normalize a declarative UI patch op list."""
     if isinstance(ops, dict):
@@ -521,131 +670,13 @@ def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Opt
     for idx, raw_op in enumerate(ops):
         if not isinstance(raw_op, dict):
             return None, f"ops[{idx}] must be an object."
-        op_type = raw_op.get("op")
-        if op_type not in ALLOWED_OP_TYPES:
+        handler = _OP_VALIDATORS.get(raw_op.get("op"))
+        if handler is None:
             return None, f"ops[{idx}].op must be one of {sorted(ALLOWED_OP_TYPES)}."
-
-        if op_type == "upsert_surface":
-            title = raw_op.get("title")
-            if not _valid_utf8_text(title, max_len=MAX_TITLE_LEN):
-                return None, f"ops[{idx}].title must be non-empty UTF-8 text (<= {MAX_TITLE_LEN} chars)."
-            raw_sid = raw_op.get("surface_id")
-            surface_id = slugify_id(title, fallback=f"surface_{idx + 1}") if (raw_sid is None or raw_sid == "") else raw_sid
-            id_err = _validate_safe_id(surface_id, f"ops[{idx}].surface_id")
-            if id_err:
-                return None, id_err
-            raw_kind = raw_op.get("kind")
-            kind = (
-                SURFACE_KIND_ALIASES.get(raw_kind.strip().lower(), raw_kind.strip().lower())
-                if isinstance(raw_kind, str)
-                else raw_kind
-            )
-            if kind not in ALLOWED_SURFACE_KINDS:
-                return None, f"ops[{idx}].kind must be one of {sorted(ALLOWED_SURFACE_KINDS)}."
-            scope = raw_op.get("scope", "atelier")
-            if scope not in ALLOWED_SCOPES:
-                return None, f"ops[{idx}].scope must be one of {sorted(ALLOWED_SCOPES)}."
-            spec = raw_op.get("spec")
-            if spec is None:
-                spec = {}
-            if not isinstance(spec, dict):
-                return None, f"ops[{idx}].spec must be an object."
-            tab = raw_op.get("tab")
-            if tab is not None and _validate_safe_id(tab, f"ops[{idx}].tab"):
-                return None, _validate_safe_id(tab, f"ops[{idx}].tab")
-            order = raw_op.get("order", 0)
-            if type(order) is not int or not (-1000 <= order <= 1000):
-                return None, f"ops[{idx}].order must be an integer between -1000 and 1000."
-            normalized.append({
-                "op": "upsert_surface",
-                "surface_id": surface_id,
-                "scope": scope,
-                "kind": kind,
-                "title": title.strip(),
-                "spec": spec,
-                "order": order,
-                **({"tab": tab} if tab is not None else {}),
-            })
-
-        elif op_type == "remove_surface":
-            surface_id = raw_op.get("surface_id")
-            id_err = _validate_safe_id(surface_id, f"ops[{idx}].surface_id")
-            if id_err:
-                return None, id_err
-            scope = raw_op.get("scope", "atelier")
-            if scope not in ALLOWED_SCOPES:
-                return None, f"ops[{idx}].scope must be one of {sorted(ALLOWED_SCOPES)}."
-            normalized.append({"op": "remove_surface", "surface_id": surface_id, "scope": scope})
-
-        elif op_type == "upsert_quick_action":
-            label = raw_op.get("label")
-            if not _valid_utf8_text(label, max_len=64):
-                return None, f"ops[{idx}].label must be non-empty UTF-8 text (<= 64 chars)."
-            raw_aid = raw_op.get("action_id")
-            action_id = slugify_id(label, fallback=f"action_{idx + 1}") if (raw_aid is None or raw_aid == "") else raw_aid
-            id_err = _validate_safe_id(action_id, f"ops[{idx}].action_id")
-            if id_err:
-                return None, id_err
-            action_kind = raw_op.get("action_kind", "prompt")
-            if action_kind not in ALLOWED_QUICK_ACTION_KINDS:
-                return None, f"ops[{idx}].action_kind must be one of {sorted(ALLOWED_QUICK_ACTION_KINDS)}."
-            entry: dict[str, Any] = {
-                "op": "upsert_quick_action",
-                "action_id": action_id,
-                "label": label.strip(),
-                "action_kind": action_kind,
-            }
-            if "icon" in raw_op and raw_op["icon"] is not None:
-                icon_err = _validate_safe_id(raw_op["icon"], f"ops[{idx}].icon")
-                if icon_err:
-                    return None, icon_err
-                entry["icon"] = raw_op["icon"]
-            if action_kind == "prompt":
-                prompt = raw_op.get("prompt")
-                if not _valid_utf8_text(prompt, max_len=MAX_PROMPT_LEN):
-                    return None, f"ops[{idx}].prompt must be non-empty UTF-8 text (<= {MAX_PROMPT_LEN} chars)."
-                entry["prompt"] = prompt.strip()
-            elif action_kind == "open_destination":
-                dest = raw_op.get("destination")
-                if dest not in ALLOWED_DESTINATIONS:
-                    return None, f"ops[{idx}].destination must be one of {sorted(ALLOWED_DESTINATIONS)}."
-                entry["destination"] = dest
-            elif action_kind == "toggle_surface":
-                target_surface = raw_op.get("surface_id")
-                t_err = _validate_safe_id(target_surface, f"ops[{idx}].surface_id")
-                if t_err:
-                    return None, t_err
-                entry["surface_id"] = target_surface
-            normalized.append(entry)
-
-        elif op_type == "remove_quick_action":
-            action_id = raw_op.get("action_id")
-            id_err = _validate_safe_id(action_id, f"ops[{idx}].action_id")
-            if id_err:
-                return None, id_err
-            normalized.append({"op": "remove_quick_action", "action_id": action_id})
-
-        elif op_type == "upsert_widget":
-            widget_spec, widget_err = validate_widget_spec(raw_op, prefix=f"ops[{idx}]")
-            if widget_err:
-                return None, widget_err
-            normalized.append({"op": "upsert_widget", **widget_spec})
-
-        elif op_type == "remove_widget":
-            widget_id = raw_op.get("widget_id")
-            id_err = _validate_safe_id(widget_id, f"ops[{idx}].widget_id")
-            if id_err:
-                return None, id_err
-            normalized.append({"op": "remove_widget", "widget_id": widget_id})
-
-        elif op_type == "set_theme_override":
-            cleaned_theme, theme_err = validate_theme_override(raw_op.get("theme"))
-            if theme_err:
-                return None, f"ops[{idx}]: {theme_err}"
-            normalized.append({"op": "set_theme_override", "theme": cleaned_theme})
-
-        elif op_type == "clear_theme_override":
-            normalized.append({"op": "clear_theme_override"})
+        entry, op_err = handler(raw_op, idx)
+        if op_err:
+            return None, op_err
+        normalized.append(entry)
 
     return normalized, None
 
@@ -656,54 +687,85 @@ def _empty_state() -> dict[str, Any]:
     return {"surfaces": {}, "quick_actions": {}, "widgets": {}, "theme": {}}
 
 
+def _apply_upsert_surface(state: dict[str, Any], op: dict[str, Any], session_id: Optional[str]) -> None:
+    surfaces = state["surfaces"]
+    scope = op["scope"]
+    prefix = f"{scope}:{session_id or ''}:" if scope == "thread" else "atelier:"
+    key = f"{prefix}{op['surface_id']}"
+    if key not in surfaces and sum(1 for k in surfaces if k.startswith(prefix)) >= MAX_SURFACES_PER_SCOPE:
+        raise ValueError(f"Maximum of {MAX_SURFACES_PER_SCOPE} surfaces reached for scope '{scope}'.")
+    surfaces[key] = {
+        "surface_id": op["surface_id"],
+        "scope": scope,
+        "session_id": session_id if scope == "thread" else None,
+        "kind": op["kind"],
+        "title": op["title"],
+        "spec": op["spec"],
+        "order": op.get("order", 0),
+        **({"tab": op["tab"]} if "tab" in op else {}),
+    }
+
+
+def _apply_remove_surface(state: dict[str, Any], op: dict[str, Any], session_id: Optional[str]) -> None:
+    scope = op["scope"]
+    key = f"{scope}:{session_id or ''}:{op['surface_id']}" if scope == "thread" else f"atelier:{op['surface_id']}"
+    state["surfaces"].pop(key, None)
+
+
+def _apply_upsert_quick_action(state: dict[str, Any], op: dict[str, Any], _session_id: Optional[str]) -> None:
+    quick_actions = state["quick_actions"]
+    aid = op["action_id"]
+    if aid not in quick_actions and len(quick_actions) >= MAX_QUICK_ACTIONS:
+        raise ValueError(f"Maximum of {MAX_QUICK_ACTIONS} quick actions reached.")
+    quick_actions[aid] = {k: v for k, v in op.items() if k != "op"}
+
+
+def _apply_remove_quick_action(state: dict[str, Any], op: dict[str, Any], _session_id: Optional[str]) -> None:
+    state["quick_actions"].pop(op["action_id"], None)
+
+
+def _apply_upsert_widget(state: dict[str, Any], op: dict[str, Any], _session_id: Optional[str]) -> None:
+    widgets = state["widgets"]
+    wid = op["widget_id"]
+    if wid not in widgets and len(widgets) >= MAX_WIDGETS:
+        raise ValueError(f"Maximum of {MAX_WIDGETS} widgets reached.")
+    widgets[wid] = {k: v for k, v in op.items() if k != "op"}
+
+
+def _apply_remove_widget(state: dict[str, Any], op: dict[str, Any], _session_id: Optional[str]) -> None:
+    state["widgets"].pop(op["widget_id"], None)
+
+
+def _apply_set_theme_override(state: dict[str, Any], op: dict[str, Any], _session_id: Optional[str]) -> None:
+    state["theme"].update(op["theme"])
+
+
+def _apply_clear_theme_override(state: dict[str, Any], _op: dict[str, Any], _session_id: Optional[str]) -> None:
+    state["theme"].clear()
+
+
+_OP_APPLIERS: dict[str, Callable[[dict[str, Any], dict[str, Any], Optional[str]], None]] = {
+    "upsert_surface": _apply_upsert_surface,
+    "remove_surface": _apply_remove_surface,
+    "upsert_quick_action": _apply_upsert_quick_action,
+    "remove_quick_action": _apply_remove_quick_action,
+    "upsert_widget": _apply_upsert_widget,
+    "remove_widget": _apply_remove_widget,
+    "set_theme_override": _apply_set_theme_override,
+    "clear_theme_override": _apply_clear_theme_override,
+}
+
+
 def _apply_ops_to_state(base_state: dict[str, Any], ops: list[dict[str, Any]], *, session_id: Optional[str]) -> dict[str, Any]:
     state = json.loads(json.dumps(base_state))
-    surfaces: dict[str, dict[str, Any]] = state.setdefault("surfaces", {})
-    quick_actions: dict[str, dict[str, Any]] = state.setdefault("quick_actions", {})
-    widgets: dict[str, dict[str, Any]] = state.setdefault("widgets", {})
-    theme: dict[str, Any] = state.setdefault("theme", {})
-
+    state.setdefault("surfaces", {})
+    state.setdefault("quick_actions", {})
+    state.setdefault("widgets", {})
+    state.setdefault("theme", {})
     for op in ops:
-        kind = op["op"]
-        if kind == "upsert_surface":
-            scope = op["scope"]
-            key = f"{scope}:{session_id or ''}:{op['surface_id']}" if scope == "thread" else f"atelier:{op['surface_id']}"
-            same_scope_count = sum(1 for k in surfaces if k.startswith(f"{scope}:{session_id or ''}:" if scope == "thread" else "atelier:"))
-            if key not in surfaces and same_scope_count >= MAX_SURFACES_PER_SCOPE:
-                raise ValueError(f"Maximum of {MAX_SURFACES_PER_SCOPE} surfaces reached for scope '{scope}'.")
-            surfaces[key] = {
-                "surface_id": op["surface_id"],
-                "scope": scope,
-                "session_id": session_id if scope == "thread" else None,
-                "kind": op["kind"],
-                "title": op["title"],
-                "spec": op["spec"],
-                "order": op.get("order", 0),
-                **({"tab": op["tab"]} if "tab" in op else {}),
-            }
-        elif kind == "remove_surface":
-            scope = op["scope"]
-            key = f"{scope}:{session_id or ''}:{op['surface_id']}" if scope == "thread" else f"atelier:{op['surface_id']}"
-            surfaces.pop(key, None)
-        elif kind == "upsert_quick_action":
-            aid = op["action_id"]
-            if aid not in quick_actions and len(quick_actions) >= MAX_QUICK_ACTIONS:
-                raise ValueError(f"Maximum of {MAX_QUICK_ACTIONS} quick actions reached.")
-            quick_actions[aid] = {k: v for k, v in op.items() if k != "op"}
-        elif kind == "remove_quick_action":
-            quick_actions.pop(op["action_id"], None)
-        elif kind == "upsert_widget":
-            wid = op["widget_id"]
-            if wid not in widgets and len(widgets) >= MAX_WIDGETS:
-                raise ValueError(f"Maximum of {MAX_WIDGETS} widgets reached.")
-            widgets[wid] = {k: v for k, v in op.items() if k != "op"}
-        elif kind == "remove_widget":
-            widgets.pop(op["widget_id"], None)
-        elif kind == "set_theme_override":
-            theme.update(op["theme"])
-        elif kind == "clear_theme_override":
-            theme.clear()
-
+        applier = _OP_APPLIERS.get(op["op"])
+        if applier is not None:
+            applier(state, op, session_id)
     return state
 
 
