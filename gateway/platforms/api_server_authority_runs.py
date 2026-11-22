@@ -1,4 +1,7 @@
 """API run controls resolve durable claims, never adapter agent/task ownership."""
+import asyncio
+import logging
+import sqlite3
 from dataclasses import asdict
 
 from gateway.session_contract import SessionActor, SessionRef
@@ -83,7 +86,10 @@ def run_projection(adapter, run_id):
     owned = run_admission(adapter, run_id)
     if owned is None:
         return None
-    authority, row = owned
+    return _project_admission(adapter, run_id, *owned)
+
+
+def _project_admission(adapter, run_id, authority, row):
     # ``unknown`` is not terminal: later turns wait for POST /v1/runs/{id}/resolve-unknown, and
     # ``interrupted`` is in TERMINAL_STATUSES, so a poller would stop at a paused head.
     status = {'queued': 'queued', 'started': 'running', 'unknown': 'unknown', 'terminal': row['outcome']}.get(row['status'])
@@ -116,6 +122,29 @@ def run_projection(adapter, run_id):
     return {**progress, 'pending_controls': pending, 'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
             'admission_id': row['admission_id'], 'execution_generation': row['generation'],
             'output': result.get('final_response', ''), 'usage': canonical_run_usage(saved.get('usage', {})) if saved else {}}
+
+
+def refresh_recovered_controls(adapter, authorities, owner_alive):
+    """A terminal canonical receipt may predate the crash or be acknowledged later over another transport."""
+    from gateway.platforms.api_server_store import authority_store
+    from gateway.session_authorities import owner_scope
+    ledger = adapter._run_idempotency_store
+    ledger.recover_dead_controls(owner_alive)
+    outstanding = ledger.recovered_control_ids()
+    if not outstanding:
+        return
+    for authority in authorities:
+        with owner_scope(authority):
+            for scope, run_id in outstanding:
+                try:
+                    rows = authority_store(authority).admissions.match(principal_id='api', request_id=run_id)
+                    if len(rows) == 1 and rows[0].status == 'terminal':
+                        row = rows[0]
+                        if row.payload.get('api_turn_v1', {}).get('run_owner_scope') == scope:
+                            terminal = _project_admission(adapter, run_id, authority, asdict(row))
+                            ledger.settle_recovered_control(scope, run_id, terminal)
+                except (OSError, sqlite3.Error, *STORE_FAILURES):
+                    logging.getLogger(__name__).exception("Deferred recovered run receipt until the next sweep")
 
 
 async def send_clarify(adapter, *, chat_id, **kwargs):
@@ -192,7 +221,7 @@ async def stop_run(adapter, run_id):
     return run_projection(adapter, run_id)
 
 
-async def resolve_unknown_run(adapter, run_id, body):
+async def resolve_unknown_run(adapter, run_id, body, scope):
     """Resolve only the exact unknown admission durably bound to an owned API run."""
     owned = run_admission(adapter, run_id)
     if owned is None:
@@ -211,4 +240,10 @@ async def resolve_unknown_run(adapter, run_id, body):
     receipt = await authority.resolve_unknown(
         actor, SessionRef(authority.profile_id, row['target_session_id']),
         row['admission_id'], generation)
+    def settle():
+        adapter._run_idempotency_store.settle_recovered_control(scope, run_id, run_projection(adapter, run_id))
+    try:
+        await asyncio.to_thread(settle)
+    except (OSError, sqlite3.Error, *STORE_FAILURES):
+        logging.getLogger(__name__).exception("Deferred recovered run receipt until the next sweep")
     return asdict(receipt)

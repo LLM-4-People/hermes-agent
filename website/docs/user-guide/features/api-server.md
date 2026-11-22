@@ -722,7 +722,11 @@ The WebSocket `clarify.respond` command resolves the same waiting tool.
 
 For keyed runs, the scoped idempotency ledger records each pending question's
 opaque ID and its arrival time in `pending_questions`. It clears each entry on
-settlement. Question text, options and answers are excluded from those hints.
+settlement. On restart, the listener removes pending question and approval hints
+whose owning process has exited. A lost canonical execution reports `unknown`
+until it is acknowledged. A settled receipt restores the terminal status even
+when no client polls. A live gateway sharing the ledger keeps its pending hints.
+Question text, options and answers are excluded from those hints.
 
 ## Jobs API (background scheduled work)
 

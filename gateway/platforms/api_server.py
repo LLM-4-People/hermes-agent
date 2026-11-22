@@ -3882,6 +3882,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             mws = [mw for mw in (  # the config guard outermost: entering a profile scope reads config
                 config_unavailable_middleware, self._make_profile_prefix_middleware(), cors_middleware,
                 body_limit_middleware, security_headers_middleware) if mw is not None]
+            await _api_runs.recover_run_controls(self)
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             assert self._app is not None
             # Native routes + multiplex /p/<profile>/ mirrors (the prefix middleware validates and

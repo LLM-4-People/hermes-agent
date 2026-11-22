@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -463,11 +464,13 @@ def _owner_alive(owner_pid: int, owner_started: int) -> bool:
     """True when the recorded owner pid still exists and is the same process incarnation."""
     try:
         from gateway.status import _pid_exists, get_process_start_time, start_time_fingerprints_match
-        return owner_pid > 0 and bool(_pid_exists(owner_pid)) and (
-            not owner_started
-            or start_time_fingerprints_match(owner_started, get_process_start_time(owner_pid) or 0))
+        if owner_pid <= 0 or not _pid_exists(owner_pid):
+            return False
+        current = get_process_start_time(owner_pid) if owner_started else None
+        return current is None or start_time_fingerprints_match(owner_started, current)
     except Exception:
-        return False
+        # A probe can be unavailable or forbidden. It supplies no evidence that the waiter died.
+        return True
 
 
 def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, Any] | None:
@@ -492,7 +495,7 @@ def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, An
     if record is None:
         return None
     status = dict(record["status"])
-    if status.get("status") not in TERMINAL_STATUSES and not _owner_alive(
+    if status.get("status") not in TERMINAL_STATUSES | {"unknown"} and not _owner_alive(
         int(record.get("owner_pid") or 0), int(record.get("owner_started") or 0)):
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
@@ -1611,16 +1614,28 @@ async def _handle_resolve_unknown_run(
         body = None
     from gateway.platforms.api_server_authority_runs import resolve_unknown_run, store_error_response
     try:
-        result = await resolve_unknown_run(self, run_id, body)
+        result = await resolve_unknown_run(self, run_id, body, self._run_idempotency_scope(request))
         return web.json_response({'run_id': run_id, **result})
     except AuthorityRefusal as exc:
         return store_error_response(_api_server._openai_error, exc)
+
+
+async def recover_run_controls(self) -> None:
+    """Reconcile orphaned prompt hints without a status poll. Snapshot served owners on the gateway loop."""
+    from gateway.session_authorities import serving_authorities
+    from gateway.platforms.api_server_authority_runs import refresh_recovered_controls
+    authorities = serving_authorities(self.gateway_runner)
+    await asyncio.to_thread(refresh_recovered_controls, self, authorities, _owner_alive)
 
 
 async def _sweep_orphaned_runs(self) -> None:
     """Periodically expire transport buffers and terminal status records."""
     while True:
         await asyncio.sleep(60)
+        try:
+            await recover_run_controls(self)
+        except (sqlite3.Error, OSError):
+            logger.exception("[api_server] deferred run control recovery until the next sweep")
         self._sweep_orphaned_runs_once(time.time())
 
 

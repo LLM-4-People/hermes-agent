@@ -88,6 +88,19 @@ def _stop_open_question(base, headers, home):
     wait_until(lambda: _status(url, headers)["status"] == "cancelled", what="the stopped question to retire")
 
 
+def _daemon_env(model, home, user, port, root):
+    config = {"model": {"provider": "custom", "default": "question-model", "base_url": model.base_url},
+              "gateway": {"multiplex_profiles": False, "platforms": {"api_server": {
+                  "enabled": True, "port": port, "host": "127.0.0.1"}}},
+              "approvals": {"mode": "manual"},
+              "auxiliary": {"title_generation": {"enabled": False}},
+              "platform_toolsets": {"api_server": ["hermes-api-server", "clarify"]}}
+    (home / "config.yaml").write_text(json.dumps(config))
+    return dict(child_env(), HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
+               OPENAI_API_KEY="loopback-only-model", OPENAI_BASE_URL=model.base_url,
+               API_SERVER_KEY="loopback-only-api-key", API_SERVER_ENABLED="true", API_SERVER_PORT=str(port))
+
+
 def test_ordinary_daemon_run_clarifications_reconnect(tmp_path, unused_tcp_port):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / "state", tmp_path / "user"
@@ -97,15 +110,7 @@ def test_ordinary_daemon_run_clarifications_reconnect(tmp_path, unused_tcp_port)
     base = f"http://127.0.0.1:{unused_tcp_port}"
     with FakeLLMServer([ToolCall("clarify", {"questions": QUESTIONS}), Text("Questions complete"),
                         ToolCall("clarify", {"questions": QUESTIONS[:1]})]) as model:
-        config = {"model": {"provider": "custom", "default": "question-model", "base_url": model.base_url},
-                  "gateway": {"multiplex_profiles": False, "platforms": {"api_server": {
-                      "enabled": True, "port": unused_tcp_port, "host": "127.0.0.1"}}},
-                  "auxiliary": {"title_generation": {"enabled": False}},
-                  "platform_toolsets": {"api_server": ["hermes-api-server", "clarify"]}}
-        (home / "config.yaml").write_text(json.dumps(config))
-        env = dict(child_env(), HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
-                   OPENAI_API_KEY="loopback-only-model", OPENAI_BASE_URL=model.base_url,
-                   API_SERVER_KEY="loopback-only-api-key", API_SERVER_ENABLED="true", API_SERVER_PORT=str(unused_tcp_port))
+        env = _daemon_env(model, home, user, unused_tcp_port, root)
         with daemon(root, home, env, barrier=False):
             accepted = requests.post(base + "/v1/runs", headers={**headers, "Idempotency-Key": "questions"},
                                      json={"input": "Ask questions", "session_id": "question-test",
@@ -203,3 +208,93 @@ def test_stop_during_response_attachment_fences_the_original_prompt(monkeypatch)
                                                       "answer": "too late"}, kind="clarify"))
     owner.respond.assert_not_awaited()
     owner.detach.assert_awaited_once()
+
+
+
+def test_restart_withdraws_orphaned_approval_and_question_before_polling(tmp_path, unused_tcp_port):
+    import os
+    from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+    from gateway.status import get_process_start_time
+    root = Path(__file__).resolve().parents[2]
+    home, user = tmp_path / "state", tmp_path / "user"
+    home.mkdir(mode=0o700)
+    user.mkdir()
+    headers = {"Authorization": "Bearer loopback-only-api-key"}
+    base = f"http://127.0.0.1:{unused_tcp_port}/v1/runs"
+    prompts = [
+        ("clarify", "pending_questions", ToolCall("clarify", {"questions": QUESTIONS[:1]})),
+        ("terminal", "pending_approvals", ToolCall("terminal", {"command": "chmod 777 --help"})),
+    ]
+    with FakeLLMServer([t[2] for t in prompts]) as model:
+        env = _daemon_env(model, home, user, unused_tcp_port, root)
+        receipts = []
+        with daemon(root, home, env, barrier=False):
+            for tool, field, _ in prompts:
+                response = requests.post(base, headers={**headers, "Idempotency-Key": tool},
+                                         json={"input": "Ask me", "session_id": tool, "allowed_toolsets": [tool]}, timeout=15)
+                assert response.status_code == 202, response.text
+                run_id = response.json()["run_id"]
+                hints = wait_until(lambda: _ledger(home, run_id).get(field), timeout=35, interval=.1, what=field)
+                assert [p["prompt_id"] for p in _status(base + "/" + run_id, headers)["pending_controls"]] == list(hints)
+                receipts.append((run_id, field, _ledger(home, run_id)))
+        # The first process was killed while its model was parked. A different process sharing the
+        # ledger still owns two waiters. Neither its PID nor a missing mobile poll is evidence of loss.
+        store = RunIdempotencyStore(str(home / "runs_idempotency.db"))
+        try:
+            for tool, field, _ in prompts:
+                state = "waiting_for_input" if tool == "clarify" else "waiting_for_approval"
+                store.reserve("other-scope", tool, "fp", tool, {"status": state, field: {"peer": 123}},
+                              owner_pid=os.getpid(), owner_started=get_process_start_time(os.getpid()) or 0)
+            with daemon(root, home, env, barrier=False):
+                for tool, field, _ in prompts:
+                    assert _ledger(home, tool)[field] == {"peer": 123}
+                for run_id, field, _ in receipts:
+                    durable = _ledger(home, run_id)  # Read before any HTTP request can reconcile this run.
+                    assert durable["status"] == "unknown" and field not in durable
+                    url = base + "/" + run_id
+                    status = _status(url, headers)
+                    assert status["status"] == "unknown" and status["pending_controls"] == []
+                    ack = requests.post(url + "/resolve-unknown", headers=headers, timeout=10,
+                                        json={k: status[k] for k in ("admission_id", "execution_generation")})
+                    assert ack.status_code == 200, ack.text
+                    assert _ledger(home, run_id)["status"] == _status(url, headers)["status"] == "cancelled"
+            # Simulate the other order of the two database commits: authority has already settled,
+            # while the notification ledger still holds the dead executor's last waiting receipt.
+            for run_id, _, old_receipt in receipts:
+                store.update_status(run_id, old_receipt)
+            with daemon(root, home, env, barrier=False):
+                for run_id, field, _ in receipts:
+                    recovered = _ledger(home, run_id)
+                    assert recovered["status"] == "cancelled" and field not in recovered
+        finally:
+            store.close()
+
+
+def test_owner_recovery_keeps_a_concurrent_settlement_and_retires_native_approval(tmp_path):
+    from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+    store = RunIdempotencyStore(str(tmp_path / "ledger.db"))
+    try:
+        store.reserve("scope", "a", "fp", "native", {"status": "waiting_for_approval",
+                      "approval": {"request_id": "private"}}, owner_pid=11, owner_started=1)
+        store.reserve("scope", "b", "fp", "race", {"status": "waiting_for_input",
+                      "pending_questions": {"unanswered": 1}}, owner_pid=11, owner_started=1)
+        def owner_exited(pid, started):
+            store.update_status("race", {"status": "completed", "output": "committed"})
+            return False
+        store.recover_dead_controls(owner_exited)
+        assert store.status_for_run("scope", "race")["status"] == {"status": "completed", "output": "committed"}
+        native = store.status_for_run("scope", "native")["status"]
+        assert native["status"] == "interrupted" and "approval" not in native
+        store.reserve("scope", "c", "fp", "lost", {"status": "unknown", "last_event": "run.unknown"})
+        store.settle_recovered_control("foreign", "lost", {"status": "completed", "output": "foreign receipt"})
+        assert store.status_for_run("scope", "lost")["status"] == {"status": "unknown", "last_event": "run.unknown"}
+    finally:
+        store.close()
+
+
+def test_uncertain_process_identity_keeps_existing_waiter(monkeypatch):
+    from gateway import status
+    from gateway.platforms.api_server_runs import _owner_alive
+    monkeypatch.setattr(status, "_pid_exists", lambda _pid: True)
+    monkeypatch.setattr(status, "get_process_start_time", lambda _pid: None)
+    assert _owner_alive(42, 123456)
