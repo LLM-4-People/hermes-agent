@@ -40,10 +40,12 @@ image build, so the published `edge` image always corresponds to a reviewed comm
 ruleset also rejects direct pushes to `main`, so the PR-only rule is mechanically enforced.
 
 The `main-pr-only` ruleset intentionally has no required checks or approvals: the sync PR is
-created with `GITHUB_TOKEN`, whose `pull_request` runs require manual approval, so a required-check
-rule would leave every automatic sync permanently unmergeable. This is an explicit
-single-maintainer exception; a GitHub App token plus a required-check ruleset is the next step if a
-second reviewer joins the fork.
+created with `GITHUB_TOKEN`, whose `pull_request`/`pull_request_target` runs GitHub suppresses, so
+a required-check rule would leave every automatic sync permanently unmergeable. The public-tree
+hygiene job therefore runs and fails visibly on human pull requests but is not a merge gate until
+the sync workflow opens its PR with a GitHub App installation token. That app token is the next
+step if a second reviewer joins the fork; until then this is an explicit single-maintainer
+exception.
 
 A conflict aborts the merge, pushes nothing, and opens/updates the `upstream-sync` issue with the
 conflicting files. Resolve on the automation branch:

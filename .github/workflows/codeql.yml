@@ -4,14 +4,16 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   schedule:
     - cron: '23 4 * * 1'
   workflow_dispatch:
 
-# Bootstrap note: this fork's first CodeQL analysis runs on main. Until that baseline exists, a
-# pull_request scan reports every pre-existing upstream alert as "new" (108 on the initial branch).
-# Re-add the pull_request trigger once the first main analysis has completed; subsequent PRs then
-# compare against main and only fail on genuinely new alerts.
+# The fork's first CodeQL analysis on main is the baseline; pull-request scans compare against it
+# and only report genuinely new alerts. If the baseline is ever deleted, start main-only again
+# until it is recorded.
 
 permissions:
   contents: read
