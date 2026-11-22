@@ -102,9 +102,9 @@ independently). `.github/workflows/pii-guard.yml` runs on `pull_request_target`:
 checker come from the trusted base commit, the candidate is checked out only as data, and the scan
 runs with `HERMES_PUBLIC_PII_REQUIRE=1`. No pull-request code executes in that job, so neither a
 same-repo PR nor the automation branch (which may contain merged upstream code) can read the
-denylist. There is deliberately no `push` trigger, because that job would run the just-merged
-checker with the secret; direct pushes to `main` are blocked by the ruleset, so every merged tree
-was scanned at its pull request head. A manual `workflow_dispatch` runs only the merged checker.
+denylist. There is deliberately no `push` or manual trigger, because either would run a
+caller-selected checker with the secret; direct pushes to `main` are blocked by the ruleset, so
+every merged tree was scanned at its pull request head. During bootstrap, run the checker locally.
 
 Locally, put the same newline-separated list in `~/.config/hermes/pii-denylist` (or point
 `HERMES_PUBLIC_PII_DENYLIST` at another file) and run `scripts/check --only public-pii`. Findings
