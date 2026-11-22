@@ -51,6 +51,7 @@ _STATIC_FEATURE_FLAGS = {
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
     "reasoning_streaming": True, "run_toolset_selection": True, "run_tool_exclusions": True, "run_scoped_instructions": True,
+    "live_ui_modding": True, "mobile_deliveries": True, "device_bridge": True, "run_progress_hooks": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
     "session_continuity_header": "X-Hermes-Session-Id",
@@ -66,9 +67,17 @@ _CAPABILITY_ENDPOINTS = (
     ("run_events", ("GET", "/v1/runs/{run_id}/events")),
     ("run_approval", ("POST", "/v1/runs/{run_id}/approval")),
     ("run_clarify", ("POST", "/v1/runs/{run_id}/clarify", "run_clarify_response")),
+    ("run_device_result", ("POST", "/v1/runs/{run_id}/device-result", "device_bridge")),
     ("run_steer", ("POST", "/v1/runs/{run_id}/steer")),
     ("run_unknown_resolution", ("POST", "/v1/runs/{run_id}/resolve-unknown", "run_unknown_resolution")),
     ("run_stop", ("POST", "/v1/runs/{run_id}/stop")), ("skills", ("GET", "/v1/skills")),
+    ("mobile_ui_state", ("GET", "/api/mobile/ui/state", "live_ui_modding")),
+    ("mobile_ui_history", ("GET", "/api/mobile/ui/history", "live_ui_modding")),
+    ("mobile_ui_apply", ("POST", "/api/mobile/ui/revisions/{revision_id}/apply", "live_ui_modding")),
+    ("mobile_ui_revert", ("POST", "/api/mobile/ui/revisions/{revision_id}/revert", "live_ui_modding")),
+    ("mobile_deliveries", ("GET", "/api/mobile/deliveries", "mobile_deliveries")),
+    ("mobile_delivery", ("GET", "/api/mobile/deliveries/{delivery_id}", "mobile_deliveries")),
+    ("mobile_delivery_ack", ("POST", "/api/mobile/deliveries/{delivery_id}/ack", "mobile_deliveries")),
     ("toolsets", ("GET", "/v1/toolsets")), ("sessions", ("GET", "/api/sessions")),
     ("session_create", ("POST", "/api/sessions")),
     ("session", ("GET", "/api/sessions/{session_id}")),
@@ -1601,6 +1610,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
+        from gateway.platforms import api_server_device_bridge as _api_device_bridge
+        from gateway.platforms import api_server_ui as _api_ui
+        routes.extend(_api_ui._http_routes(self))
+        routes.extend(_api_device_bridge._http_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))

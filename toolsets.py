@@ -148,6 +148,9 @@ TOOLSETS = {
         platforms=frozenset({"desktop"}),
     ),
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
+    "mobile_ui": _ts("Propose or apply validated, reversible declarative UI patches to Hermes Mobile", ["mobile_ui_patch"]),
+    "mobile_deliver": _ts("Deliver structured notices, cards, files, UI patches, and briefings to Hermes Mobile", ["mobile_deliver"]),
+    "mobile_device": _ts("Request explicitly user-approved Android device capabilities for the active run", ["request_device_action"]),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "kanban": _ts(
@@ -191,13 +194,17 @@ TOOLSETS = {
     "hermes-api-server": _ts(
         "OpenAI-compatible API server — full agent tools accessible via HTTP (no "
         "interactive UI tools like clarify or send_message)",
-        _core_without("text_to_speech", "clarify", "computer_use", kanban=False),
+        _core_without("text_to_speech", "clarify", "computer_use", kanban=False)
+        + ["mobile_ui_patch", "mobile_deliver", "request_device_action"],
     ),
     "hermes-cli": _bundle("Full interactive CLI toolset - all default tools plus cronjob management"),
 
     # Mirrors hermes-cli; `hermes tools` platform config filters it down and
     # _get_platform_tools() drops _DEFAULT_OFF_TOOLSETS unless user-enabled.
-    "hermes-cron": _bundle("Default cron toolset - same core tools as hermes-cli; gated by `hermes tools`"),
+    "hermes-cron": _bundle(
+        "Default cron toolset - same core tools as hermes-cli; gated by `hermes tools`",
+        ["mobile_deliver"],
+    ),
     "hermes-telegram": _bundle("Telegram bot toolset - full access for personal use (terminal has safety checks)"),
     "hermes-discord": _bundle(
         "Discord bot toolset - full access (terminal has safety checks via dangerous "

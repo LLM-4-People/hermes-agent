@@ -1137,7 +1137,24 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     ctx.persist_user_display_kind, ctx.reply_expected)
                 try:
                     from agent.run_instructions import run_instruction_scope
-                    with run_instruction_scope(agent, api.get("run_instructions") if api else None):
+                    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+                    from tools.mobile_device_bridge import device_bridge_scope
+                    api_adapter = api.get("adapter") if api else None
+                    api_caps = api.get("device_capabilities") if api else None
+                    api_run_id = getattr(ctx, "active_run_id", None) or ctx.session_id or ""
+                    authority = getattr(getattr(self, "_runner", None), "session_authority", None)
+                    api_profile = getattr(authority, "profile_id", None) or "default"
+                    broker = ensure_device_bridge_broker(api_adapter) if (api_adapter is not None and api_caps) else None
+                    with (
+                        run_instruction_scope(agent, api.get("run_instructions") if api else None),
+                        device_bridge_scope(
+                            agent,
+                            capabilities=api_caps,
+                            run_id=api_run_id,
+                            profile_key=api_profile,
+                            broker=broker,
+                        ),
+                    ):
                         result = agent.run_conversation(api_message, **kwargs)
                 finally:
                     agent._silence_marker_needs_reply = False

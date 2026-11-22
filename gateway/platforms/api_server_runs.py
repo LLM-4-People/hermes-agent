@@ -29,6 +29,9 @@ except ImportError:
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response, room_run_claims
 from agent.run_instructions import run_instruction_scope, valid_run_instructions
+from tools.mobile_deliver import bind_delivery_emitter, emit_run_progress
+from tools.mobile_device_bridge import device_bridge_scope, validate_device_capabilities
+from tools.mobile_ui_patch import bind_ui_patch_emitter
 from gateway.turn_executor import _UnboundedThreadExecutor
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 from persistence import AuthorityRefusal
@@ -338,12 +341,15 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, 
         current.pop("pending_approvals", None)
     if status not in {"waiting_for_approval", "waiting_for_input"} or not current.get("pending_questions"):
         current.pop("pending_questions", None)
+    if status != "waiting_for_device":
+        current.pop("pending_device_requests", None)
     self._run_statuses[run_id] = current
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {
-            "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "pending_questions", "session_id", "shutdown_requested_at"}))
+            "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "pending_questions",
+            "pending_device_requests", "session_id", "shutdown_requested_at"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -403,6 +409,16 @@ def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop,
                 event_fields["preview"] = _tool_completed_preview(
                     kwargs.get("result"), redact_sensitive_text)
             _push(_run_event(run_id, event_type, **event_fields))
+            if event_type in {"tool.started", "tool.completed"}:
+                cur = self._run_statuses.get(run_id, {})
+                emit_run_progress(
+                    run_id=run_id,
+                    status=str(cur.get("status") or "running"),
+                    session_id=cur.get("session_id"),
+                    profile=_api_server._api_request_profile.get() or "default",
+                    tool_name=tool_name,
+                    stage=event_type,
+                )
         elif event_type in {"subagent.start", "subagent.complete"}:
             event = _run_event(run_id, event_type)
             if preview is not None:
@@ -422,7 +438,8 @@ def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop,
 # and clarify share the grant's ``approve`` permission. Acknowledging a lost owner epoch
 # ends the run like a stop, so ``/resolve-unknown`` rides the ``stop`` permission.
 _ROOM_CONTROL_PERMISSIONS = {
-    "/stop": "stop", "/resolve-unknown": "stop", "/approval": "approve", "/clarify": "approve"}
+    "/stop": "stop", "/resolve-unknown": "stop", "/approval": "approve", "/clarify": "approve",
+    "/device-result": "approve"}
 
 
 def _room_permission_for(request: web.Request) -> str:
@@ -613,6 +630,7 @@ class _RunLaunch:
     walked_from: Optional[str] = None  # the swept stored session the chain moved past (``bind_api_steps``)
 
     run_instructions: Optional[str] = None
+    device_capabilities: Optional[list[str]] = None
 
     @property
     def approval_session_key(self) -> str:
@@ -762,6 +780,10 @@ def _run_user_message(body, _openai_error) -> tuple:
     """POST /v1/runs ``input`` -> ``(user_message, error_response_or_None)``."""
     if "run_instructions" in body and not valid_run_instructions(body["run_instructions"]):
         return None, _json_error(_openai_error, "run_instructions must be UTF-8 text", code="invalid_run_instructions", status=400)
+    if "device_capabilities" in body:
+        _, cap_err = validate_device_capabilities(body["device_capabilities"])
+        if cap_err is not None:
+            return None, _json_error(_openai_error, cap_err, code="invalid_device_capabilities", status=400)
     raw_input = body.get("input")
     if not raw_input:
         return None, _json_error(_openai_error, "Missing 'input' field", status=400)
@@ -787,7 +809,8 @@ async def _admit_run_to_authority(
             launch.admission = await admit_api_turn_async(self, user_message=launch.user_message,
                 conversation_history=launch.conversation_history, active_run_id=run_id,
                 run_owner_scope=self._run_owners[run_id],
-                turn_author=launch.turn_author, run_instructions=launch.run_instructions, **(launch.tool_options or {}),
+                turn_author=launch.turn_author, run_instructions=launch.run_instructions,
+                device_capabilities=launch.device_capabilities, **(launch.tool_options or {}),
                 history_from_session=session_history_delivery,
                 session_history_delivery='1' if session_history_delivery else '',
                 bind_declared_conversation=_declared_selected, walked_from=launch.walked_from,
@@ -955,7 +978,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
-        request_profile=_api_server._api_request_profile.get(), tool_options=selection, run_instructions=body.get("run_instructions"),
+        request_profile=_api_server._api_request_profile.get(), tool_options=selection,
+        run_instructions=body.get("run_instructions"),
+        device_capabilities=validate_device_capabilities(body.get("device_capabilities"))[0],
         turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None)
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -1010,7 +1035,7 @@ def _served_runtime(agent) -> dict[str, str]:
     return pair
 
 
-def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server):
+def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_server, loop=None):
     """Executor-thread body of one run; returns ``(result, usage, served_runtime)``."""
     from gateway.session_context import clear_session_vars
     from gateway.hosted_room_execution_policy import (
@@ -1057,7 +1082,32 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             # Passed only when set: a human turn keeps today's call shape.
             author_kwargs = {"turn_author": run.turn_author} if run.turn_author is not None else {}
-            with run_instruction_scope(agent, run.run_instructions):
+            from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+            broker = ensure_device_bridge_broker(self)
+            profile_key = run.request_profile or "default"
+
+            def _emit_ui(revision: dict[str, Any]) -> None:
+                if run.run_id in self._run_streams and loop is not None:
+                    with suppress(Exception):
+                        loop.call_soon_threadsafe(run.put_event, _run_event(run.run_id, "ui.patch", **revision))
+
+            def _emit_delivery(delivery: dict[str, Any]) -> None:
+                if run.run_id in self._run_streams and loop is not None:
+                    with suppress(Exception):
+                        loop.call_soon_threadsafe(run.put_event, _run_event(run.run_id, "mobile.delivery", **delivery))
+
+            with (
+                run_instruction_scope(agent, run.run_instructions),
+                bind_ui_patch_emitter(_emit_ui),
+                bind_delivery_emitter(_emit_delivery),
+                device_bridge_scope(
+                    agent,
+                    capabilities=run.device_capabilities,
+                    run_id=run.run_id,
+                    profile_key=profile_key,
+                    broker=broker,
+                ),
+            ):
                 r = agent.run_conversation(user_message=run.user_message, conversation_history=run.conversation_history,
                                            task_id=effective_task_id, **author_kwargs)
         finally:
@@ -1172,10 +1222,39 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             fields = {"error": "Gateway shutdown interrupted the run."}
             extra = {}
         self._set_run_status(run_id, status, **fields, last_event=f"run.{status}", **extra)
+        emit_run_progress(
+            run_id=run_id, status=status, session_id=run.session_id,
+            profile=run.request_profile or "default", stage=f"run.{status}",
+        )
         with suppress(Exception):
             # A worker can finish before its Future is wrapped, so awaiting it
             # need not yield to already-scheduled commentary/tool callbacks.
             loop.call_soon(run.put_event, _run_event(run_id, f"run.{status}", **fields, **extra))
+
+    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+    _profile_key = run.request_profile or "default"
+    _device_broker = ensure_device_bridge_broker(self)
+
+    def _device_cb(event_name: str, payload: dict[str, Any]) -> None:
+        pending = _device_broker.list_pending(_profile_key, run_id)
+        cur_status = self._run_statuses.get(run_id, {}).get("status", "running")
+        if cur_status not in TERMINAL_STATUSES | {"stopping"}:
+            next_status = "waiting_for_device" if pending else "running"
+            self._set_run_status(
+                run_id, next_status, last_event=event_name,
+                **({"pending_device_requests": pending} if pending else {}),
+            )
+            emit_run_progress(
+                run_id=run_id, status=next_status, session_id=run.session_id,
+                profile=_profile_key, stage=event_name, pending_device=bool(pending),
+            )
+        event_fields = {k: v for k, v in payload.items() if k != "run_id"}
+        try:
+            loop.call_soon_threadsafe(run.put_event, _run_event(run_id, event_name, **event_fields))
+        except RuntimeError:
+            logger.debug("device bridge SSE loop closed for run=%s event=%s", run_id, event_name)
+
+    _device_broker.register_run_listener(_profile_key, run_id, _device_cb)
 
     try:
         # Shutdown landed between admission and the task's first tick: nothing to
@@ -1184,6 +1263,10 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             _finish("interrupted")
             return
         self._set_run_status(run_id, "running")
+        emit_run_progress(
+            run_id=run_id, status="running", session_id=run.session_id,
+            profile=_profile_key, stage="run.started",
+        )
         if run_id in self._stopping_run_ids:
             _finish("cancelled")
             return
@@ -1226,7 +1309,11 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             self._active_run_agents[run_id] = agent
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
             result, usage, served_runtime = await _submit_api_worker(
-                loop, lambda: run_context.run(_run_agent_sync, self, run, agent, approval_notify, _api_server=_api_server))
+                loop,
+                lambda: run_context.run(
+                    _run_agent_sync, self, run, agent, approval_notify, _api_server=_api_server, loop=loop
+                ),
+            )
         # Publish request metrics (daily counters + latency) with each completed run (#52323).
         self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):
@@ -1266,9 +1353,11 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         logger.exception("[api_server] run %s failed", run_id)
         _finish("failed", error=_redact_api_error_text(exc))
     finally:
-        # On cancellation (/stop) the executor thread may still block on an approval
+        # On cancellation (/stop) the executor thread may still block on an approval or device
         # Event; unregistering releases it. Idempotent on normal completion.
         _unregister_approval_notify(run.approval_session_key)
+        with suppress(Exception):
+            _device_broker.unregister_run(_profile_key, run_id)
         with suppress(Exception):
             loop.call_soon(run.put_event, None)  # close after the queued events
         _retire_live_run(self, run_id)
@@ -1336,6 +1425,14 @@ async def _handle_get_run(self, request: web.Request, *, _api_server) -> web.Res
         return err
     if getattr(self.gateway_runner, "session_authority", None) is None:
         status = _standalone_approval_status(self, request, run_id, status, project=_api_server._approval_request_event)
+    from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+    profile_key = _api_server._api_request_profile.get() or "default"
+    pending_dev = ensure_device_bridge_broker(self).list_pending(profile_key, run_id)
+    if pending_dev:
+        status = dict(status)
+        status["pending_device_requests"] = pending_dev
+        if status.get("status") == "running":
+            status["status"] = "waiting_for_device"
     return web.json_response(status)
 
 
@@ -1636,6 +1733,9 @@ async def _handle_stop_run(self, request: web.Request, *, _api_server) -> web.Re
             code="run_not_active", status=409)
     self._set_run_status(run_id, "stopping", last_event="run.stopping")
     self._stopping_run_ids.add(run_id)
+    with suppress(Exception):
+        from gateway.platforms.api_server_device_bridge import ensure_device_bridge_broker
+        ensure_device_bridge_broker(self).cancel_run(_api_server._api_request_profile.get() or "default", run_id)
     if agent is not None:
         with suppress(Exception):
             _api_server.request_hard_interrupt(agent, "Stop requested via API")
