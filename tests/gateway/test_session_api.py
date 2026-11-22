@@ -312,6 +312,31 @@ async def test_visible_message_page_count_and_title_follow_only_the_selected_thr
 
 
 @pytest.mark.asyncio
+async def test_deep_transcript_reaches_original_thread_from_root_middle_and_tip(adapter, session_db):
+    root = seed_session(session_db, "segment-0", "api_server", title="Origine")
+    current = root
+    for n in range(103):
+        if n:
+            session_db.sessions.end(current, "compression")
+            current = seed_session(session_db, f"segment-{n}", "api_server", parent_session_id=current)
+        seed_messages(session_db, current, {"role": "user", "content": f"turn {n}"})
+    fork = seed_session(session_db, "independent", "api_server", parent_session_id="segment-50",
+                        model_config={"_branched_from": "segment-50"}, title="Independent")
+    seed_messages(session_db, fork, {"role": "user", "content": "separate"})
+    async with TestClient(TestServer(_create_session_app(adapter))) as client:
+        for selected in (root, "segment-51", current, fork):
+            response = await client.get(f"/api/sessions/{selected}/messages?include_compacted=true&visible_only=true&order=oldest&limit=2")
+            assert response.status == 200, await response.text()
+            page = await response.json()
+            actual = (page["session_id"], page["thread_id"], page["thread_title"], page["pagination"]["total"],
+                      [row["content"] for row in page["data"]])
+            if selected == fork:
+                assert actual == (fork, fork, "Independent", 1, ["separate"])
+            else:
+                assert actual == (current, root, "Origine", 103, ["turn 0", "turn 1"])
+
+
+@pytest.mark.asyncio
 async def test_fork_session_writes_branched_from_marker(adapter, session_db):
     """The API fork must stamp _branched_from like the CLI/TUI branch paths, so the
     fork is never misclassified as a compression continuation."""

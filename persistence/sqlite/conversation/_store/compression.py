@@ -8,11 +8,10 @@ import sqlite3
 import time
 from typing import Any, Optional
 from persistence.sqlite._state.common import _BOUNDARY_END_REASONS, _ended_by_compression, is_automatic_end_reason
-from persistence.sqlite._schema_ddl import _RESET_CHILD_SQL, _sql_json_extract
 from persistence.sqlite.conversation._store.core import _session_row_dict
 from persistence.sqlite.conversation._store.messages import _carry_parent_timestamps, _clone_message_rows, _execute_transcript_write, _insert_message_rows, _is_explicit_fork_child_row, _tail_rows_after_watermark
 from persistence.sqlite.conversation._store.sql_common import (
-    _COMPRESSION_LOCK_ROW_SQL as _LOCK_ROW_SQL, _ENDED_ROW_SQL, _non_continuation_child_sql, _sql_session_last_active,
+    _COMPRESSION_LOCK_ROW_SQL as _LOCK_ROW_SQL, _ENDED_ROW_SQL, _non_continuation_child_sql, _ordered_links, _sql_session_last_active,
 )
 from persistence.sqlite._holder import StoreHolder
 
@@ -25,16 +24,13 @@ _COOLDOWN_ROW_SQL = (
 )
 
 
-_CHAIN_STEP_SQL = f"""
+_CHAIN_STEP = f"""
                     SELECT child.id
                     FROM sessions parent
                     JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.id = ?
+                    WHERE parent.id = {{parent_id}}
                       AND parent.end_reason = 'compression'
-                      AND {_sql_json_extract('child.model_config', '$._branched_from')} IS NULL
-                      AND {_sql_json_extract('child.model_config', '$._delegate_from')} IS NULL
-                      AND NOT ({_RESET_CHILD_SQL.format(a='child')})
-                      AND COALESCE(child.source, '') != 'tool'
+                      {_non_continuation_child_sql('child.', 'parent.id')}
                     ORDER BY
                       CASE
                         WHEN child.end_reason = 'compression' THEN 0
@@ -46,6 +42,16 @@ _CHAIN_STEP_SQL = f"""
                       child.id DESC
                     LIMIT 1
                     """
+
+_CHAIN_STEP_SQL = _CHAIN_STEP.format(parent_id="?")
+
+# The preferred child is single-valued. UNION visits each edge once, including on a cyclic import.
+_FORWARD_CHAIN_SQL = f"""WITH RECURSIVE chain(parent_id, id) AS (
+    VALUES (NULL, ?)
+    UNION
+    SELECT c.id, ({_CHAIN_STEP.format(parent_id='c.id')}) FROM chain c WHERE c.id IS NOT NULL
+)
+SELECT parent_id, id FROM chain WHERE parent_id IS NOT NULL"""
 
 
 def _cooldown_row(exists: bool, cooldown_until, error) -> dict[str, Any]:
@@ -685,10 +691,7 @@ def get_compression_chain(holder: StoreHolder, session_id: str) -> list[str]:
     written, while a stale websocket later creates a sibling that passes it). Instead exclude
     branch/delegate/tool children and prefer children that continue the chain or are still live over
     stale closed siblings such as ``ws_orphan_reap``."""
-    def step(current: str):
-        with holder._read_ctx() as conn:
-            return conn.execute(_CHAIN_STEP_SQL, (current,)).fetchone()
-    return _walk_compression_chain(session_id, step)
+    return _ordered_links(holder._read_all(_FORWARD_CHAIN_SQL, (session_id,)), session_id)
 
 
 def get_compression_tip(holder: StoreHolder, session_id: str) -> Optional[str]:
@@ -701,7 +704,7 @@ def get_compression_tip(holder: StoreHolder, session_id: str) -> Optional[str]:
 def _compression_tip_on(holder: StoreHolder, conn, session_id: str) -> str:
     """``get_compression_tip`` read on a writer's own connection: inside its transaction no rotation
     can publish between finding the tip and writing it."""
-    return _walk_compression_chain(session_id, lambda current: conn.execute(_CHAIN_STEP_SQL, (current,)).fetchone())[-1]
+    return _ordered_links(conn.execute(_FORWARD_CHAIN_SQL, (session_id,)), session_id)[-1]
 
 
 def _is_compression_child_row(holder: StoreHolder, child: dict[str, Any]) -> bool:

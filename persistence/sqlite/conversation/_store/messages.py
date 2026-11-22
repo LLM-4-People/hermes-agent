@@ -16,7 +16,9 @@ from persistence.sqlite._holder import StoreHolder
 from persistence.sqlite._schema_ddl import (
     _MERGE_DISPLAY_META, _RESET_END_REASONS, _RESET_END_REASONS_SQL, _legacy_reset_child_sql, _sql_json_extract,
 )
-from persistence.sqlite.conversation._store.sql_common import _COMPRESSION_LOCK_ROW_SQL, _ENDED_ROW_SQL, _in_one_read, _placeholders
+from persistence.sqlite.conversation._store.sql_common import (
+    _COMPRESSION_ANCESTORS_CTE, _COMPRESSION_LOCK_ROW_SQL, _ENDED_ROW_SQL, _in_one_read, _ordered_links, _placeholders,
+)
 from functools import partial
 from persistence.sqlite.conversation._store.compaction_display import later_tool_copy_ids, not_a_later_tool_copy_sql
 from persistence.sqlite.conversation._store.core import REACTIONS_METADATA_KEY, _CONTENT_JSON_PREFIX, _CONVERSATION_ROW_COLUMNS
@@ -1701,28 +1703,9 @@ def _resume_lineage_ids(holder: StoreHolder, session_id: str) -> list[str]:
     The raw parent walker ``_session_lineage_root_to_tip`` is intentionally NOT used here: it crosses
     fork/reset boundaries and misclassifies API forks (parent ended ``branched``, no marker) as
     compression lineages. Shared with the resume guard so it counts exactly what a resume loads."""
-    from persistence.sqlite.conversation._store.compression import _is_compression_child_row
-    from persistence.sqlite.conversation._store.sessions import get_session
-    if not session_id:
-        return [session_id]
-    session = get_session(holder, session_id)
-    if not session or _is_explicit_fork_child_row(holder, session):
-        return [session_id]
-    # _is_compression_child_row is the per-hop gate: the child must not be an explicit
-    # branch/delegate/tool child AND its parent must have ended 'compression'.
-    chain = [session_id]
-    current = session
-    seen = {session_id}
-    while len(chain) < 100:  # defensive bound, same as _session_lineage_root_to_tip
-        if not _is_compression_child_row(holder, current):
-            break
-        parent = get_session(holder, current["parent_session_id"])
-        if not parent or parent["id"] in seen:
-            break
-        seen.add(parent["id"])
-        chain.append(parent["id"])
-        current = parent
-    return list(reversed(chain))
+    rows = holder._read_all(_COMPRESSION_ANCESTORS_CTE + """
+        SELECT s.id, s.parent_session_id FROM ancestors a JOIN sessions s ON s.id = a.id""", (session_id,))
+    return _ordered_links(rows, session_id)[::-1] or [session_id]
 
 
 def _resume_count_scope(holder: StoreHolder, session_id: str, tip_only: bool) -> tuple[list[str], str]:

@@ -94,6 +94,27 @@ class TestCompressionChainProjection:
         assert get_compression_tip(db, "mid1") == "tip1"
         assert get_compression_tip(db, "tip1") == "tip1"
 
+    def test_imported_deep_branch_continuations_and_cycles(self, db, store):
+        # Old exports may carry the original branch marker down every compression segment.
+        donor = "donor"
+        create_session(db, donor, "cli")
+        segments = [f"long-{n}" for n in range(1103)]
+        with db._conn as conn:
+            conn.execute("UPDATE sessions SET end_reason='compression' WHERE id=?", (donor,))
+            conn.executemany("""INSERT INTO sessions(id, parent_session_id, source, started_at, model_config, end_reason)
+                VALUES (?, ?, 'cli', ?, '{"_branched_from":"donor"}', ?)""",
+                [(sid, segments[n-1] if n else donor, n+1, "compression" if n+1 < len(segments) else None)
+                 for n, sid in enumerate(segments)])
+        assert store.lineage.tip(donor) == donor
+        assert store.lineage.resolve_resume_target(segments[0]) == segments[-1]
+        assert store.lineage.resume_lineage_ids(segments[-1]) == tuple(segments)
+        # A malformed cycle in an import still visits every reachable segment only once.
+        with db._conn as conn:
+            conn.execute("UPDATE sessions SET parent_session_id=? WHERE id=?", (segments[-1], segments[0]))
+            conn.execute("UPDATE sessions SET end_reason='compression' WHERE id=?", (segments[-1],))
+        assert store.lineage.chain(segments[0]) == tuple(segments)
+        assert store.lineage.resume_lineage_ids(segments[-1]) == tuple(segments)
+
     def test_reset_fork_sibling_does_not_steal_tip_projection(self, db):
         """A reset fork child (``model_config._reset_from``, ended LATER than the
         real continuation) must not win the chain-step tiebreak. It is a separate

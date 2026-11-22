@@ -14,7 +14,7 @@ from persistence.sqlite._state.common import _shape_preview
 from persistence.sqlite._holder import StoreHolder
 from persistence.sqlite._schema_ddl import _RESET_CHILD_SQL, _RESET_END_REASONS, _legacy_reset_child_sql, _sql_json_extract
 from persistence.sqlite.conversation._store.sql_common import (
-    _LISTABLE_CHILD_SQL, _RECOVERABLE_END_REASONS, _RECOVERABLE_END_REASONS_SQL, _non_continuation_child_sql,
+    _COMPRESSION_ANCESTORS_CTE, _LISTABLE_CHILD_SQL, _RECOVERABLE_END_REASONS, _RECOVERABLE_END_REASONS_SQL, _non_continuation_child_sql,
     _sql_preview_raw, QUEUED_PROMPT_METADATA_KEY, _sql_in_window, _sql_session_last_active,
     _sql_session_last_active_by_id, escape_like as _escape_like, _SQL_IN_CHUNK, _id_chunks,
     _placeholders as _session_ids_placeholders, _source_match_clause, launch_stub_filter_sql,
@@ -38,18 +38,7 @@ def _delegate_from_json(col: str = "model_config") -> str:
 _MODEL_CONFIG_ROW_MISSING = object()
 
 
-_LINEAGE_CTE_SQL = f"""
-            WITH RECURSIVE
-              ancestors(id) AS (
-                SELECT ?
-                UNION
-                SELECT parent.id
-                FROM ancestors a
-                JOIN sessions child ON child.id = a.id
-                JOIN sessions parent ON parent.id = child.parent_session_id
-                WHERE parent.end_reason = 'compression'
-{_non_continuation_child_sql('child.', 'parent.id')}
-              ),
+_LINEAGE_CTE_SQL = _COMPRESSION_ANCESTORS_CTE + f""",
               descendants(id) AS (
                 SELECT ?
                 UNION

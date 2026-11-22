@@ -11,7 +11,7 @@ from .messages import (
     _legacy_display_ids, _message_column_names, _resume_lineage_ids, _row_to_message_dict,
 )
 from .messages_sql import _DISPLAY_ACTIVE_CLAUSE, _DISPLAY_INDEX_MISSING_SQL
-from .sql_common import _in_one_read, _placeholders
+from .sql_common import _in_one_read
 from .timeline import _indexed_display_rows_sql
 
 
@@ -87,7 +87,7 @@ def _lineage_page(holder, conn, segments, request, visible_only):
                CASE WHEN {identity} IS NULL OR _compressed_summary THEN content END AS content,
                CASE WHEN {identity} IS NULL OR _compressed_summary THEN tool_calls END AS tool_calls, tool_name, tool_call_id,
                {shown} AS shown
-          FROM messages WHERE session_id IN ({_placeholders(segments)}){active} ORDER BY id""", segments)
+          FROM messages WHERE session_id IN (SELECT value FROM json_each(?)){active} ORDER BY id""", (json.dumps(segments),))
     kept = _dedupe_display_generations(holder, _identity_rows(holder, rows), drop_removed=display, indexed_keys=True)
     ids = [row["id"] for row in kept if row["shown"]]
     total = len(ids)
