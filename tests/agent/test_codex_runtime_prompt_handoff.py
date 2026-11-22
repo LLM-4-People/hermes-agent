@@ -139,3 +139,33 @@ def test_runtime_gives_no_approval_callback_when_nobody_can_answer(monkeypatch):
         set_approval_callback(None)
     assert interactive._codex_session._approval_callback is panel
     assert single_query._codex_session._approval_callback is None
+
+
+def test_scoped_codex_thread_never_resumes_or_becomes_a_durable_thread(monkeypatch):
+    from agent.run_instructions import run_instruction_scope
+    from tests.agent.test_codex_app_server_persist import _make_turn
+    client = _FakeClient()
+    binding = {'id': 'prior-clean-thread'}
+    monkeypatch.setattr(sess_mod, 'CodexAppServerClient', lambda **kw: client)
+    monkeypatch.setattr(sess_mod.CodexAppServerSession, 'run_turn', lambda *a, **kw: _make_turn())
+    monkeypatch.setattr(codex_runtime, '_store_codex_thread_id', lambda a, ident: binding.update(id=ident))
+    monkeypatch.setattr(codex_runtime, '_stored_codex_thread_id', lambda a: binding['id'])
+    monkeypatch.setattr(codex_runtime, '_finish_codex_turn', lambda *a, **kw: {})
+    monkeypatch.setattr(codex_runtime, '_transform_codex_reply', lambda *a: {'final_response':'ok'})
+    monkeypatch.setattr(codex_runtime, '_persist_projected_messages', lambda *a: True)
+    agent = _agent(_cached_system_prompt='base', ephemeral_system_prompt=None)
+    history = [{'role':'user','content':'prior visible question'}, {'role':'assistant','content':'prior answer'},
+               {'role':'user','content':'current question'}]
+    with run_instruction_scope(agent, 'approved once'):
+        codex_runtime.run_codex_app_server_turn(agent, user_message='current question',
+            original_user_message='current question', messages=history, effective_task_id='test')
+    assert binding['id'] is None and agent._codex_session is None and agent._codex_session_prompt is None
+    # A new AIAgent/process can only start from the regular Hermes transcript.
+    next_agent = _agent(_cached_system_prompt='base', ephemeral_system_prompt=None)
+    codex_runtime._ensure_codex_session(next_agent, history)
+    next_agent._codex_session.ensure_started()
+    starts = [params for method, params in client.requests if method == 'thread/start']
+    assert len(starts) == 2 and not any(m == 'thread/resume' for m, _ in client.requests)
+    assert starts[0]['ephemeral'] and 'approved once' in starts[0]['developerInstructions']
+    assert 'ephemeral' not in starts[1] and 'approved once' not in starts[1]['developerInstructions']
+    assert all('prior visible question' in entry['developerInstructions'] for entry in starts)

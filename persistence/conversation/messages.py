@@ -869,6 +869,9 @@ class TranscriptRow:
     tool_call_uids: Optional[str] = None
     tool_call_uid: Optional[str] = None
 
+    # Proven API input identity on a visible transcript page. It is not a stored message column.
+    api_admission_id: Optional[str] = None
+
     def as_wire_row(self) -> dict[str, JsonValue]:
         active, compacted = {
             RowVisibility.ACTIVE: (1, 0),

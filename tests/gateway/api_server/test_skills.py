@@ -37,10 +37,14 @@ async def test_skills_returns_enabled_profile_catalog(tmp_path, monkeypatch):
         resp = await cli.get("/v1/skills", headers={"Authorization": "Bearer sk-secret"})
         assert resp.status == 200
         assert await resp.json() == {"object": "list", "data": [
-            {"name": "first", "description": "Description for first", "category": None},
-            {"name": "editing/shared", "description": "Description for shared", "category": "editing"},
-            {"name": "notes", "description": "Description for notes", "category": "writing"},
-            {"name": "writing/shared", "description": "Description for shared", "category": "writing"},
+            {"name": "first", "description": "Description for first", "category": None,
+             "enabled": True, "tags": [], "source": "user", "writable": True, "has_supporting_files": False},
+            {"name": "editing/shared", "description": "Description for shared", "category": "editing",
+             "enabled": True, "tags": [], "source": "user", "writable": True, "has_supporting_files": False},
+            {"name": "notes", "description": "Description for notes", "category": "writing",
+             "enabled": True, "tags": [], "source": "user", "writable": True, "has_supporting_files": False},
+            {"name": "writing/shared", "description": "Description for shared", "category": "writing",
+             "enabled": True, "tags": [], "source": "user", "writable": True, "has_supporting_files": False},
         ]}
 
 
@@ -200,7 +204,10 @@ async def test_catalog_reads_the_complete_frontmatter(tmp_path, monkeypatch):
     async with TestClient(TestServer(_create_app(_make_adapter(api_key="sk-secret")))) as cli:
         resp = await cli.get("/v1/skills", headers={"Authorization": "Bearer sk-secret"})
         assert resp.status == 200
-        assert (await resp.json())["data"] == [{"name": "follow-up", "description": "A practice journal", "category": None}]
+        assert (await resp.json())["data"] == [{
+            "name": "follow-up", "description": "A practice journal", "category": None,
+            "enabled": True, "tags": [], "source": "user", "writable": True, "has_supporting_files": False,
+        }]
     view = json.loads(skill_view("follow-up", preprocess=False))
     assert view["success"] and view["description"] == "A practice journal"
 

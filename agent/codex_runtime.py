@@ -519,10 +519,8 @@ def _consume_user_interrupt(agent, active: bool = True) -> tuple[bool, Any]:
 
 def _codex_developer_instructions(agent) -> str:
     """The prompt composition the standard loop sends as its system message (turn_context order)."""
-    developer_instructions = getattr(agent, "_cached_system_prompt", None) or ""
-    if getattr(agent, "ephemeral_system_prompt", None):
-        developer_instructions = (developer_instructions + "\n\n" + agent.ephemeral_system_prompt).strip()
-    return developer_instructions
+    from agent.run_instructions import effective_system_prompt
+    return effective_system_prompt(agent, getattr(agent, "_cached_system_prompt", None) or "")
 
 
 # Durable codex thread binding: ``sessions.model_config.codex_thread_id`` (hermes_state), written after the
@@ -635,6 +633,8 @@ def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -
     Only the FIRST session of an AIAgent resumes the stored codex thread: a retired/recreated one keeps
     today's fresh-thread behaviour and overwrites the binding once its turn is committed. ``messages`` is the
     turn's transcript (current user row last); a thread started from scratch is seeded with the prior turns."""
+    from agent.run_instructions import current_run_instructions
+    scoped = bool(current_run_instructions(agent))
     developer_instructions = _codex_developer_instructions(agent)
     model_provider = _codex_model_provider(agent)
     if getattr(agent, "_codex_session", None) is not None:
@@ -646,7 +646,7 @@ def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -
                                 and getattr(agent, "_codex_session_model_provider", None) == model_provider):
             return
         _close_codex_session(agent)
-    resume_thread_id = None if getattr(agent, "_codex_session_prompt", None) is not None else _stored_codex_thread_id(agent)
+    resume_thread_id = None if scoped or getattr(agent, "_codex_session_prompt", None) is not None else _stored_codex_thread_id(agent)
     from agent.runtime_cwd import resolve_agent_cwd
     from agent.transports.codex_app_server_session import CodexAppServerSession, _ServerRequestRouting
     from hermes_cli.codex_runtime_switch import get_configured_codex_binary
@@ -691,7 +691,7 @@ def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -
         on_event=make_codex_app_server_event_bridge(agent),
         developer_instructions=developer_instructions or None,
         model=_codex_wire_model(agent, model_provider), model_provider=model_provider,
-        resume_thread_id=resume_thread_id, history_seed=history_seed,
+        resume_thread_id=resume_thread_id, history_seed=history_seed, ephemeral=scoped,
     )
 
 
@@ -796,6 +796,22 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
                               turn_id: Any = None) -> dict[str, Any]:
     """Hand the turn to a ``codex app-server`` subprocess and project its events into ``messages``.
     Returns the chat_completions result shape. The user message is ALREADY in ``messages`` — never append it again."""
+    from agent.run_instructions import current_run_instructions
+    scoped = bool(current_run_instructions(agent))
+    if scoped:
+        # Codex retains developer messages when a thread is resumed, even after a prompt replacement.
+        _close_codex_session(agent)
+        # The next ordinary thread must seed its history from Hermes, including this exchange.
+        _store_codex_thread_id(agent, None)
+    try:
+        return _execute_codex_turn(agent, user_message, original_user_message, messages, should_review_memory, turn_id, scoped)
+    finally:
+        if scoped:
+            _close_codex_session(agent)
+            agent._codex_session_prompt = None
+
+
+def _execute_codex_turn(agent, user_message, original_user_message, messages, should_review_memory, turn_id, scoped):
     # Defense in depth for compression.checkpoint_required: agent init refuses the combination, but
     # api_mode is mutable. Explicit-True check matches compress_context().
     if getattr(agent, "compression_checkpoint_required", False) is True:
@@ -826,7 +842,7 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     reply = _transform_codex_reply(agent, turn, turn_id)
     # The binding is published only once the transcript it belongs to is durable, and never for a
     # retired thread (the next agent would only resume into the same wedge).
-    if _persist_projected_messages(agent, turn, messages) and not getattr(turn, "should_retire", False):
+    if _persist_projected_messages(agent, turn, messages) and not scoped and not getattr(turn, "should_retire", False):
         _store_codex_thread_id(agent, turn.thread_id)
     usage_result = _finish_codex_turn(
         agent, turn, messages, original_user_message=original_user_message, should_review_memory=should_review_memory,

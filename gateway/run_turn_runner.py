@@ -1125,10 +1125,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
             from agent.notification_presentation import notification_turn
+            from agent.turn_usage import build_run_usage_metrics, capture_usage_baseline
             from gateway.session_results import execution_result
             captured = execution_result.get()
-            before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
-                      getattr(agent, 'session_completion_tokens', 0) or 0)
+            usage_baseline = capture_usage_baseline(agent)
             with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
                 from gateway.response_filters import silence_allowed
                 # Where a bare marker would become the "needed a reply" warning, the agent ends a
@@ -1136,14 +1136,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 agent._silence_marker_needs_reply = not silence_allowed(
                     ctx.persist_user_display_kind, ctx.reply_expected)
                 try:
-                    result = agent.run_conversation(api_message, **kwargs)
+                    from agent.run_instructions import run_instruction_scope
+                    with run_instruction_scope(agent, api.get("run_instructions") if api else None):
+                        result = agent.run_conversation(api_message, **kwargs)
                 finally:
                     agent._silence_marker_needs_reply = False
             if captured is not None:
-                incoming = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
-                outgoing = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
-                captured['usage'] = {'input_tokens': incoming, 'output_tokens': outgoing,
-                                     'total_tokens': incoming + outgoing}
+                captured['usage'] = build_run_usage_metrics(agent, counter_baseline=usage_baseline)
                 _settle_api_runtime_lock(agent, result, captured)
             return result
         finally:

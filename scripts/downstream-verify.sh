@@ -51,7 +51,19 @@ scripts/run_tests.sh \
   tests/persistence_sqlite/conversation/test_photo_previews.py \
   tests/persistence_sqlite/conversation/test_session_list_index_choice.py \
   tests/gateway/test_hygiene_provider_identity.py \
+  tests/contracts/conversation/test_api_transcript_input_contract.py \
+  tests/gateway/api_server/test_transcript_admissions.py \
+  tests/agent/test_codex_app_server_persist.py \
+  tests/agent/test_codex_runtime_prompt_handoff.py \
+  tests/gateway/api_server/test_run_instructions.py \
+  tests/gateway/api_server/test_rich_telemetry_and_live_stream.py \
+  tests/agent/test_turn_usage_telemetry.py \
+  tests/tools/test_approval_preview.py \
   tests/gateway/api_server/test_skills.py \
+  tests/gateway/api_server/test_brain_memory_search_fork.py \
+  tests/gateway/api_server/test_skill_studio.py \
+  tests/gateway/api_server/test_workspace_profile_analytics.py \
+  tests/gateway/api_server/test_notes_and_habits.py \
   tests/tools/test_skills_tool_discovery_cache.py \
   tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_signal.py \

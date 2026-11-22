@@ -477,6 +477,13 @@ In addition to `/v1/chat/completions` and `/v1/responses`, the server exposes a 
 
 Create a new agent run. Returns a `run_id` that can be used to subscribe to progress events.
 
+When `features.run_scoped_instructions` is true, a run can include the optional UTF-8 string `run_instructions`.
+The model receives `run_instructions` after the ordinary `instructions` for that run. A gateway with a
+session authority can reuse the session's saved ordinary instructions when a request supplies only
+`run_instructions`. A standalone API server creates an agent for each run. Include both fields on that
+server when the model needs both. Later runs and background inputs do not inherit the one-time text.
+Use the same body and idempotency key to recover the original admission after a lost response.
+
 A client can restrict a run to selected toolsets when `features.run_toolset_selection` is true in
 `GET /v1/capabilities`. Submit `allowed_toolsets` as an array of distinct, enabled toolset names
 from `GET /v1/toolsets`. For example, `{"input":"Summarize this thread","allowed_toolsets":[]}`
@@ -798,6 +805,11 @@ the root of its compression lineage, and nullable `thread_title` from the contin
 A fork starts its own thread. `pagination.total` counts the selected history before `offset`
 and `limit`. With `visible_only=true`, the gateway removes session metadata and hidden display
 rows before counting and paging. `pagination.visible_only` confirms the selected mode.
+A visible user row can include `api_admission_id` when its stored input identity matches a
+uniquely identifiable executed API admission for the same physical session. Compare it with `admission_id` from the
+authenticated run status to locate that turn even when two requests have identical text.
+Assistant rows have their own message IDs. A missing admission field means the gateway has
+provided no link between that row and a run.
 Default pages preserve those rows and their offsets.
 
 `/v1/capabilities` advertises the full surface via `session_*` feature flags and `endpoints.session_*` entries so external UIs can detect support and fall back safely. Inline images are supported in `chat` and `chat/stream` payloads (multimodal-aware path).
