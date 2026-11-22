@@ -1324,9 +1324,48 @@ def _load_owned_run(self, request, *, _api_server, permission: Optional[str], ac
 
 async def _handle_get_run(self, request: web.Request, *, _api_server) -> web.Response:
     """GET /v1/runs/{run_id} — return pollable run status for external UIs."""
-    _, status, _, _, err = _load_owned_run(
+    run_id, status, _, _, err = _load_owned_run(
         self, request, _api_server=_api_server, permission="status", active_fallback=True)
-    return err or web.json_response(status)
+    if err is not None:
+        return err
+    if getattr(self.gateway_runner, "session_authority", None) is None:
+        status = _standalone_approval_status(self, request, run_id, status, project=_api_server._approval_request_event)
+    return web.json_response(status)
+
+
+def _standalone_approval_status(self, request, run_id, status, *, project):
+    """Only this process's native queue can attest which standalone prompts still accept a decision."""
+    from tools.approval import list_gateway_approvals
+
+    result = dict(status)
+    previous = result.pop("approval", None) or {}
+    result.pop("pending_controls", None)
+    state = result.get("status")
+    session_key = self._run_approval_sessions.get(run_id)
+    if state in TERMINAL_STATUSES | {"unknown", "stopping"} or run_id in self._stopping_run_ids:
+        result["pending_controls"] = []
+    elif session_key:
+        controls, pending = [], list_gateway_approvals(session_key)
+        permitted = None
+        if pending and self._room_grant_token(request):
+            permitted = {"once", "deny"} if self._check_run_auth(request, permission="approve") is None else set()
+        for data in pending:
+            # Native entries also carry private tool context. Publish only client-facing prompt fields.
+            prompt = project(run_id, {k: data[k] for k in ("request_id", "command", "description", "allow_session",
+                                                          "allow_permanent", "smart_denied") if k in data})
+            # This snapshot is not a new request event. Only retain a known publication time.
+            prompt.pop("timestamp")
+            if previous.get("request_id") == prompt["request_id"] and "timestamp" in previous:
+                prompt["timestamp"] = previous["timestamp"]
+            if permitted is not None:
+                prompt["choices"] = [choice for choice in prompt["choices"] if choice in permitted]
+            controls.append(prompt)
+        result["pending_controls"] = controls
+        if controls:
+            result.update(status="waiting_for_approval", approval=controls[0])
+        elif state == "waiting_for_approval":
+            result["status"] = "running"
+    return result
 
 
 async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.StreamResponse:
