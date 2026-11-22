@@ -67,6 +67,7 @@ scripts/run_tests.sh \
   tests/gateway/api_server/test_notes_and_habits.py \
   tests/tools/test_skills_tool_discovery_cache.py \
   tests/gateway/test_session_mutation_compress.py \
+  tests/gateway/test_mirror.py \
   tests/gateway/test_signal.py \
   tests/gateway/test_signal_format.py \
   tests/gateway/test_signal_inbound_attachments.py \
@@ -81,12 +82,10 @@ scripts/run_tests.sh \
 
 # That file imports the Discord and Slack SDKs at module load, which need the optional
 # `messaging` extra. Select only the Signal class and the delivery-mirror regression so the
-# locked test environment stays minimal.
-scripts/run_tests.sh tests/gateway/outbound/test_send_message_tool.py \
+# locked test environment stays minimal. Bytecode was already pre-compiled above.
+HERMES_SKIP_COMPILEALL=1 scripts/run_tests.sh tests/gateway/outbound/test_send_message_tool.py \
   -k "TestSendSignalChunking or test_successful_send_mirrors_as_labelled_user_turn" -q
 
-# Delivery mirrors and Responses replay: an external send must not land as an assistant turn, and
-# a replayed native message id must not sit next to another assistant message.
-scripts/run_tests.sh tests/gateway/test_mirror.py -q
-scripts/run_tests.sh tests/agent/test_codex_responses_adapter.py \
+# Responses replay: a replayed native message id must not sit next to another assistant message.
+HERMES_SKIP_COMPILEALL=1 scripts/run_tests.sh tests/agent/test_codex_responses_adapter.py \
   -k test_native_message_id_dropped_before_another_assistant_message -q
