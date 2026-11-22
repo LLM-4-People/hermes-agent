@@ -26,14 +26,17 @@ def run_instruction_scope(agent, instructions):
         _active.reset(token)
 
 
+def current_run_instructions(agent):
+    active = _active.get()
+    return active.text if active and active.agent is agent else None
+
+
 def effective_system_prompt(agent, base):
     """Keep the reusable agent prompt intact, including for its background reviewers."""
     durable = getattr(agent, "ephemeral_system_prompt", None)
-    active = _active.get()
-    once = active.text if active and active.agent is agent else None
-    if not (durable or once):
-        return base
-    return "\n\n".join(part for part in (base, durable, once) if part).strip()
+    once = current_run_instructions(agent)
+    prompt = ((base or "") + "\n\n" + durable).strip() if durable else base
+    return ((prompt or "") + "\n\n" + once).strip() if once else prompt
 
 
 def valid_run_instructions(value):

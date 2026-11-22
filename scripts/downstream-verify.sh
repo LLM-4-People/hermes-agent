@@ -54,6 +54,7 @@ scripts/run_tests.sh \
   tests/contracts/conversation/test_api_transcript_input_contract.py \
   tests/gateway/api_server/test_transcript_admissions.py \
   tests/agent/test_codex_app_server_persist.py \
+  tests/agent/test_codex_runtime_prompt_handoff.py \
   tests/gateway/api_server/test_run_instructions.py \
   tests/gateway/api_server/test_skills.py \
   tests/tools/test_skills_tool_discovery_cache.py \

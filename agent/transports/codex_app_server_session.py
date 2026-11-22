@@ -217,7 +217,7 @@ class CodexAppServerSession:
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
         model: Optional[str] = None, model_provider: Optional[str] = None,
         developer_instructions: Optional[str] = None, resume_thread_id: Optional[str] = None,
-        history_seed: Optional[str] = None,
+        history_seed: Optional[str] = None, ephemeral: bool = False,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
@@ -240,6 +240,7 @@ class CodexAppServerSession:
         # Hermes' prior transcript, appended to developerInstructions ONLY when a thread is started from
         # scratch: a resumed thread already holds the conversation (agent/codex_runtime_history_seed.py).
         self._history_seed = history_seed
+        self._ephemeral = ephemeral
         self._permission_profile = permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
             os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"), "workspace-write"
         )
@@ -286,6 +287,8 @@ class CodexAppServerSession:
             self._service_tier_sent = _TIER_UNKNOWN
             logger.info("codex app-server thread resumed: id=%s cwd=%s", thread_id[:8], self._cwd)
         else:
+            if self._ephemeral:
+                params["ephemeral"] = True
             if self._history_seed:
                 params["developerInstructions"] = "\n\n".join(
                     part for part in (params.get("developerInstructions"), self._history_seed) if part)
