@@ -241,6 +241,19 @@ class TestMarkdownStripPatch:
         assert text == "[doc](https://example.com)"
         assert len(styles) == 1 and styles[0].endswith(":MONOSPACE")
 
+    def test_inline_tilde_run_is_not_a_fence(self):
+        text, styles = _m2s("Use `~~~` to open a fence and ~~~ to close it.")
+        assert text == "Use ~~~ to open a fence and ~~~ to close it."
+        assert len(styles) == 1 and styles[0].endswith(":MONOSPACE")
+
+    def test_inline_tilde_run_does_not_swallow_a_link(self):
+        text, _styles = _m2s("Use `~~~` to open a fence, [docs](https://e.com), and ~~~ to close it.")
+        assert "docs (https://e.com)" in text
+
+    def test_literal_placeholder_text_does_not_crash(self):
+        assert _m2s("a \x000\x00 b")[0] == "a \x000\x00 b"
+        assert _m2s("a \x00code9\x00 b")[0] == "a \x00code9\x00 b"
+
     def test_escaped_bracket_is_not_a_link(self):
         text, _styles = _m2s(r"\[label](https://example.com)")
         assert text == r"\[label](https://example.com)"

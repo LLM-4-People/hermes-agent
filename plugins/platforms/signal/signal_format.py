@@ -14,10 +14,18 @@ _TABLE_WIDTH = 40
 
 # Any fence length (CommonMark): code_fence() wraps a command that contains ``` in a longer run,
 # and a ``` inside it must not close the block.
+# Fenced code starts at line start (up to three spaces) and closes on a line that holds the same
+# fence run. Anchoring matters: an inline ``~~~`` in prose must not pair with a later one and swallow
+# the text between.
 _CODE_BLOCK_RE = re.compile(
-    r"(?P<fence>`{3,}|~{3,})[a-zA-Z0-9_+-]*\n?(?P<body>.*?)(?P=fence)(?![`~])", re.DOTALL
+    r"(?m)^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n(?P<body>.*?)"
+    r"^ {0,3}(?P=fence)[ \t]*\r?(?=\n|$)",
+    re.DOTALL,
 )
-_FENCE_SPLIT_RE = re.compile(r"((`{3,}|~{3,}).*?\2(?![`~]))", re.DOTALL)
+_FENCE_SPLIT_RE = re.compile(
+    r"(?m)(^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^ {0,3}(?P=fence)[ \t]*\r?(?=\n|$))",
+    re.DOTALL,
+)
 
 
 def _split_fenced(source: str) -> list[str]:
@@ -33,6 +41,7 @@ _HEADING_RE = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 # and the target stays tappable.
 _HTTP_TARGET_RE = re.compile(r"https?://", re.IGNORECASE)
 _INLINE_CODE_SPAN_RE = re.compile(r"(`[^`\n]*`)")
+_CODE_PLACEHOLDER_RE = re.compile(r"\x00code(\d+)\x00")
 _BLOCK_MARKER_RE = re.compile(r"^(?:#{1,6}\s+|[-*+]\s+)")
 _INLINE_PATTERNS = [
     # First match wins and spans never nest. Inline code goes first so its text stays verbatim; an
@@ -234,11 +243,15 @@ def _unwrap_links(source: str) -> str:
 
         def hold(match: re.Match[str]) -> str:
             spans.append(match.group(0))
-            return f"\x00{len(spans) - 1}\x00"
+            return f"\x00code{len(spans) - 1}\x00"
+
+        def restore(match: re.Match[str]) -> str:
+            index = int(match.group(1))
+            return spans[index] if index < len(spans) else match.group(0)
 
         masked = _INLINE_CODE_SPAN_RE.sub(hold, part)
         masked = _unwrap_links_inline(masked)
-        parts[idx] = re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], masked)
+        parts[idx] = _CODE_PLACEHOLDER_RE.sub(restore, masked)
     return "".join(parts)
 
 
