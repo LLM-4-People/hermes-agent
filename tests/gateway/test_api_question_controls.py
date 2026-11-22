@@ -181,3 +181,25 @@ def test_standalone_adapter_does_not_advertise_canonical_clarification():
             info = await response.json()
             assert info["features"]["run_clarify_response"] is False and "run_clarify" not in info["endpoints"]
     asyncio.run(check())
+
+
+def test_stop_during_response_attachment_fences_the_original_prompt(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import pytest
+    from gateway.platforms import api_server_authority_runs as api
+    from persistence import AuthorityRefusal
+    adapter = SimpleNamespace(_stopping_run_ids=set())
+    prompt = {"prompt_id": "p", "kind": "clarify"}
+    async def stop_during_attach(*args, **kwargs):
+        adapter._stopping_run_ids.add("run")
+        return SimpleNamespace(prompts=[prompt], subscription_id="viewer")
+    owner = SimpleNamespace(profile_id="profile", attach=stop_during_attach, respond=AsyncMock(), detach=AsyncMock())
+    monkeypatch.setattr(api, "run_admission", lambda *args: (owner, {
+        "status": "started", "generation": 1, "target_session_id": "session"}))
+    with pytest.raises(AuthorityRefusal, match="stale_generation"):
+        asyncio.run(api.respond_run(adapter, "run", {"request_id": "p", "execution_generation": 1,
+                                                      "answer": "too late"}, kind="clarify"))
+    owner.respond.assert_not_awaited()
+    owner.detach.assert_awaited_once()

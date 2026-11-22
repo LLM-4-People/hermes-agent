@@ -142,14 +142,16 @@ async def respond_run(adapter, run_id, body, *, kind):
     field = 'choice' if kind == 'approval' else 'answer'
     if set(body) != {'request_id', 'execution_generation', field}:
         raise AuthorityRefusal('invalid_params')
-    if (row['status'] != 'started' or run_id in adapter._stopping_run_ids
-            or type(generation) is not int or generation != row['generation']):
+    if row['status'] != 'started' or type(generation) is not int or generation != row['generation']:
         raise AuthorityRefusal('stale_generation')
     ref = SessionRef(authority.profile_id, row['target_session_id'])
     actor = SessionActor('api', authority.profile_id,
         frozenset({'session:read', 'session:approve', 'session:respond'}), 'api-control:' + uuid.uuid4().hex)
     snapshot = await authority.attach(actor, ref, history=False)  # prompts only
     try:
+        # Attaching can yield: Stop may have been accepted while the native waiter is winding down.
+        if run_id in adapter._stopping_run_ids:
+            raise AuthorityRefusal('stale_generation')
         if not any(p['prompt_id'] == prompt_id and p['kind'] == kind for p in snapshot.prompts):
             raise AuthorityRefusal('approval_not_pending')
         return await authority.respond(actor, ref, generation, prompt_id, {field: body[field]}, kind=kind)
