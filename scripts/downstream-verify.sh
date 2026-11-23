@@ -30,8 +30,11 @@ DOWNSTREAM_TESTS=(
   tests/agent/test_session_affinity_header.py
   tests/gateway/test_native_producer_owner_matrix.py
   tests/gateway/api_server/test_mobile_live_ui_push_bridge.py
+  tests/gateway/api_server/test_multi_user_concurrency_and_isolation.py
+  tests/gateway/api_server/test_infinite_chat_pagination.py
   tests/gateway/api_server/test_workspace_profile_analytics.py
   tests/gateway/api_server/test_transcript_admissions.py
+  tests/tools/test_mobile_deep_presence_and_control.py
   tests/agent/test_auxiliary_named_custom_providers.py
   tests/gateway/test_mirror.py
   tests/gateway/test_signal.py

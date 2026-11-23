@@ -136,6 +136,10 @@ class ForkCiWorkflowsTest(unittest.TestCase):
         job = wf["jobs"]["release"]
         self.assertEqual(job["permissions"]["contents"], "write")
         self.assertEqual(job["permissions"]["actions"], "write")
+        plan_run = job["steps"][1]["run"]
+        self.assertIn('(1, 0, 0) if bump == "major"', plan_run)
+        self.assertIn('(0, 1, 0) if bump == "minor"', plan_run)
+        self.assertIn('(0, 0, 1)', plan_run)
 
     def test_downstream_verify_sharding_partitions_all_files_with_zero_overlap(self):
         shard1 = subprocess.check_output(
