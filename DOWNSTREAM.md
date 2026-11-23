@@ -29,14 +29,20 @@ does not have.
 
 1. merge `upstream/main` into the long-lived `automation/upstream-sync` branch (reused so the
    push is a fast-forward);
-2. set up the locked toolchain from the trusted `main` checkout, with cache writes disabled, and
+2. run the trusted `origin/main` copy of `scripts/check_fork_preservation.py` before executing any
+   merged code — enforcing fail-closed **ancestry lock** (`origin/main` must remain an ancestor of
+   `HEAD`), **fork-exclusive immutability** (upstream cannot modify or delete any fork-added or
+   protected path), and **shared-file overlap blocking** (if both our fork and upstream modified
+   the same file since merge-base, abort for human review even when `git merge` auto-resolved
+   without conflict markers);
+3. set up the locked toolchain from the trusted `main` checkout, with cache writes disabled, and
    run `scripts/downstream-verify.sh` on the merged tree (static lint + the provider-routing,
-   footer and Signal suites);
-3. capture the merged workflow files and audit them from a clean `main` checkout with the shared
+   footer, mobile companion, and Signal suites);
+4. capture the merged workflow files and audit them from a clean `main` checkout with the shared
    `.github/actions/workflow-lint` action;
-4. bundle the verified commit; a separate publish job fetches the bundle into a bare repository
+5. bundle the verified commit; a separate publish job fetches the bundle into a bare repository
    and pushes it with a credential scoped to that step. No merged code runs in the publish job;
-5. open or update the `chore: sync upstream main` pull request.
+6. open or update the `chore: sync upstream main` pull request.
 
 `main` is never written directly by automation. Merging the PR triggers the normal push-triggered
 image build, so the published `edge` image always corresponds to a reviewed commit. A repository

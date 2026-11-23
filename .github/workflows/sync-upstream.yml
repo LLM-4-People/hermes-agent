@@ -89,6 +89,10 @@ jobs:
             exit 1
           }
 
+          # Capture the trusted fork-preservation guard from origin/main BEFORE switching branches
+          # or merging upstream code so upstream commits can never alter or disable the guard.
+          git show origin/main:scripts/check_fork_preservation.py > /tmp/check_fork_preservation.py
+
           # Reuse the open PR branch when it exists so its commits are preserved and the push is a
           # fast-forward; otherwise branch from main. Never rewrite the branch.
           if git fetch origin "automation/upstream-sync:refs/remotes/origin/automation/upstream-sync" 2>/dev/null; then
@@ -99,6 +103,20 @@ jobs:
           fi
 
           merge_or_abort upstream/main
+
+          if ! python3 /tmp/check_fork_preservation.py \
+              --base-ref origin/main \
+              --upstream-ref upstream/main \
+              --merged-ref HEAD \
+              --report-file /tmp/upstream-sync-conflicts.txt; then
+            {
+              echo "### Upstream merge blocked by fork preservation guard"
+              echo
+              cat /tmp/upstream-sync-conflicts.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
           sha=$(git rev-parse HEAD)
           echo "changed=true" >> "$GITHUB_OUTPUT"
