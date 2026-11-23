@@ -282,3 +282,185 @@ def test_writing_quality_ci_gate_passes_and_catches_slop(tmp_path) -> None:
     )
     doc_hits = wq._check_docs(tmp_path)
     assert any("README.md:6:" in hit and "mixed-language leakage" in hit for hit in doc_hits)
+
+
+def test_clean_gateway_startup_and_runtime_notices_en_and_fr() -> None:
+    from types import SimpleNamespace
+    from gateway import delivery_ledger as dl
+    from gateway.session_ingress import pause_notice
+    from gateway.session_stall import format_session_stall_notification
+
+    # Clean, emoji-free, em-dash-free startup/restart notices in EN and FR.
+    assert agent_i18n.t("gateway.startup.online", lang="en") == "Hermes is online."
+    assert agent_i18n.t("gateway.startup.online", lang="fr") == "Hermes est en ligne."
+    assert agent_i18n.t("gateway.startup.restarted", lang="en") == "Hermes restarted. Your session continues."
+    assert agent_i18n.t("gateway.startup.restarted", lang="fr") == "Hermes a redémarré. Votre session continue."
+    for key in ("gateway.startup.online", "gateway.startup.restarted"):
+        for lang in ("en", "fr"):
+            val = agent_i18n.t(key, lang=lang)
+            assert "♻" not in val and "—" not in val
+        assert "gateway" not in agent_i18n.t(key, lang="fr").lower()
+
+    # Delivery ledger markers stay clean, distinct, and localize cleanly.
+    assert dl.localize_delivery_marker(dl.RECOVERED_MARKER, lang="en") == dl.RECOVERED_MARKER
+    assert "♻" not in dl.RECOVERED_MARKER and "—" not in dl.RECOVERED_MARKER
+    assert "Réponse récupérée" in dl.localize_delivery_marker(dl.RECOVERED_MARKER, lang="fr")
+    assert "Réponse récupérée" in dl.localize_delivery_marker(dl.RECONNECTED_MARKER, lang="fr")
+    assert "Réponse récupérée" in dl.localize_delivery_marker(dl.FLOOD_MARKER, lang="fr")
+
+    # Stall & pause notices localize cleanly without decorative emojis or em-dashes.
+    with user_lang_scope("en"):
+        stall_en = format_session_stall_notification(300)
+        assert "5 min" in stall_en and "⚠️" not in stall_en and "—" not in stall_en
+    with user_lang_scope("fr"):
+        stall_fr = format_session_stall_notification(300)
+        assert "5 min" in stall_fr and "bloqué" in stall_fr and "⚠️" not in stall_fr
+
+    live_en = SimpleNamespace(pause_notified=False, source=SimpleNamespace(platform=SimpleNamespace(value="signal")))
+    auth_en = SimpleNamespace(sessions={"s1": live_en})
+    ref = SimpleNamespace(session_id="s1")
+    with user_lang_scope("en"):
+        p_en = pause_notice(auth_en, ref, "runtime_draining")
+    assert p_en == "Hermes is restarting. Your message is saved and will be answered when it is back."
+
+    live_fr = SimpleNamespace(pause_notified=False, source=SimpleNamespace(platform=SimpleNamespace(value="signal")))
+    auth_fr = SimpleNamespace(sessions={"s1": live_fr})
+    with user_lang_scope("fr"):
+        p_fr = pause_notice(auth_fr, ref, "runtime_draining")
+    assert p_fr == "Hermes redémarre. Votre message est enregistré et recevra une réponse dès son retour."
+
+
+def test_remembered_user_lang_persists_per_profile_and_drives_startup_notices(tmp_path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    import gateway.run as gateway_run
+    from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
+    from gateway.i18n import (
+        clear_remembered_user_lang_cache,
+        read_remembered_user_lang,
+        remember_user_lang,
+        resolve_inbound_user_lang,
+    )
+    from gateway.platforms.base import SendResult
+
+    home_fr = tmp_path / "profile-fr"
+    home_en = tmp_path / "profile-en"
+    home_fr.mkdir()
+    home_en.mkdir()
+    monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
+    agent_i18n.reset_language_cache()
+    clear_remembered_user_lang_cache()
+
+    # Non-existent dir & unsupported lang fail closed with zero file creation.
+    assert remember_user_lang("de", home=home_fr) is None
+    assert remember_user_lang("fr", home=tmp_path / "missing-dir") is None
+    assert read_remembered_user_lang(home=home_fr) is None
+
+    # Profile-scoped persistence: FR in home_fr, EN in home_en, zero cross-leak.
+    assert remember_user_lang("fr", home=home_fr) == "fr"
+    assert remember_user_lang("en", home=home_en) == "en"
+    assert read_remembered_user_lang(home=home_fr) == "fr"
+    assert read_remembered_user_lang(home=home_en) == "en"
+    assert agent_i18n._resolve_language(str(home_fr)) == "fr"
+    assert agent_i18n._resolve_language(str(home_en)) == "en"
+
+    # Precedence: user_lang_scope > HERMES_LANGUAGE > explicit display.language > remembered.
+    (home_fr / "config.yaml").write_text("model:\n  default: demo\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home_fr))
+    agent_i18n.reset_language_cache()
+    assert agent_i18n.get_language() == "fr"
+    assert agent_i18n.t("gateway.startup.online") == "Hermes est en ligne."
+    # Explicit display.language in config.yaml overrides remembered language.
+    (home_fr / "config.yaml").write_text("display:\n  language: en\n", encoding="utf-8")
+    agent_i18n.reset_language_cache()
+    assert agent_i18n.get_language() == "en"
+    # Restoring config without display.language returns to remembered FR.
+    (home_fr / "config.yaml").write_text("model:\n  default: demo\n", encoding="utf-8")
+    agent_i18n.reset_language_cache()
+    assert agent_i18n.get_language() == "fr"
+    monkeypatch.setenv("HERMES_LANGUAGE", "en")
+    assert agent_i18n.get_language() == "en"
+    with user_lang_scope("fr"):
+        assert agent_i18n.get_language() == "fr"
+    monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
+
+    # Inbound auto-detection persists FR on human French message and retains FR on slash commands.
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner._served_profile_homes = {"alice": home_fr, "bob": home_en}
+    alice_src = SimpleNamespace(profile="alice")
+    bob_src = SimpleNamespace(profile="bob")
+    assert resolve_inbound_user_lang(runner, SimpleNamespace(text="/status"), alice_src, False) == "fr"
+    assert resolve_inbound_user_lang(
+        runner, SimpleNamespace(text="Please explain this error and summarize the fix."), bob_src, False
+    ) == "en"
+    # Internal events never overwrite a human's remembered language.
+    assert resolve_inbound_user_lang(
+        runner, SimpleNamespace(text="Please explain this error and summarize the fix."), alice_src, True
+    ) == "fr"
+    assert read_remembered_user_lang(home=home_fr) == "fr"
+
+    # Startup online notice resolves language independently per served profile.
+    adapter_alice = SimpleNamespace(
+        send_path_degraded=False,
+        send=AsyncMock(return_value=SendResult(success=True, message_id="m-fr")),
+    )
+    adapter_bob = SimpleNamespace(
+        send_path_degraded=False,
+        send=AsyncMock(return_value=SendResult(success=True, message_id="m-en")),
+    )
+    runner.config = GatewayConfig(platforms={})
+    runner._profile_configs = {
+        "alice": GatewayConfig(platforms={
+            Platform.SIGNAL: PlatformConfig(
+                enabled=True, gateway_restart_notification=True,
+                home_channel=HomeChannel(platform=Platform.SIGNAL, chat_id="+15145550101", name="Alice"),
+            )
+        }),
+        "bob": GatewayConfig(platforms={
+            Platform.SIGNAL: PlatformConfig(
+                enabled=True, gateway_restart_notification=True,
+                home_channel=HomeChannel(platform=Platform.SIGNAL, chat_id="+15145550102", name="Bob"),
+            )
+        }),
+    }
+    runner._profile_adapters = {
+        "alice": {Platform.SIGNAL: adapter_alice},
+        "bob": {Platform.SIGNAL: adapter_bob},
+    }
+    runner.adapters = {}
+    asyncio.run(runner._send_home_channel_startup_notifications())
+    assert adapter_alice.send.await_args.args[1] == "Hermes est en ligne."
+    assert adapter_bob.send.await_args.args[1] == "Hermes is online."
+
+
+def test_writing_quality_catches_gateway_locale_emoji_emdash_and_fr_leaks(tmp_path) -> None:
+    from scripts import check_writing_quality as wq
+
+    locales = tmp_path / "locales"
+    locales.mkdir()
+    (locales / "en.yaml").write_text(
+        "gateway:\n"
+        "  startup:\n"
+        '    online: "♻️ Gateway online — Hermes is back and ready."\n',
+        encoding="utf-8",
+    )
+    (locales / "fr.yaml").write_text(
+        "gateway:\n"
+        "  startup:\n"
+        '    online: "♻️ Gateway en ligne — le gateway redémarre."\n',
+        encoding="utf-8",
+    )
+    locale_hits = wq._check_gateway_locales(tmp_path)
+    assert any("decorative AI-slop emoji" in h and "locales/en.yaml" in h for h in locale_hits)
+    assert any("em-dash in gateway status notice" in h and "locales/en.yaml" in h for h in locale_hits)
+    assert any("English leak in French locale" in h and "locales/fr.yaml" in h for h in locale_hits)
+
+    gw = tmp_path / "gateway"
+    gw.mkdir()
+    (gw / "delivery_ledger.py").write_text(
+        'RECOVERED_MARKER = "♻️ Recovered reply — gateway restarted:\\n\\n"\n',
+        encoding="utf-8",
+    )
+    rt_hits = wq._check_gateway_runtime_strings(tmp_path)
+    assert any("decorative AI-slop emoji" in h for h in rt_hits)
+    assert any("em-dash in gateway runtime notice" in h for h in rt_hits)

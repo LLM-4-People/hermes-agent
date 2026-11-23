@@ -74,12 +74,12 @@ _SLACK = Platform.SLACK.value
 
 # Prompt option id -> in-channel ack label (the option set doubles as the choice allowlist).
 _EXEC_APPROVAL_LABELS = {
-    "once": "✅ Approved once",
-    "session": "✅ Approved for session",
-    "always": "✅ Approved permanently",
-    "deny": "❌ Denied",
+    "once": "Approved once",
+    "session": "Approved for session",
+    "always": "Approved permanently",
+    "deny": "Denied",
 }
-_SLASH_CONFIRM_LABELS = {"once": "✅ Approved once", "always": "🔒 Always approve", "cancel": "❌ Cancelled"}
+_SLASH_CONFIRM_LABELS = {"once": "Approved once", "always": "Always approve", "cancel": "Cancelled"}
 
 
 def _utf16_len(text: str) -> int:

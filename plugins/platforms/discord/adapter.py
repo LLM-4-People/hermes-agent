@@ -241,7 +241,11 @@ _DISCORD_NONCONVERSATIONAL_HISTORY_MESSAGE_PATTERNS = (
         r"(?:finished|failed|timed out)[\s\S]*$",
         re.IGNORECASE,
     ),
-    re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)[\s\S]*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:♻️?\s+Gateway\s+(?:restarted successfully|online\b)|"
+        r"Hermes\s+(?:is online\.|est en ligne\.|restarted\.|a redémarré\.))[\s\S]*$",
+        re.IGNORECASE,
+    ),
 )
 try:
     import discord

@@ -191,8 +191,8 @@ def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, 
         # Session-policy refusals carry a stable reason code (e.g. a CLI launch key revoked by
         # daemon restart): keep it in the reply so clients can act on it, and do not suggest
         # /login — the profile's own credentials were never in play.
-        return (f"⚠️ This session's launch credentials are no longer available ({exc.reason}), so this "
-                "message wasn't processed. Start a new session from the CLI to bind them again.", auth_permanent, False)
+        from gateway.i18n import t as gateway_t
+        return gateway_t("turn.launch_credentials_unavailable", reason=exc.reason), auth_permanent, False
     if is_rate_limited_auth_error(exc.__cause__):
         # Quota cap with valid credentials: /login cannot help; name the reset window (#89401).
         from gateway.run import _gateway_provider_error_reply
