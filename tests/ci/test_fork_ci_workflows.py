@@ -139,6 +139,8 @@ class ForkCiWorkflowsTest(unittest.TestCase):
         plan_run = job["steps"][1]["run"]
         self.assertIn("scripts/release_plan.py", plan_run)
         self.assertIn("--changed-files-json", plan_run)
+        self.assertIn("--paginate --jq '.[].filename'", plan_run)
+        self.assertNotIn("--paginate --jq '[.[].filename]'", plan_run)
         self.assertIn("RELEASE_BOT_TOKEN", job["steps"][2]["env"]["GH_TOKEN"])
 
     def test_downstream_verify_sharding_partitions_all_files_with_zero_overlap(self):

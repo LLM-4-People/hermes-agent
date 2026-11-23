@@ -109,7 +109,15 @@ jobs:
           print(str(pulls[0].get("body") or ""))
           PY
           )"
-              files_json="$(gh api "repos/${REPO}/pulls/${pr_number}/files" --paginate --jq '[.[].filename]' 2>/dev/null || echo '[]')"
+              files_raw="$(gh api "repos/${REPO}/pulls/${pr_number}/files" --paginate --jq '.[].filename' 2>/dev/null || true)"
+              if [ -n "$files_raw" ]; then
+                files_json="$(python3 -I - "$files_raw" <<'PY'
+          import json, sys
+          files = [line.strip() for line in sys.argv[1].splitlines() if line.strip()]
+          print(json.dumps(files))
+          PY
+          )"
+              fi
             fi
 
             if [ -z "$pr_title" ]; then
