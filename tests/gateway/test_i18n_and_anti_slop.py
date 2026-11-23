@@ -60,9 +60,10 @@ def test_anti_slop_linter_clean_across_catalog_and_prompt_builder() -> None:
             hits = find_slop_hits(text, lang=lang)
             assert not hits, f"Slop detected in CATALOG[{lang!r}][{key!r}]: {hits}"
 
-    # 2. DEFAULT_AGENT_IDENTITY and ANTI_SLOP_STYLE_RULES enforce crisp, anti-slop single-language prose.
+    # 2. DEFAULT_AGENT_IDENTITY and ANTI_SLOP_STYLE_RULES enforce crisp, anti-slop single-language prose + sentence case.
     assert prompt_builder.ANTI_SLOP_STYLE_RULES in prompt_builder.DEFAULT_AGENT_IDENTITY
     assert "pure English or pure French" in prompt_builder.ANTI_SLOP_STYLE_RULES
+    assert "sentence case" in prompt_builder.ANTI_SLOP_STYLE_RULES.lower()
     assert "negative-parallelism" in prompt_builder.ANTI_SLOP_STYLE_RULES
     assert find_slop_hits(prompt_builder.DEFAULT_AGENT_IDENTITY, lang="en") == []
     assert ANTI_SLOP_PROMPT_RULES
@@ -229,10 +230,39 @@ def test_writing_quality_ci_gate_passes_and_catches_slop(tmp_path) -> None:
     pb_hits = wq._check_prompt_builder(tmp_path)
     assert pb_hits and "DEFAULT_AGENT_IDENTITY" in pb_hits[0]
 
-    # Negative checks: catches EN/FR clichés and negative-parallelism slop.
+    # Negative checks: catches expanded EN/FR clichés, negative-parallelism slop, and em-dash clutter.
     assert "negative parallelism" in wq.scan_prose_for_slop("It's not just fast, it's magical.", lang="en")
+    assert "negative parallelism" in wq.scan_prose_for_slop("It is not only fast, but also reliable.", lang="en")
     assert "comprehensive" in wq.scan_prose_for_slop("A comprehensive seamless experience.", lang="en")
+    assert "supercharge" in wq.scan_prose_for_slop("Supercharge your bespoke workflow effortlessly.", lang="en")
+    assert "orchestrate" in wq.scan_prose_for_slop("Unleash and orchestrate groundbreaking synergy.", lang="en")
     assert "sans couture" in wq.scan_prose_for_slop("Une expérience sans couture.", lang="fr")
+    assert "décupler" in wq.scan_prose_for_slop("Sublimer et décupler votre outil sur-mesure.", lang="fr")
+    assert "em-dash clutter" in wq.scan_prose_for_slop("One — two — three — four.", lang="en")
+
+    # Sentence-case gate rejects Title Case headings/titles while allowing proper nouns & acronyms.
+    assert wq.find_title_case_violations("Why Use the Companion Fork?") == ["Use", "Companion", "Fork"]
+    assert wq.find_title_case_violations("3-Minute Docker Quickstart") == ["3-Minute", "Quickstart"]
+    assert wq.find_title_case_violations("51 Capabilities & 17 Default Toolsets") == [
+        "Capabilities", "Default", "Toolsets"
+    ]
+    assert wq.find_title_case_violations("Hermes Mobile Companion Doctor") == ["Companion", "Doctor"]
+    assert wq.find_title_case_violations("3-minute Docker Compose setup") == []
+    assert wq.find_title_case_violations("Connecting the Hermes Mobile Android app") == []
+    assert wq.find_title_case_violations("Single-host multi-user setup (`/p/<profile>`)") == []
+    assert wq.find_title_case_violations("Full companion surface: 51 capabilities & 17 default toolsets") == []
+
+    # Companion prompt & mobile_doctor AST scanner catches synthetic slop & Title Case without imports.
+    fake_scripts = tmp_path / "scripts"
+    fake_scripts.mkdir()
+    (fake_scripts / "mobile_doctor.py").write_text(
+        'def format_report_text(report):\n'
+        '    return "Hermes Mobile Companion Doctor — seamless workflow"\n',
+        encoding="utf-8",
+    )
+    doc_ast_hits = wq._check_companion_prompt_and_doctor(tmp_path)
+    assert any("banned slop" in hit for hit in doc_ast_hits)
+    assert any("title case" in hit for hit in doc_ast_hits)
 
     # Code blocks, inline code, and URLs do not trigger false positives AND preserve exact line numbers.
     sample = "Line 1.\n```python\nword = 'delve tapestry'\nline_4 = 1\n```\nUse `delve` at https://example.com/delve."

@@ -154,7 +154,7 @@ def build_mobile_companion_instructions(
     lines.append(_SHARED_MOBILE_TOOLS_LINE)
     if lang is not None:
         lines.append(
-            f"- User language: reply, write Smart Notes, and label all Surfaces, Widgets, and Suggested Actions in {_LANGUAGE_LABELS[lang]}."
+            f"- User language: reply, write Smart Notes, and label all surfaces, widgets, and suggested actions in {_LANGUAGE_LABELS[lang]}."
         )
     return "\n".join(lines)
 
