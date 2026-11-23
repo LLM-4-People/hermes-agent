@@ -93,17 +93,36 @@ class MessageReadsMixin(MessageBase):
         page = _page(chosen, limit=request.limit, offset=request.offset, latest=request.latest)
         return tuple(row.as_transcript_row(sid) for sid, row in page)
 
-    def read_transcript_page(self, session_id, request, *, visible_only=False):
+    def read_transcript_page(self, session_id, request, *, visible_only=False, before_id=None, after_id=None):
         from persistence.conversation.messages import TranscriptPage
         from session_rules.turns import transcript_message_visible
+        if before_id is not None and after_id is not None:
+            raise ValueError("before_id and after_id are mutually exclusive")
+        if (before_id is not None or after_id is not None) and request.offset:
+            raise ValueError("before_id and after_id are incompatible with non-zero offset")
+        if (before_id is not None and int(before_id) < 0) or (after_id is not None and int(after_id) < 0):
+            raise ValueError("cursor ids must be non-negative")
         rows = self.read_transcript(session_id, replace(request, limit=None, offset=0))
         if visible_only:
             rows = tuple(row for row in rows if transcript_message_visible(row.as_wire_row()))
-        page = _page(rows, limit=request.limit, offset=request.offset, latest=request.latest)
+        total = len(rows)
+        if before_id is not None:
+            cutoff = int(before_id)
+            filtered = tuple(row for row in rows if int(row.id) < cutoff)
+            page = _page(filtered, limit=request.limit, offset=0, latest=True)
+            has_more = len(filtered) > len(page)
+        elif after_id is not None:
+            cutoff = int(after_id)
+            filtered = tuple(row for row in rows if int(row.id) > cutoff)
+            page = _page(filtered, limit=request.limit, offset=0, latest=False)
+            has_more = len(filtered) > len(page)
+        else:
+            page = _page(rows, limit=request.limit, offset=request.offset, latest=request.latest)
+            has_more = (request.offset + len(page)) < total
         root = self._ids(self._backend.scope, session_id, request.include_lineage)[0]
         if visible_only:
             page = [self._api_input(row) for row in page]
-        return TranscriptPage(tuple(page), len(rows), SessionId(root))
+        return TranscriptPage(tuple(page), total, SessionId(root), has_more=has_more)
 
     def _api_input(self, row):
         if row.role != "user" or not row.platform_message_id or row.observed:

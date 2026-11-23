@@ -505,12 +505,27 @@ class SQLiteMessageRepository:
                 stamp_exported_photo_previews(holder, {session_id: rows})
         return tuple(_transcript_row(row) for row in rows)
 
-    def read_transcript_page(self, session_id: SessionId, request: TranscriptRead, *, visible_only: bool = False) -> TranscriptPage:
-        from ._store.transcript_pages import get_transcript_page
+    def read_transcript_page(
+        self,
+        session_id: SessionId,
+        request: TranscriptRead,
+        *,
+        visible_only: bool = False,
+        before_id: Optional[MessageId] = None,
+        after_id: Optional[MessageId] = None,
+    ) -> TranscriptPage:
+        from ._store.transcript_pages import get_transcript_page_cursor
         holder = self._store.holder()
         with _refusals(holder, session_id):
-            rows, total, root = get_transcript_page(holder, session_id, request, visible_only)
-        return TranscriptPage(tuple(_transcript_row(row) for row in rows), total, SessionId(root))
+            rows, total, root, has_more = get_transcript_page_cursor(
+                holder,
+                session_id,
+                request,
+                visible_only,
+                before_id=None if before_id is None else int(before_id),
+                after_id=None if after_id is None else int(after_id),
+            )
+        return TranscriptPage(tuple(_transcript_row(row) for row in rows), total, SessionId(root), has_more=has_more)
 
     def active_message_ids(self, session_id: SessionId) -> tuple[MessageId, ...]:
         holder = self._store.holder()
