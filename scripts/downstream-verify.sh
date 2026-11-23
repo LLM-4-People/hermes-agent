@@ -79,6 +79,7 @@ scripts/run_tests.sh \
   tests/hermes_cli/test_status_provider_label.py \
   tests/hermes_cli/test_cmd_update_docker.py \
   tests/scripts/test_mobile_doctor.py \
+  tests/scripts/test_check_fork_preservation.py \
   tests/ci/test_docs_drift.py \
   tests/ci/test_check_public_pii.py \
   -q
