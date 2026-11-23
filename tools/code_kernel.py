@@ -706,9 +706,11 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     # and hands that group to the owner-death supervisor: the whole group dies the moment this
     # process dies, by any cause. A kernel-only death pipe let a cell's subprocesses outlive the host.
     from hermes_cli.process_identity import spawn_owned
+    from tools.profile_landlock import wrap_argv_for_profile_sandbox
     try:
         kernel.proc = spawn_owned(
-            [child_python, os.path.join(kernel.tmpdir, "hermes_kernel_runner.py")], purpose="code-kernel",
+            wrap_argv_for_profile_sandbox([child_python, os.path.join(kernel.tmpdir, "hermes_kernel_runner.py")]),
+            purpose="code-kernel",
             # Strict mode passes an empty cwd: the kernel's staging dir plays the per-call tmpdir's role.
             cwd=child_cwd or kernel.tmpdir, env=child_env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,

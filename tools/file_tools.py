@@ -663,6 +663,13 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
 
         _resolved = PurePosixPath(path) if unanchored else _resolve_path_for_task(path, task_id)
 
+        # Foreign-profile boundary runs BEFORE stat (_special_file_kind) so another profile's
+        # path existence and metadata can never be probed.
+        if _file_ops_uses_host_paths(_get_file_ops(task_id)):
+            from agent.file_safety import FOREIGN_PROFILE_DENIAL, is_foreign_profile_path
+            if is_foreign_profile_path(_resolved) or is_foreign_profile_path(path):
+                return tool_error(FOREIGN_PROFILE_DENIAL)
+
         # A read on a FIFO/socket blocks until the exec timeout: a self-shipped DoS.
         if _file_ops_uses_host_paths(_get_file_ops(task_id)):
             kind = _special_file_kind(_resolved)

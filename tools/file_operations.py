@@ -841,6 +841,19 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             file_size=file_size, truncated=truncated, hint=" ".join(hint_parts),
             truncated_lines=True if truncated_lines else None)
 
+    def _foreign_profile_error(self, path: str) -> Optional[str]:
+        """Fail-closed foreign-profile check on local host environments before reading."""
+        env = getattr(self, "env", None)
+        if env is not None and getattr(env, "is_local", True) is False:
+            return None
+        from agent.file_safety import FOREIGN_PROFILE_DENIAL, is_foreign_profile_path
+        raw = Path(os.path.expanduser(str(path)))
+        if not raw.is_absolute():
+            raw = Path(os.path.expanduser(str(getattr(env, "cwd", None) or self.cwd or os.getcwd()))) / raw
+        if is_foreign_profile_path(raw.resolve()) or is_foreign_profile_path(Path(os.path.normpath(str(raw)))):
+            return FOREIGN_PROFILE_DENIAL
+        return None
+
     def read_file(self, path: str, offset: int = 1, limit: int = 2000) -> ReadResult:
         """Read a file with pagination, binary detection, and line numbers.
 
@@ -852,6 +865,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         POSIX environment the read never touches the shell (``_read_file_native``).
         """
         path = self._expand_path(path)  # before shell escaping: ~ doesn't expand in quotes
+        if boundary_err := self._foreign_profile_error(path):
+            return ReadResult(error=boundary_err)
         offset, limit = normalize_read_pagination(offset, limit)
 
         if self._native_read_enabled():
@@ -1259,6 +1274,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def read_file_raw(self, path: str) -> ReadResult:
         """Whole file as a plain string (no pagination/line numbers/clamping)."""
         path = self._expand_path(path)
+        if boundary_err := self._foreign_profile_error(path):
+            return ReadResult(error=boundary_err)
         file_size, status = self._probe_regular_file(path)
         if status == "missing":
             return self._suggest_similar_files(path)

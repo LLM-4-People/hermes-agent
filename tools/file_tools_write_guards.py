@@ -130,6 +130,10 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except ValueError as exc:  # a hosted ``~`` the sandbox gives no meaning to
         return f"Refusing to write to {filepath}: {exc}"
     candidates = (_resolved_or_raw(filepath, task_id), os.path.normpath(expanded))
+    if _writes_host_filesystem(task_id):
+        from agent.file_safety import FOREIGN_PROFILE_DENIAL, is_foreign_profile_path
+        if any(is_foreign_profile_path(cand) for cand in (filepath, *candidates)):
+            return FOREIGN_PROFILE_DENIAL
     if _ssh_path_escapes_home(candidates[0]) and _terminal_env_type_for_task(task_id) == "ssh":
         return (
             f"Refusing to write to {filepath}: it climbs above the SSH home and the remote "

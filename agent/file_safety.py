@@ -48,6 +48,59 @@ def _hermes_root_path() -> Path:
     return _constants_path("get_default_hermes_root")
 
 
+FOREIGN_PROFILE_DENIAL = "Access denied: path belongs to another Hermes profile."
+
+
+def _profile_boundary_roots() -> tuple[Path, Path]:
+    """Return resolved ``(current_home, hermes_root)`` for cross-profile isolation checks."""
+    current = _hermes_home_path().resolve()
+    if current.parent.name == "profiles" and current.parent.parent != current.parent:
+        return current, current.parent.parent.resolve()
+    return current, current
+
+
+def is_foreign_profile_path(resolved: str | Path) -> bool:
+    """Return True when *resolved* targets another Hermes profile (or host root from a named profile).
+
+    - Default profile (``current == root``): forbidden from ``<root>/profiles`` and every sibling
+      profile subtree inside it.
+    - Named profile (``<root>/profiles/<slug>``): forbidden from every path inside ``<root>``
+      that lies outside ``current``.
+    """
+    try:
+        target = Path(resolved)
+        current, root = _profile_boundary_roots()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    profiles_dir = root / "profiles"
+    if deny_key(current) == deny_key(root):
+        return deny_path_under(target, profiles_dir)
+    return deny_path_under(target, root) and not deny_path_under(target, current)
+
+
+def foreign_profile_search_exclusions(search_root: str | Path, *, cwd: str | Path | None = None) -> list[str]:
+    """Relative POSIX subtrees under *search_root* that recursive searches must prune."""
+    try:
+        current, root = _profile_boundary_roots()
+        raw = Path(os.path.expanduser(str(search_root)))
+        if not raw.is_absolute():
+            base = Path(os.path.expanduser(str(cwd))) if cwd else Path.cwd()
+            raw = base / raw
+        resolved_root = raw.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return []
+
+    target = (root / "profiles") if deny_key(current) == deny_key(root) else root
+    if deny_path_under(target, resolved_root) and deny_key(target) != deny_key(resolved_root):
+        try:
+            rel = target.relative_to(resolved_root)
+        except ValueError:
+            return []
+        if rel.parts:
+            return [rel.as_posix()]
+    return []
+
+
 def _hermes_dirs() -> list[Path]:
     """Resolved active HERMES_HOME and global root, deduplicated.
 
@@ -392,7 +445,7 @@ def _classify_write_denial(path: str, *, entry: bool = False) -> Optional[str]:
 
 
 def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[str]:
-    """Credential / protected-subpath / safe-root verdict for an already-resolved path."""
+    """Credential / protected-subpath / foreign-profile / safe-root verdict for an already-resolved path."""
     # Only ``~/.ssh/config`` skips the credential deny (so the ``.ssh/`` prefix doesn't swallow it)
     # and reaches the approval prompt. Shell rc files need no exemption, and granting one would let
     # ``~/.bashrc`` -> ``~/.ssh/authorized_keys`` turn the credential deny into a shell_rc_write
@@ -412,6 +465,9 @@ def _classify_resolved_write_denial(homes: set[str], resolved: str) -> Optional[
                 if deny_path_under(resolved, os.path.realpath(os.path.join(str(base), *sub.split("/")))):
                     return "credential"
 
+    if is_foreign_profile_path(resolved):
+        return "foreign_profile"
+
     safe_roots = get_safe_write_roots()
     if safe_roots and not any(_is_under(resolved, root) for root in safe_roots):
         return "safe_root"
@@ -428,6 +484,8 @@ def get_write_denied_error(path: str, *, verb: str = "Write", entry: bool = Fals
     """Return a user/model-facing error when writes to ``path`` are blocked
     (``entry``: see :func:`_classify_write_denial`)."""
     denial = _classify_write_denial(path, entry=entry)
+    if denial == "foreign_profile":
+        return FOREIGN_PROFILE_DENIAL
     if denial == "safe_root":
         roots_display = os.pathsep.join(sorted(get_safe_write_roots()))
         return (
@@ -567,6 +625,7 @@ def get_read_block_error(path: str) -> Optional[str]:
     local = local_drive_spelling(path)
     lexical = sandbox_lexical_path(local)
     resolved = Path(lexical) if lexical is not None else Path(local).expanduser().resolve()
+    lexical_path = Path(os.path.normpath(os.path.expanduser(local)))
     hermes_dirs = _credential_store_dirs()
     reason = None
     if is_blocked_device_path(os.path.expanduser(local)) or is_blocked_device_path(str(resolved)):
@@ -598,7 +657,11 @@ def get_read_block_error(path: str) -> Optional[str]:
                 "is a secret-bearing environment file and cannot be read to prevent credential "
                 "leakage. If you need to check the file structure, read .env.example instead." + _DID_SUFFIX
             )
-    return f"Access denied: {path} {reason}" if reason else None
+    if reason:
+        return f"Access denied: {path} {reason}"
+    if is_foreign_profile_path(resolved) or is_foreign_profile_path(lexical_path):
+        return FOREIGN_PROFILE_DENIAL
+    return None
 
 
 def raise_if_read_blocked(path: str) -> None:

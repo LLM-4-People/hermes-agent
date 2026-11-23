@@ -715,9 +715,35 @@ class SearchMixin:
         cwd = getattr(self.env, "cwd", None) or self.cwd
         return _macos_protected_search_exclusions(path, cwd=cwd, home=_fo._HOME, platform=sys.platform)
 
+    def _profile_search_exclusions(self, path: str) -> list[str]:
+        """Relative POSIX subtrees under *path* that belong to other Hermes profiles."""
+        env = getattr(self, "env", None)
+        if env is not None and getattr(env, "is_local", True) is False:
+            return []
+        from agent.file_safety import foreign_profile_search_exclusions
+        cwd = getattr(env, "cwd", None) or self.cwd
+        return foreign_profile_search_exclusions(path, cwd=cwd)
+
+    def _profile_search_root_error(self, path: str | list[str]) -> Optional[str]:
+        """Return denial error if any search root targets another Hermes profile."""
+        env = getattr(self, "env", None)
+        if env is not None and getattr(env, "is_local", True) is False:
+            return None
+        from agent.file_safety import FOREIGN_PROFILE_DENIAL, is_foreign_profile_path
+        cwd = getattr(env, "cwd", None) or self.cwd
+        roots = [path] if isinstance(path, str) else list(path)
+        for root in roots:
+            raw = Path(os.path.expanduser(str(root)))
+            if not raw.is_absolute():
+                raw = Path(os.path.expanduser(str(cwd or os.getcwd()))) / raw
+            if is_foreign_profile_path(raw.resolve()) or is_foreign_profile_path(Path(os.path.normpath(str(raw)))):
+                return FOREIGN_PROFILE_DENIAL
+        return None
+
     def _protected_prune_paths(self, path: str) -> list[str]:
         """Absolute-ish protected paths for find's ``-path ... -prune``."""
-        return [os.path.normpath(os.path.join(path, item)) for item in self._macos_search_exclusions(path)]
+        items = list(dict.fromkeys([*self._macos_search_exclusions(path), *self._profile_search_exclusions(path)]))
+        return [os.path.normpath(os.path.join(path, item)) for item in items]
 
     def _effective_macos_search_exclusions(self, roots: list[str]) -> list[tuple[str, str, str]]:
         """Unique ``(root, relative, absolute)`` exclusions across ``roots``, never
@@ -772,9 +798,10 @@ class SearchMixin:
         return any(part.startswith(".") and part not in (".", "..") for part in root.replace("\\", "/").split("/"))
 
     def _rg_exclusion_globs(self, path: str) -> list[str]:
-        """``--glob '!<dir>/**'`` pairs excluding protected dirs from an rg run."""
+        """``--glob '!<dir>/**'`` pairs excluding protected and cross-profile dirs from an rg run."""
         out: list[str] = []
-        for item in self._macos_search_exclusions(path):
+        items = list(dict.fromkeys([*self._macos_search_exclusions(path), *self._profile_search_exclusions(path)]))
+        for item in items:
             out.extend(["--glob", self._escape_shell_arg(f"!{item}/**")])
         return out
 
@@ -789,6 +816,8 @@ class SearchMixin:
     def _dispatch_search(self, pattern: str, path: str, target: str,
                          file_glob: Optional[str], limit: int, offset: int,
                          output_mode: str, context: int, order: str = "discovery") -> SearchResult:
+        if boundary_err := self._profile_search_root_error(path):
+            return SearchResult(error=boundary_err)
         if target == "files":
             return self._search_files(pattern, path, limit, offset, order)
         return self._search_content(pattern, path, file_glob, limit, offset, output_mode, context)
@@ -1041,8 +1070,10 @@ class SearchMixin:
         escaped_pattern = self._escape_shell_arg(pattern)
         q_roots = [escaped_path]
         hidden_prune = self._hidden_prune_expr(q_roots)
+        profile_paths = [os.path.normpath(os.path.join(path, item)) for item in self._profile_search_exclusions(path)]
+        profile_prune = f" {self._prune_expr(profile_paths)} -o" if profile_paths else ""
         cmd = (
-            f"find -H {escaped_path} -mindepth 1 {hidden_prune} -o -type d "
+            f"find -H {escaped_path} -mindepth 1{profile_prune} {hidden_prune} -o -type d "
             f"! -name '.*' -name {escaped_pattern} -printf '%T@ %p\\n' "
             f"2>/dev/null | sort -rn"
         )
@@ -1052,7 +1083,7 @@ class SearchMixin:
         if not stdout.strip() and not limit_reason:
             # Try without -printf (BSD find compatibility -- macOS)
             cmd_simple = (
-                f"find -H {escaped_path} -mindepth 1 {hidden_prune} -o -type d "
+                f"find -H {escaped_path} -mindepth 1{profile_prune} {hidden_prune} -o -type d "
                 f"! -name '.*' -name {escaped_pattern} 2>/dev/null"
             )
             result = self._exec(cmd_simple, timeout=30)
@@ -1125,6 +1156,11 @@ class SearchMixin:
         q_roots = [self._escape_shell_arg(root) for root in find_roots]
         hidden_prune = f" {self._hidden_prune_expr(q_roots)} -o"
         protected_paths = [absolute for _r, _rel, absolute in self._effective_macos_search_exclusions(roots)]
+        for root in roots:
+            for rel in self._profile_search_exclusions(root):
+                candidate = os.path.normpath(os.path.join(root, rel))
+                if candidate not in protected_paths:
+                    protected_paths.append(candidate)
         protected_prune = f" {self._prune_expr(protected_paths)} -o" if protected_paths else ""
         fetch_limit = offset + limit + 1
         # ``-H`` follows a symlink handed in as an OPERAND, and only an operand: without
@@ -1188,7 +1224,13 @@ class SearchMixin:
         glob_pattern = f"*{pattern}" if ('/' not in pattern and not pattern.startswith('*')) else pattern
         roots = [path] if isinstance(path, str) else path
         fetch_limit = limit + offset + 1
-        effective_exclusions = self._effective_macos_search_exclusions(roots)
+        effective_exclusions = list(self._effective_macos_search_exclusions(roots))
+        for root in roots:
+            for rel in self._profile_search_exclusions(root):
+                abs_path = posixpath.normpath(posixpath.join(root, rel)) if _posix_roots(roots) else os.path.normpath(os.path.join(root, rel))
+                entry = (root, rel, abs_path)
+                if entry not in effective_exclusions:
+                    effective_exclusions.append(entry)
         scoped_common = None
         command_roots = roots
         if len(roots) > 1 and effective_exclusions and _posix_roots(roots):
