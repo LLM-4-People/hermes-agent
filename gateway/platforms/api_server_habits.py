@@ -9,14 +9,11 @@ repeated at least ``HABIT_MIN_THRESHOLD`` (3) times.
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 import functools
 import logging
-import os
-from pathlib import Path
 import re
 import sqlite3
-import threading
 import time
 from typing import Any, Iterator, Optional
 
@@ -30,14 +27,13 @@ from hermes_constants import (
     get_hermes_home,
     mkdir_under_hermes_home,
 )
+from tools.mobile_sqlite import open_mobile_db
 
 logger = logging.getLogger("gateway.platforms.api_server")
 
 HABIT_MIN_THRESHOLD = 3
 _MAX_SUGGESTIONS_LIMIT = 20
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-_LOCKS_GUARD = threading.Lock()
-_LOCKS: dict[str, threading.RLock] = {}
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS habit_counts (
@@ -61,15 +57,6 @@ CAPABILITY_ENDPOINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def _lock_for(db_path: Path) -> threading.RLock:
-    key = str(db_path.resolve(strict=False))
-    with _LOCKS_GUARD:
-        lock = _LOCKS.get(key)
-        if lock is None:
-            lock = _LOCKS[key] = threading.RLock()
-        return lock
-
-
 @contextmanager
 def _connect_habits_db(*, write: bool = False) -> Iterator[sqlite3.Connection]:
     home = get_hermes_home()
@@ -77,36 +64,14 @@ def _connect_habits_db(*, write: bool = False) -> Iterator[sqlite3.Connection]:
     db_path = home / "habits.db"
     if write:
         mkdir_under_hermes_home(db_path.parent)
-    with _lock_for(db_path):
-        if not write and not db_path.is_file():
-            conn = sqlite3.connect(":memory:")
-            conn.row_factory = sqlite3.Row
-            conn.executescript(_SCHEMA_SQL)
-            try:
-                yield conn
-            finally:
-                conn.close()
-            return
-        conn = sqlite3.connect(str(db_path), timeout=10.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.executescript(_SCHEMA_SQL)
-            with suppress(OSError):
-                if db_path.exists():
-                    os.chmod(db_path, 0o600)
-            if write:
-                conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            if write and conn.in_transaction:
-                conn.execute("COMMIT")
-        except BaseException:
-            if write and conn.in_transaction:
-                with suppress(sqlite3.Error):
-                    conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+    with open_mobile_db(
+        db_path,
+        schema_key="habits",
+        schema_sql=_SCHEMA_SQL,
+        db_label="habits.db",
+        write=write,
+    ) as conn:
+        yield conn
 
 
 def _validate_key(raw: Any, field: str) -> tuple[Optional[str], Optional[str]]:

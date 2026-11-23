@@ -87,8 +87,15 @@ class RunIdempotencyStore:
                 "process memory, so replay will not survive a restart: %s", exc)
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
+        from contextlib import suppress
+        import sys
         from sqlite_support import apply_wal_with_fallback
-        apply_wal_with_fallback(self._conn, db_label="runs_idempotency.db")
+        with suppress(sqlite3.OperationalError):
+            self._conn.execute("PRAGMA busy_timeout=15000")
+        wal_mode = apply_wal_with_fallback(self._conn, db_label="runs_idempotency.db")
+        if wal_mode == "wal" and sys.platform != "darwin":
+            with suppress(sqlite3.OperationalError):
+                self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS run_idempotency (
                 scope TEXT NOT NULL,

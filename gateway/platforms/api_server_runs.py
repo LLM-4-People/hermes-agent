@@ -14,7 +14,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -403,10 +403,11 @@ def _initialize_run_state(self, *, store_factory) -> None:
     self._run_shutdown_requested_at: Optional[float] = None
     # Streaming run id -> its canonical admission id, held while that request observes the turn.
     self._run_admission_aliases: dict[str, str] = {}
+    self._run_state_lock = threading.RLock()
     (
-        self._run_owners, self._run_streams, self._run_streams_created, self._active_run_agents,
-        self._active_run_tasks, self._run_statuses, self._run_approval_sessions,
-    ) = ({} for _ in range(7))
+        self._run_owners, self._run_profiles, self._run_streams, self._run_streams_created,
+        self._active_run_agents, self._active_run_tasks, self._run_statuses, self._run_approval_sessions,
+    ) = ({} for _ in range(8))
 
 
 def _http_routes(self) -> list[tuple[str, str, Any]]:
@@ -441,37 +442,44 @@ def _close_run_state(self) -> None:
 
 
 def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, Any]:
-    """Update pollable run status without exposing private agent objects."""
+    """Update pollable run status thread-safely without terminal-status regression."""
     now = time.time()
-    current = self._run_statuses.get(run_id, {})
-    previous_status = str(current.get("status") or "")
-    field_names = set(fields)
-    current.update({"object": "hermes.run", "run_id": run_id, "status": status, "updated_at": now})
-    current.setdefault("created_at", fields.pop("created_at", now))
-    current.update(fields)
-    shutdown_requested_at = getattr(self, "_run_shutdown_requested_at", None)
-    if shutdown_requested_at is not None and status not in TERMINAL_STATUSES:
-        current.setdefault("shutdown_requested_at", shutdown_requested_at)
-    if status != "waiting_for_approval":
-        current.pop("approval", None)
-        current.pop("pending_approvals", None)
-    if status not in {"waiting_for_approval", "waiting_for_input"} or not current.get("pending_questions"):
-        current.pop("pending_questions", None)
-    if status != "waiting_for_device":
-        current.pop("pending_device_requests", None)
-    self._run_statuses[run_id] = current
-    should_persist = (
-        status != previous_status
-        or status in TERMINAL_STATUSES
-        or bool(field_names & {
-            "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "pending_questions",
-            "pending_device_requests", "suggested_actions", "session_id", "shutdown_requested_at"}))
+    lock = getattr(self, "_run_state_lock", None) or nullcontext()
+    with lock:
+        current = dict(self._run_statuses.get(run_id, {}))
+        previous_status = str(current.get("status") or "")
+        if previous_status in TERMINAL_STATUSES and status not in TERMINAL_STATUSES:
+            return current
+        if previous_status == "stopping" and status not in TERMINAL_STATUSES and status != "stopping":
+            status = "stopping"
+        field_names = set(fields)
+        current.update({"object": "hermes.run", "run_id": run_id, "status": status, "updated_at": now})
+        current.setdefault("created_at", fields.pop("created_at", now))
+        current.update(fields)
+        shutdown_requested_at = getattr(self, "_run_shutdown_requested_at", None)
+        if shutdown_requested_at is not None and status not in TERMINAL_STATUSES:
+            current.setdefault("shutdown_requested_at", shutdown_requested_at)
+        if status != "waiting_for_approval":
+            current.pop("approval", None)
+            current.pop("pending_approvals", None)
+        if status not in {"waiting_for_approval", "waiting_for_input"} or not current.get("pending_questions"):
+            current.pop("pending_questions", None)
+        if status != "waiting_for_device":
+            current.pop("pending_device_requests", None)
+        self._run_statuses[run_id] = current
+        should_persist = (
+            status != previous_status
+            or status in TERMINAL_STATUSES
+            or bool(field_names & {
+                "output", "error", "usage", "approval", "pending_steer", "pending_approvals", "pending_questions",
+                "pending_device_requests", "suggested_actions", "session_id", "shutdown_requested_at"}))
+        snapshot = dict(current)
     if run_id in self._run_idempotency_ids and should_persist:
         try:
-            self._run_idempotency_store.update_status(run_id, current)
+            self._run_idempotency_store.update_status(run_id, snapshot)
         except Exception:
             logger.exception("[api_server] failed to persist idempotent run status %s", run_id)
-    return current
+    return snapshot
 
 
 def _mark_shutdown_interrupted_runs(self, run_ids) -> None:
@@ -479,11 +487,7 @@ def _mark_shutdown_interrupted_runs(self, run_ids) -> None:
     for run_id in run_ids:
         self._shutdown_interrupted_run_ids.add(run_id)
         self._set_run_status(
-            run_id,
-            "interrupted",
-            error="Gateway shutdown interrupted the run.",
-            last_event="run.interrupted",
-        )
+            run_id, "interrupted", error="Gateway shutdown interrupted the run.", last_event="run.interrupted")
 
 
 def _mark_shutdown_requested(self) -> int:
@@ -519,8 +523,10 @@ def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop,
 
     def _push(event: dict[str, Any], *, channel: str = "standard") -> None:
         if channel == "standard":
-            self._set_run_status(
-                run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
+            lock = getattr(self, "_run_state_lock", None) or nullcontext()
+            with lock:
+                current_status = self._run_statuses.get(run_id, {}).get("status", "running")
+            self._set_run_status(run_id, current_status, last_event=event.get("event"))
         q = self._run_streams.get(run_id)
         if q is not None:
             with suppress(Exception):
@@ -814,16 +820,12 @@ def _forget_run(self, run_id: str, *tables) -> None:
 def _retire_live_run(self, run_id: str) -> None:
     """Retire agent/task/approval control state once the executor-backed task is done."""
     _forget_run(self, run_id, self._active_run_agents, self._active_run_tasks, self._run_approval_sessions,
-                self._stopping_run_ids, self._shutdown_interrupted_run_ids)
+                self._stopping_run_ids, self._shutdown_interrupted_run_ids,
+                getattr(self, "_run_profiles", {}))
 
 
 def _drop_run_transport(self, run_id: str) -> None:
-    _forget_run(
-        self,
-        run_id,
-        self._run_streams,
-        self._run_streams_created,
-    )
+    _forget_run(self, run_id, self._run_streams, self._run_streams_created)
 
 
 async def _resolve_live_session_id(self, session_id: str) -> str:
@@ -1003,7 +1005,8 @@ async def _read_run_tool_options(body, _openai_error):
 
 def _release_refused_run(self, run_id, idempotency_scope, idempotency_key):
     _forget_run(self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
-                self._run_statuses, self._run_owners, self._run_idempotency_ids)
+                self._run_statuses, self._run_owners, self._run_idempotency_ids,
+                getattr(self, "_run_profiles", {}))
     if idempotency_key:
         self._run_idempotency_store.forget(idempotency_scope, idempotency_key)
 
@@ -1101,6 +1104,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         return limited
     run_id = f"run_{uuid.uuid4().hex}"
     self._run_owners[run_id] = self._run_idempotency_scope(request)
+    self._run_profiles[run_id] = _api_server._api_request_profile.get() or "default"
     # Same precedence as /v1/responses: body session_id > response chain > X-Hermes-Session-Key
     # conversation > run_id (which would otherwise re-key every affinity surface per run).
     # An explicit or chained session owns its routing key and is never rebound to the header.
@@ -1140,7 +1144,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         if outcome != "created":
             _forget_run(
                 self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
-                self._run_statuses, self._run_owners)
+                self._run_statuses, self._run_owners, getattr(self, "_run_profiles", {}))
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
     launch = _RunLaunch(
@@ -1230,6 +1234,7 @@ def _run_agent_sync(
     with self._profile_scope(run.request_profile):
         try:
             # Contextvars, not process env: concurrent runs must not share identity.
+            resets.append((_api_server._api_request_profile.set(run.request_profile), _api_server._api_request_profile.reset))
             resets.append((set_current_session_key(run.approval_session_key), reset_current_session_key))
             # chat_id carries the raw session id like _run_agent() does; without it
             # tools.async_delegation sees no HERMES_SESSION_CHAT_ID and forces delegations sync.

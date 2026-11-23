@@ -9,19 +9,18 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
-import threading
 import time
 import unicodedata
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
+from tools.mobile_sqlite import lock_for as _lock_for, open_mobile_db
 from tools.registry import registry
 
 logger = logging.getLogger("hermes.mobile_ui")
@@ -158,24 +157,10 @@ _ui_patch_emitter: ContextVar[Optional[Callable[[dict[str, Any]], None]]] = Cont
     "mobile_ui_patch_emitter", default=None
 )
 
-_DB_LOCKS_GUARD = threading.Lock()
-_DB_LOCKS: dict[str, threading.RLock] = {}
-
-
 def mobile_state_db_path(profile_home: Optional[Path] = None) -> Path:
     """Resolve the active profile's mobile state SQLite database path."""
     home = Path(profile_home) if profile_home is not None else get_hermes_home()
     return home / _MOBILE_STATE_DB_NAME
-
-
-def _lock_for(db_path: Path) -> threading.RLock:
-    key = str(db_path.resolve())
-    with _DB_LOCKS_GUARD:
-        lock = _DB_LOCKS.get(key)
-        if lock is None:
-            lock = threading.RLock()
-            _DB_LOCKS[key] = lock
-        return lock
 
 
 def _valid_utf8_text(value: Any, *, max_len: int, allow_empty: bool = False) -> bool:
@@ -829,28 +814,29 @@ class RevisionConflictError(ValueError):
         self.active_revision_id = active_revision_id
 
 
+def _migrate_ui_schema(conn: sqlite3.Connection) -> None:
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(ui_revisions)").fetchall()}
+    if "suggested_actions_json" not in cols:
+        conn.execute("ALTER TABLE ui_revisions ADD COLUMN suggested_actions_json TEXT")
+
+
 class MobileUiStore:
     """Profile-scoped SQLite store for declarative UI revisions and rollback."""
 
     def __init__(self, profile_home: Optional[Path] = None) -> None:
         self._db_path = mobile_state_db_path(profile_home)
-        self._lock = _lock_for(self._db_path)
 
-    def _connect(self) -> sqlite3.Connection:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self._db_path), timeout=10.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.executescript(_UI_SCHEMA_SQL)
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(ui_revisions)").fetchall()}
-        if "suggested_actions_json" not in cols:
-            conn.execute("ALTER TABLE ui_revisions ADD COLUMN suggested_actions_json TEXT")
-        try:
-            os.chmod(self._db_path, 0o600)
-        except OSError:
-            pass
-        return conn
+    def _open(self, *, write: bool = False):
+        if write:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        return open_mobile_db(
+            self._db_path,
+            schema_key="mobile_ui",
+            schema_sql=_UI_SCHEMA_SQL,
+            db_label="mobile_state.db",
+            write=write,
+            migrate=_migrate_ui_schema,
+        )
 
     def _read_active(self, conn: sqlite3.Connection) -> tuple[Optional[str], dict[str, Any]]:
         row = conn.execute(
@@ -903,47 +889,41 @@ class MobileUiStore:
 
         now = time.time()
         revision_id = f"uirev_{uuid.uuid4().hex[:16]}"
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                parent_id, active_state = self._read_active(conn)
-                next_state = _apply_ops_to_state(active_state, normalized, session_id=session_id)
-                status = "pending" if requires_apply else "applied"
-                applied_at = None if requires_apply else now
+        with self._open(write=True) as conn:
+            parent_id, active_state = self._read_active(conn)
+            next_state = _apply_ops_to_state(active_state, normalized, session_id=session_id)
+            status = "pending" if requires_apply else "applied"
+            applied_at = None if requires_apply else now
+            conn.execute(
+                """INSERT INTO ui_revisions
+                   (revision_id, parent_revision_id, session_id, scope, summary, ops_json,
+                    state_snapshot_json, suggested_actions_json, status, requires_apply, created_at, applied_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    revision_id,
+                    parent_id,
+                    session_id,
+                    scope,
+                    summary.strip(),
+                    json.dumps(normalized, ensure_ascii=False),
+                    json.dumps(next_state, ensure_ascii=False),
+                    json.dumps(clean_suggestions, ensure_ascii=False) if clean_suggestions else None,
+                    status,
+                    1 if requires_apply else 0,
+                    now,
+                    applied_at,
+                ),
+            )
+            if not requires_apply:
                 conn.execute(
-                    """INSERT INTO ui_revisions
-                       (revision_id, parent_revision_id, session_id, scope, summary, ops_json,
-                        state_snapshot_json, suggested_actions_json, status, requires_apply, created_at, applied_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        revision_id,
-                        parent_id,
-                        session_id,
-                        scope,
-                        summary.strip(),
-                        json.dumps(normalized, ensure_ascii=False),
-                        json.dumps(next_state, ensure_ascii=False),
-                        json.dumps(clean_suggestions, ensure_ascii=False) if clean_suggestions else None,
-                        status,
-                        1 if requires_apply else 0,
-                        now,
-                        applied_at,
-                    ),
+                    """INSERT INTO ui_active_state (scope_key, active_revision_id, state_json, updated_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(scope_key) DO UPDATE SET
+                         active_revision_id=excluded.active_revision_id,
+                         state_json=excluded.state_json,
+                         updated_at=excluded.updated_at""",
+                    (_GLOBAL_STATE_KEY, revision_id, json.dumps(next_state, ensure_ascii=False), now),
                 )
-                if not requires_apply:
-                    conn.execute(
-                        """INSERT INTO ui_active_state (scope_key, active_revision_id, state_json, updated_at)
-                           VALUES (?, ?, ?, ?)
-                           ON CONFLICT(scope_key) DO UPDATE SET
-                             active_revision_id=excluded.active_revision_id,
-                             state_json=excluded.state_json,
-                             updated_at=excluded.updated_at""",
-                        (_GLOBAL_STATE_KEY, revision_id, json.dumps(next_state, ensure_ascii=False), now),
-                    )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
 
         revision = {
             "revision_id": revision_id,
@@ -964,7 +944,7 @@ class MobileUiStore:
         return revision
 
     def get_state(self, *, session_id: Optional[str] = None) -> dict[str, Any]:
-        with self._lock, closing(self._connect()) as conn:
+        with self._open(write=False) as conn:
             active_id, state = self._read_active(conn)
             pending_rows = conn.execute(
                 "SELECT * FROM ui_revisions WHERE status = 'pending' ORDER BY created_at DESC LIMIT 20"
@@ -996,7 +976,7 @@ class MobileUiStore:
 
     def list_history(self, *, session_id: Optional[str] = None, limit: int = 20) -> list[dict[str, Any]]:
         capped = max(1, min(int(limit), 100))
-        with self._lock, closing(self._connect()) as conn:
+        with self._open(write=False) as conn:
             if session_id:
                 rows = conn.execute(
                     "SELECT * FROM ui_revisions WHERE session_id = ? OR scope = 'atelier' ORDER BY created_at DESC LIMIT ?",
@@ -1011,24 +991,67 @@ class MobileUiStore:
 
     def apply_revision(self, revision_id: str) -> Optional[dict[str, Any]]:
         now = time.time()
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                row = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
-                if row is None:
-                    conn.execute("ROLLBACK")
-                    return None
-                active_id, active_state = self._read_active(conn)
-                if row["status"] == "applied" and active_id == revision_id:
-                    conn.execute("COMMIT")
-                    return {"revision": self._row_to_dict(row), "already_applied": True, "active_revision_id": active_id}
+        with self._open(write=True) as conn:
+            row = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
+            if row is None:
+                return None
+            active_id, active_state = self._read_active(conn)
+            if row["status"] == "applied" and active_id == revision_id:
+                return {"revision": self._row_to_dict(row), "already_applied": True, "active_revision_id": active_id}
 
-                ops = json.loads(row["ops_json"])
-                next_state = _apply_ops_to_state(active_state, ops, session_id=row["session_id"])
-                conn.execute(
-                    "UPDATE ui_revisions SET status = 'applied', applied_at = ?, state_snapshot_json = ?, parent_revision_id = ? WHERE revision_id = ?",
-                    (now, json.dumps(next_state, ensure_ascii=False), active_id, revision_id),
-                )
+            ops = json.loads(row["ops_json"])
+            next_state = _apply_ops_to_state(active_state, ops, session_id=row["session_id"])
+            conn.execute(
+                "UPDATE ui_revisions SET status = 'applied', applied_at = ?, state_snapshot_json = ?, parent_revision_id = ? WHERE revision_id = ?",
+                (now, json.dumps(next_state, ensure_ascii=False), active_id, revision_id),
+            )
+            conn.execute(
+                """INSERT INTO ui_active_state (scope_key, active_revision_id, state_json, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(scope_key) DO UPDATE SET
+                     active_revision_id=excluded.active_revision_id,
+                     state_json=excluded.state_json,
+                     updated_at=excluded.updated_at""",
+                (_GLOBAL_STATE_KEY, revision_id, json.dumps(next_state, ensure_ascii=False), now),
+            )
+            updated = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
+        logger.info("mobile_ui applied revision=%s", revision_id)
+        return {"revision": self._row_to_dict(updated), "already_applied": False, "active_revision_id": revision_id}
+
+    def revert_revision(self, revision_id: str) -> Optional[dict[str, Any]]:
+        now = time.time()
+        with self._open(write=True) as conn:
+            row = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
+            if row is None:
+                return None
+            if row["status"] == "reverted":
+                active_id, _ = self._read_active(conn)
+                return {"revision": self._row_to_dict(row), "already_reverted": True, "active_revision_id": active_id}
+
+            parent_id = row["parent_revision_id"]
+            if row["status"] == "pending":
+                # Dismissing a pending preview leaves active state untouched.
+                conn.execute("UPDATE ui_revisions SET status = 'reverted' WHERE revision_id = ?", (revision_id,))
+                active_id, _ = self._read_active(conn)
+            else:
+                current_active_id, _ = self._read_active(conn)
+                if current_active_id != revision_id:
+                    raise RevisionConflictError(
+                        f"Cannot revert non-active revision {revision_id}; active revision is {current_active_id}. "
+                        "Revert the active revision first.",
+                        active_revision_id=current_active_id,
+                    )
+                restored_state = _empty_state()
+                restored_id = None
+                if parent_id:
+                    parent_row = conn.execute(
+                        "SELECT revision_id, state_snapshot_json FROM ui_revisions WHERE revision_id = ?",
+                        (parent_id,),
+                    ).fetchone()
+                    if parent_row is not None:
+                        restored_state = json.loads(parent_row["state_snapshot_json"])
+                        restored_id = parent_row["revision_id"]
+                conn.execute("UPDATE ui_revisions SET status = 'reverted' WHERE revision_id = ?", (revision_id,))
                 conn.execute(
                     """INSERT INTO ui_active_state (scope_key, active_revision_id, state_json, updated_at)
                        VALUES (?, ?, ?, ?)
@@ -1036,69 +1059,10 @@ class MobileUiStore:
                          active_revision_id=excluded.active_revision_id,
                          state_json=excluded.state_json,
                          updated_at=excluded.updated_at""",
-                    (_GLOBAL_STATE_KEY, revision_id, json.dumps(next_state, ensure_ascii=False), now),
+                    (_GLOBAL_STATE_KEY, restored_id, json.dumps(restored_state, ensure_ascii=False), now),
                 )
-                updated = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-        logger.info("mobile_ui applied revision=%s", revision_id)
-        return {"revision": self._row_to_dict(updated), "already_applied": False, "active_revision_id": revision_id}
-
-    def revert_revision(self, revision_id: str) -> Optional[dict[str, Any]]:
-        now = time.time()
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                row = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
-                if row is None:
-                    conn.execute("ROLLBACK")
-                    return None
-                if row["status"] == "reverted":
-                    active_id, _ = self._read_active(conn)
-                    conn.execute("COMMIT")
-                    return {"revision": self._row_to_dict(row), "already_reverted": True, "active_revision_id": active_id}
-
-                parent_id = row["parent_revision_id"]
-                if row["status"] == "pending":
-                    # Dismissing a pending preview leaves active state untouched.
-                    conn.execute("UPDATE ui_revisions SET status = 'reverted' WHERE revision_id = ?", (revision_id,))
-                    active_id, _ = self._read_active(conn)
-                else:
-                    current_active_id, _ = self._read_active(conn)
-                    if current_active_id != revision_id:
-                        raise RevisionConflictError(
-                            f"Cannot revert non-active revision {revision_id}; active revision is {current_active_id}. "
-                            "Revert the active revision first.",
-                            active_revision_id=current_active_id,
-                        )
-                    restored_state = _empty_state()
-                    restored_id = None
-                    if parent_id:
-                        parent_row = conn.execute(
-                            "SELECT revision_id, state_snapshot_json FROM ui_revisions WHERE revision_id = ?",
-                            (parent_id,),
-                        ).fetchone()
-                        if parent_row is not None:
-                            restored_state = json.loads(parent_row["state_snapshot_json"])
-                            restored_id = parent_row["revision_id"]
-                    conn.execute("UPDATE ui_revisions SET status = 'reverted' WHERE revision_id = ?", (revision_id,))
-                    conn.execute(
-                        """INSERT INTO ui_active_state (scope_key, active_revision_id, state_json, updated_at)
-                           VALUES (?, ?, ?, ?)
-                           ON CONFLICT(scope_key) DO UPDATE SET
-                             active_revision_id=excluded.active_revision_id,
-                             state_json=excluded.state_json,
-                             updated_at=excluded.updated_at""",
-                        (_GLOBAL_STATE_KEY, restored_id, json.dumps(restored_state, ensure_ascii=False), now),
-                    )
-                    active_id = restored_id
-                updated = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+                active_id = restored_id
+            updated = conn.execute("SELECT * FROM ui_revisions WHERE revision_id = ?", (revision_id,)).fetchone()
         logger.info("mobile_ui reverted revision=%s active=%s", revision_id, active_id)
         return {"revision": self._row_to_dict(updated), "already_reverted": False, "active_revision_id": active_id}
 

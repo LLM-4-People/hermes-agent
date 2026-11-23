@@ -11,19 +11,18 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
+from tools.mobile_sqlite import open_mobile_db
 from tools.mobile_ui_patch import (
-    _lock_for,
     _scan_strings_safe,
     _valid_utf8_text,
     mobile_state_db_path,
@@ -245,20 +244,17 @@ class MobileDeliveryStore:
     def __init__(self, profile_home: Optional[Path] = None) -> None:
         self._profile_home = Path(profile_home) if profile_home is not None else get_hermes_home()
         self._db_path = mobile_state_db_path(self._profile_home)
-        self._lock = _lock_for(self._db_path)
 
-    def _connect(self) -> sqlite3.Connection:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self._db_path), timeout=10.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.executescript(_DELIVERY_SCHEMA_SQL)
-        try:
-            os.chmod(self._db_path, 0o600)
-        except OSError:
-            pass
-        return conn
+    def _open(self, *, write: bool = False):
+        if write:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        return open_mobile_db(
+            self._db_path,
+            schema_key="mobile_deliveries",
+            schema_sql=_DELIVERY_SCHEMA_SQL,
+            db_label="mobile_state.db",
+            write=write,
+        )
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -292,28 +288,22 @@ class MobileDeliveryStore:
         now = time.time()
         delivery_id = f"dlv_{uuid.uuid4().hex[:16]}"
         clean_origin = str(origin or "agent").strip()[:48] or "agent"
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                conn.execute(
-                    """INSERT INTO mobile_deliveries
-                       (delivery_id, kind, title, payload_json, urgency, session_id, origin, created_at, acked_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
-                    (
-                        delivery_id,
-                        kind,
-                        clean_title,
-                        json.dumps(payload, ensure_ascii=False),
-                        urgency,
-                        session_id,
-                        clean_origin,
-                        now,
-                    ),
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+        with self._open(write=True) as conn:
+            conn.execute(
+                """INSERT INTO mobile_deliveries
+                   (delivery_id, kind, title, payload_json, urgency, session_id, origin, created_at, acked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                (
+                    delivery_id,
+                    kind,
+                    clean_title,
+                    json.dumps(payload, ensure_ascii=False),
+                    urgency,
+                    session_id,
+                    clean_origin,
+                    now,
+                ),
+            )
 
         delivery = {
             "delivery_id": delivery_id,
@@ -364,7 +354,7 @@ class MobileDeliveryStore:
             params.append(float(since))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(capped)
-        with self._lock, closing(self._connect()) as conn:
+        with self._open(write=False) as conn:
             rows = conn.execute(
                 f"SELECT * FROM mobile_deliveries {where} ORDER BY created_at DESC LIMIT ?",
                 params,
@@ -372,29 +362,22 @@ class MobileDeliveryStore:
         return [self._row_to_dict(r) for r in rows]
 
     def get_delivery(self, delivery_id: str) -> Optional[dict[str, Any]]:
-        with self._lock, closing(self._connect()) as conn:
+        with self._open(write=False) as conn:
             row = conn.execute("SELECT * FROM mobile_deliveries WHERE delivery_id = ?", (delivery_id,)).fetchone()
         return self._row_to_dict(row) if row is not None else None
 
     def ack_delivery(self, delivery_id: str) -> Optional[dict[str, Any]]:
         now = time.time()
-        with self._lock, closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+        with self._open(write=True) as conn:
+            row = conn.execute("SELECT * FROM mobile_deliveries WHERE delivery_id = ?", (delivery_id,)).fetchone()
+            if row is None:
+                return None
+            if row["acked_at"] is None:
+                conn.execute(
+                    "UPDATE mobile_deliveries SET acked_at = ? WHERE delivery_id = ?",
+                    (now, delivery_id),
+                )
                 row = conn.execute("SELECT * FROM mobile_deliveries WHERE delivery_id = ?", (delivery_id,)).fetchone()
-                if row is None:
-                    conn.execute("ROLLBACK")
-                    return None
-                if row["acked_at"] is None:
-                    conn.execute(
-                        "UPDATE mobile_deliveries SET acked_at = ? WHERE delivery_id = ?",
-                        (now, delivery_id),
-                    )
-                    row = conn.execute("SELECT * FROM mobile_deliveries WHERE delivery_id = ?", (delivery_id,)).fetchone()
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
         return self._row_to_dict(row)
 
 
