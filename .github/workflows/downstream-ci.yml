@@ -11,6 +11,8 @@ name: Downstream CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
   push:
     branches:
       - main
@@ -21,7 +23,7 @@ permissions:
 
 concurrency:
   group: downstream-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.event_name != 'merge_group' }}
 
 jobs:
   changes:
@@ -45,8 +47,8 @@ jobs:
         id: route
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
           set -euo pipefail
@@ -76,14 +78,22 @@ jobs:
               except json.JSONDecodeError:
                   labels = []
 
-          if event != "pull_request" or "run-full-ci" in labels:
+          base = os.environ.get("BASE_SHA", "").strip()
+          head = os.environ.get("HEAD_SHA", "").strip()
+          zero_sha = "0" * 40
+
+          if (
+              event not in ("pull_request", "merge_group")
+              or "run-full-ci" in labels
+              or not base
+              or not head
+              or base == zero_sha
+          ):
               docs_only = False
               run_python_tests = True
               run_workflows = True
               changed = []
           else:
-              base = os.environ["BASE_SHA"]
-              head = os.environ["HEAD_SHA"]
               raw = subprocess.check_output(
                   ["git", "diff", "--name-only", base, head], text=True
               )
