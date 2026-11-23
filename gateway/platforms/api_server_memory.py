@@ -16,6 +16,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import threading
 import time
 from typing import Any, Optional
 import uuid
@@ -46,6 +47,19 @@ _MAX_SEARCH_QUERY_CHARS = 500
 _MAX_SEARCH_LIMIT = 50
 _PINS_FILENAME = ".pins.json"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_MEMORY_LOCKS_GUARD = threading.Lock()
+_MEMORY_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _memory_lock() -> threading.RLock:
+    """Per-profile memory directory lock serializing MemoryStore + .pins.json RMW."""
+    key = str(get_memory_dir().resolve())
+    with _MEMORY_LOCKS_GUARD:
+        lock = _MEMORY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _MEMORY_LOCKS[key] = lock
+        return lock
 
 CAPABILITY_FEATURES: dict[str, Any] = {
     "memory_api": True,
@@ -142,25 +156,26 @@ def _sync_add_memory(target: str, text: str, pin: bool) -> tuple[int, dict[str, 
     if threat := _scan_memory_content(cleaned):
         logger.warning("Memory API rejected threat content on %s: %s", target, threat)
         return 400, {"error": threat, "code": "memory_content_blocked"}
-    store = load_on_disk_store()
-    if not store.target_enabled(target):
-        return 403, {"error": f"Memory target '{target}' is disabled.", "code": "memory_target_disabled"}
-    result = store.add(target, cleaned)
-    if not result.get("success"):
-        msg = str(result.get("error") or "Failed to add memory entry.")
-        status = 409 if "exceed" in msg.lower() or "budget" in msg.lower() else 400
-        return status, {"error": msg, "code": "memory_add_rejected"}
-    entry_id = memory_entry_id(cleaned)
-    pins = _load_pins()
-    if pin:
-        pins.setdefault(target, [])
-        if entry_id not in pins[target]:
-            pins[target].append(entry_id)
-        _save_pins(pins)
-    snapshot = _build_memory_snapshot(store, pins)
-    snapshot["target"] = target
-    snapshot["entry"] = {"id": entry_id, "text": cleaned, "pinned": entry_id in set(pins.get(target) or ())}
-    return 201, snapshot
+    with _memory_lock():
+        store = load_on_disk_store()
+        if not store.target_enabled(target):
+            return 403, {"error": f"Memory target '{target}' is disabled.", "code": "memory_target_disabled"}
+        result = store.add(target, cleaned)
+        if not result.get("success"):
+            msg = str(result.get("error") or "Failed to add memory entry.")
+            status = 409 if "exceed" in msg.lower() or "budget" in msg.lower() else 400
+            return status, {"error": msg, "code": "memory_add_rejected"}
+        entry_id = memory_entry_id(cleaned)
+        pins = _load_pins()
+        if pin:
+            pins.setdefault(target, [])
+            if entry_id not in pins[target]:
+                pins[target].append(entry_id)
+            _save_pins(pins)
+        snapshot = _build_memory_snapshot(store, pins)
+        snapshot["target"] = target
+        snapshot["entry"] = {"id": entry_id, "text": cleaned, "pinned": entry_id in set(pins.get(target) or ())}
+        return 201, snapshot
 
 
 def _sync_patch_memory(
@@ -170,70 +185,72 @@ def _sync_patch_memory(
     new_text: Optional[str],
     pinned: Optional[bool],
 ) -> tuple[int, dict[str, Any]]:
-    store = load_on_disk_store()
-    if not store.target_enabled(target):
-        return 403, {"error": f"Memory target '{target}' is disabled.", "code": "memory_target_disabled"}
-    cleaned_new: Optional[str] = None
-    if new_text is not None:
-        cleaned_new = new_text.strip()
-        if not cleaned_new:
-            return 400, {"error": "Replacement text cannot be empty.", "code": "empty_memory_content"}
-        if threat := _scan_memory_content(cleaned_new):
-            logger.warning("Memory API PATCH rejected threat content on %s: %s", target, threat)
-            return 400, {"error": threat, "code": "memory_content_blocked"}
+    with _memory_lock():
+        store = load_on_disk_store()
+        if not store.target_enabled(target):
+            return 403, {"error": f"Memory target '{target}' is disabled.", "code": "memory_target_disabled"}
+        cleaned_new: Optional[str] = None
+        if new_text is not None:
+            cleaned_new = new_text.strip()
+            if not cleaned_new:
+                return 400, {"error": "Replacement text cannot be empty.", "code": "empty_memory_content"}
+            if threat := _scan_memory_content(cleaned_new):
+                logger.warning("Memory API PATCH rejected threat content on %s: %s", target, threat)
+                return 400, {"error": threat, "code": "memory_content_blocked"}
 
-    matched_entry = next((e for e in store._entries_for(target) if memory_entry_id(e) == entry_id), None)
-    if matched_entry is None:
-        return 409, {"error": f"Memory entry '{entry_id}' not found or changed.", "code": "stale_entry"}
+        matched_entry = next((e for e in store._entries_for(target) if memory_entry_id(e) == entry_id), None)
+        if matched_entry is None:
+            return 409, {"error": f"Memory entry '{entry_id}' not found or changed.", "code": "stale_entry"}
 
-    final_text = matched_entry
-    if cleaned_new is not None and cleaned_new != matched_entry:
-        result = store.replace(target, matched_entry, cleaned_new, matched_entry=matched_entry)
-        if not result.get("success"):
-            msg = str(result.get("error") or "Failed to update memory entry.")
-            status = 409 if ("changed" in msg.lower() or "exceed" in msg.lower() or "limit" in msg.lower()) else 400
-            return status, {"error": msg, "code": "memory_update_rejected"}
-        final_text = cleaned_new
+        final_text = matched_entry
+        if cleaned_new is not None and cleaned_new != matched_entry:
+            result = store.replace(target, matched_entry, cleaned_new, matched_entry=matched_entry)
+            if not result.get("success"):
+                msg = str(result.get("error") or "Failed to update memory entry.")
+                status = 409 if ("changed" in msg.lower() or "exceed" in msg.lower() or "limit" in msg.lower()) else 400
+                return status, {"error": msg, "code": "memory_update_rejected"}
+            final_text = cleaned_new
 
-    new_id = memory_entry_id(final_text)
-    pins = _load_pins()
-    target_pins = set(pins.get(target) or ())
-    was_pinned = entry_id in target_pins
-    target_pins.discard(entry_id)
-    final_pinned = was_pinned if pinned is None else pinned
-    if final_pinned:
-        target_pins.add(new_id)
-    pins[target] = sorted(target_pins)
-    _save_pins(pins)
-    snapshot = _build_memory_snapshot(store, pins)
-    snapshot["target"] = target
-    snapshot["entry"] = {"id": new_id, "text": final_text, "pinned": final_pinned}
-    return 200, snapshot
+        new_id = memory_entry_id(final_text)
+        pins = _load_pins()
+        target_pins = set(pins.get(target) or ())
+        was_pinned = entry_id in target_pins
+        target_pins.discard(entry_id)
+        final_pinned = was_pinned if pinned is None else pinned
+        if final_pinned:
+            target_pins.add(new_id)
+        pins[target] = sorted(target_pins)
+        _save_pins(pins)
+        snapshot = _build_memory_snapshot(store, pins)
+        snapshot["target"] = target
+        snapshot["entry"] = {"id": new_id, "text": final_text, "pinned": final_pinned}
+        return 200, snapshot
 
 
 def _sync_delete_memory(target: str, entry_id: str) -> tuple[int, dict[str, Any]]:
-    store = load_on_disk_store()
-    if not store.target_enabled(target):
-        return 403, {"error": f"Memory target '{target}' is disabled.", "code": "memory_target_disabled"}
-    matched_entry = next((e for e in store._entries_for(target) if memory_entry_id(e) == entry_id), None)
-    if matched_entry is None:
-        return 404, {"error": f"Memory entry '{entry_id}' not found.", "code": "memory_entry_not_found"}
-    result = store.remove(target, matched_entry, matched_entry=matched_entry)
-    if not result.get("success"):
-        msg = str(result.get("error") or "Failed to delete memory entry.")
-        status = 409 if "changed" in msg.lower() else 400
-        return status, {"error": msg, "code": "memory_delete_rejected"}
-    pins = _load_pins()
-    target_pins = set(pins.get(target) or ())
-    if entry_id in target_pins:
-        target_pins.discard(entry_id)
-        pins[target] = sorted(target_pins)
-        _save_pins(pins)
-    snapshot = _build_memory_snapshot(store, pins)
-    snapshot["target"] = target
-    snapshot["entry_id"] = entry_id
-    snapshot["deleted"] = True
-    return 200, snapshot
+    with _memory_lock():
+        store = load_on_disk_store()
+        if not store.target_enabled(target):
+            return 403, {"error": f"Memory target '{target}' is disabled.", "code": "memory_target_disabled"}
+        matched_entry = next((e for e in store._entries_for(target) if memory_entry_id(e) == entry_id), None)
+        if matched_entry is None:
+            return 404, {"error": f"Memory entry '{entry_id}' not found.", "code": "memory_entry_not_found"}
+        result = store.remove(target, matched_entry, matched_entry=matched_entry)
+        if not result.get("success"):
+            msg = str(result.get("error") or "Failed to delete memory entry.")
+            status = 409 if "changed" in msg.lower() else 400
+            return status, {"error": msg, "code": "memory_delete_rejected"}
+        pins = _load_pins()
+        target_pins = set(pins.get(target) or ())
+        if entry_id in target_pins:
+            target_pins.discard(entry_id)
+            pins[target] = sorted(target_pins)
+            _save_pins(pins)
+        snapshot = _build_memory_snapshot(store, pins)
+        snapshot["target"] = target
+        snapshot["entry_id"] = entry_id
+        snapshot["deleted"] = True
+        return 200, snapshot
 
 
 def _parse_bool_flag(body: dict[str, Any], *keys: str) -> tuple[Optional[bool], Optional[str]]:

@@ -1273,6 +1273,22 @@ wrapped. Takes effect on the next gateway start. The guard is process-wide, so
 under multiplexing only the launching profile's `config.yaml` sets it; a
 secondary profile's value is ignored.
 
+## API Server Concurrency & Auth Limits
+
+When the OpenAI-compatible API server (`gateway.api_server`) serves multiple concurrent discussions or multiplexed profiles on one host, you can tune concurrency fairness and per-(IP, profile) authentication rate limiting:
+
+```yaml
+gateway:
+  api_server:
+    max_concurrent_runs: 32               # global concurrent run cap across all profiles (0 = unlimited)
+    max_concurrent_runs_per_profile: 12   # per-profile fair-share cap so one user cannot starve others (0 = unlimited)
+    auth_failure_max_attempts: 20         # failed Bearer auth attempts per (client IP, profile) before HTTP 429 (0 = disabled)
+    auth_failure_window_seconds: 60       # sliding window in seconds for failed auth throttling
+```
+
+- `gateway.api_server.max_concurrent_runs` and `gateway.api_server.max_concurrent_runs_per_profile` return HTTP `429` with `Retry-After` and `Cache-Control: no-store` when reached.
+- `gateway.api_server.auth_failure_max_attempts` and `gateway.api_server.auth_failure_window_seconds` isolate lockouts per `(client IP, profile)` and clear immediately on a valid Bearer key before lockout.
+
 ## Gateway Restart Drain
 
 When the gateway stops or restarts (SIGTERM, `hermes update`, `hermes gateway stop`, or the final
