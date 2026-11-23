@@ -48,15 +48,15 @@ _CAPABILITY_GUIDANCE: dict[str, str] = {
         '"accent":"teal|green|blue|amber|coral","items":[{"label":"...","value":"..."}],"home_screen_safe":true}]) '
         'or op="upsert_surface" (kpi_grid|sparkline|bar_chart|table|form|toggle_group|chip_filter|slider|markdown_card) / "set_theme_override" / interactive_cards (IDs auto-slug from title; never put secrets on widgets)'
     ),
-    "app_navigate": 'app_navigate -> request_device_action(action_type="app_navigate", reason="...", params={"target":"discussions|atelier|cerveau|activite|thread|memory|notes|skills|doctor|templates|presence|settings"})',
-    "app_customize": 'app_customize -> request_device_action(action_type="app_customize", reason="...", params={"operation":"apply|undo|reset","accent":"...","theme":"system|light|dark","density":"compact|comfortable|spacious"})',
-    "app_read_state": 'app_read_state -> request_device_action(action_type="app_read_state", reason="...", params={"include_customization":true,"include_presence":true})',
+    "app_navigate": 'app_navigate -> request_device_action(action_type="app_navigate", reason="...", params={"target":"discussions|atelier|cerveau|activite|thread|command_palette|template|memory|notes|skills|doctor|presence|profile_defaults"})',
+    "app_customize": 'app_customize -> request_device_action(action_type="app_customize", reason="...", params={"operation":"apply|undo|reset","accent":"teal","theme":"system|light|dark","density":"compact|comfortable|spacious"})',
+    "app_read_state": 'app_read_state -> request_device_action(action_type="app_read_state", reason="...", params={"include":["screen","active_runs","read_without_reply","location","customization"]})',
     "app_create_template": 'app_create_template -> request_device_action(action_type="app_create_template", reason="...", params={"title":"...","draft_prompt":"..."})',
     "android_set_timer": 'android_set_timer -> request_device_action(action_type="android_set_timer", reason="...", params={"duration_seconds":600,"label":"..."})',
     "android_share_sheet": 'android_share_sheet -> request_device_action(action_type="android_share_sheet", reason="...", params={"text":"...","subject":"..."})',
-    "android_open_app": 'android_open_app -> request_device_action(action_type="android_open_app", reason="...", params={"deep_link":"https://..."})',
-    "android_sync_shortcuts": 'android_sync_shortcuts -> request_device_action(action_type="android_sync_shortcuts", reason="...", params={"shortcuts":[{"id":"...","label":"...","draft":"..."}]})',
-    "android_proactive_nudge": 'android_proactive_nudge -> request_device_action(action_type="android_proactive_nudge", reason="...", params={"operation":"configure|send_now|pause","title":"...","body":"..."})',
+    "android_open_app": 'android_open_app -> request_device_action(action_type="android_open_app", reason="...", params={"deep_link":"https://example.org"})',
+    "android_sync_shortcuts": 'android_sync_shortcuts -> request_device_action(action_type="android_sync_shortcuts", reason="...", params={"shortcuts":[{"id":"quick_note","label":"...","target":"notes"}]})',
+    "android_proactive_nudge": 'android_proactive_nudge -> request_device_action(action_type="android_proactive_nudge", reason="...", params={"title":"...","body":"...","category":"reminder|follow_up|briefing|suggestion","respect_quiet_hours":true,"min_interval_minutes":60})',
 }
 
 _HEADER = (

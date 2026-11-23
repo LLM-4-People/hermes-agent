@@ -15,7 +15,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
-from agent.mobile_companion_prompt import combine_run_instructions, normalize_user_language
+from agent.mobile_companion_prompt import _CAPABILITY_GUIDANCE, combine_run_instructions, normalize_user_language
 from gateway.platforms import api_server_runs as _api_runs
 from gateway.platforms.api_server_ui import (
     MOBILE_FEATURE_FLAGS,
@@ -31,7 +31,7 @@ from persistence_assembly import store_location
 from scripts.check_fork_preservation import check_preservation
 from tests.fixtures.storage_seed import seed_session
 from tools.mobile_app_presence import ALLOWED_SCREENS, sanitize_app_presence
-from tools.mobile_device_bridge import DEEP_ANDROID_ACTIONS
+from tools.mobile_device_bridge import DEEP_ANDROID_ACTIONS, validate_device_action_params
 
 
 def test_allowed_screens_include_android_workspace_routes_and_prompt_wiring():
@@ -69,6 +69,48 @@ def test_allowed_screens_include_android_workspace_routes_and_prompt_wiring():
     # X-Hermes-Lang fallback works cleanly when body user_language is omitted.
     lang, err = normalize_user_language(None, accept_language="en-US", x_hermes_lang="fr-CA")
     assert err is None and lang == "fr"
+
+
+def test_every_deep_action_guidance_example_validates_against_device_bridge():
+    """Every params={...} example in _CAPABILITY_GUIDANCE for DEEP_ANDROID_ACTIONS must pass fail-closed validation."""
+    import json
+
+    def _materialize(value):
+        if isinstance(value, dict):
+            return {k: _materialize(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_materialize(v) for v in value]
+        if isinstance(value, str):
+            if value == "...":
+                return "Sample value"
+            if "|" in value:
+                return value.split("|", 1)[0]
+        return value
+
+    for action in sorted(DEEP_ANDROID_ACTIONS):
+        line = _CAPABILITY_GUIDANCE[action]
+        marker = "params="
+        assert marker in line, f"missing params example in {action}"
+        raw_json = line.split(marker, 1)[1].rsplit(")", 1)[0]
+        parsed = json.loads(raw_json)
+        # Validate base materialized example
+        sample = _materialize(parsed)
+        clean, err = validate_device_action_params(action, sample)
+        assert err is None, f"{action} example rejected: {err}"
+        assert clean is not None
+        # Validate every pipe-enumerated enum choice listed in the guidance string
+        for key, val in parsed.items():
+            if isinstance(val, str) and "|" in val:
+                for choice in val.split("|"):
+                    variant = dict(sample)
+                    variant[key] = choice
+                    if action == "app_navigate" and choice == "thread":
+                        variant["session_id"] = "sess_1"
+                    elif action == "app_navigate" and choice == "template":
+                        variant["template_id"] = "tpl_1"
+                    v_clean, v_err = validate_device_action_params(action, variant)
+                    assert v_err is None, f"{action}.{key}={choice!r} rejected: {v_err}"
+                    assert v_clean is not None
 
 
 def test_mobile_feature_flags_advertise_all_phase2_capabilities():
