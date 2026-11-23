@@ -120,8 +120,15 @@ class GatewayRestartNoticeMixin:
             for field in ("user_id", "scope_id"):
                 if data.get(field):
                     metadata[field] = str(data[field])
+        marker_profile = self._marker_profile(data)
+        profile_home = (getattr(self, "_served_profile_homes", None) or {}).get(marker_profile) if marker_profile else None
+        if profile_home is not None:
+            from agent.i18n import _resolve_language
+            restarted_msg = t("gateway.startup.restarted", lang=_resolve_language(str(profile_home)))
+        else:
+            restarted_msg = t("gateway.startup.restarted")
         result = await transport.send(
-            platform, str(chat_id), t("gateway.startup.restarted"),
+            platform, str(chat_id), restarted_msg,
             metadata=_non_conversational_metadata(metadata, platform=platform),
         )
         # adapter.send() catches provider errors (e.g. "Chat not found") and returns

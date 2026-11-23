@@ -201,15 +201,21 @@ def surface_catalog(lang: str, surface: str = i18n_layers.CORE_SURFACE) -> dict[
 
 @lru_cache(maxsize=8)
 def _config_language_cached(hermes_home: str) -> str | None:
-    """``display.language`` from config.yaml, read once per profile home (``t()`` is a hot path).
-    Keyed by home so a multiplexed gateway serving several profiles doesn't freeze the first
-    profile's language for every other profile."""
+    """Explicit ``display.language`` from the profile's user config layer (``None`` when unset).
+    Reads the profile's own user doc through ``config_backend`` so ``DEFAULT_CONFIG`` never
+    shadows remembered chat languages and multiplexed startup notices stay profile-isolated."""
     try:
-        from hermes_cli.config import load_config_readonly
-        lang = (load_config_readonly().get("display") or {}).get("language")
+        from hermes_cli.config_backend import get_config_backend
+        data = get_config_backend().read_user_doc_readonly(Path(hermes_home))
+        if not isinstance(data, dict):
+            return None
+        display = data.get("display")
+        lang = display.get("language") if isinstance(display, dict) else None
         return _normalize_lang(lang, hermes_home) if lang else None
+    except FileNotFoundError:
+        return None
     except Exception as exc:
-        logger.debug("Could not read display.language from config: %s", exc)
+        logger.debug("Could not read display.language from config for %s: %s", hermes_home, exc)
         return None
 
 
@@ -227,13 +233,20 @@ def reset_language_cache() -> None:
         _catalog_cache.clear()
         _supported_cache.clear()
     i18n_layers.clear_cache()
-
-
-def _resolve_language(home: str) -> str:
-    scoped: str | None = None
     try:
-        from gateway.i18n import active_scoped_lang
+        from gateway.i18n import clear_remembered_user_lang_cache
+        clear_remembered_user_lang_cache()
+    except ImportError:
+        pass
+
+
+def _resolve_language(home: str, *, include_default: bool = True) -> str | None:
+    scoped: str | None = None
+    read_remembered = None
+    try:
+        from gateway.i18n import active_scoped_lang, read_remembered_user_lang
         scoped = active_scoped_lang()
+        read_remembered = read_remembered_user_lang
     except ImportError:
         scoped = None
     if scoped:
@@ -243,14 +256,23 @@ def _resolve_language(home: str) -> str:
         env_lang = get_secret("HERMES_LANGUAGE")
     except UnscopedSecretError:
         env_lang = os.environ.get("HERMES_LANGUAGE")  # unscoped default-profile path: environ IS its own value
-    return _normalize_lang(env_lang, home) if env_lang else _config_language_cached(home) or DEFAULT_LANGUAGE
+    if env_lang:
+        return _normalize_lang(env_lang, home)
+    configured = _config_language_cached(home)
+    if configured:
+        return configured
+    if read_remembered is not None:
+        remembered = read_remembered(home)
+        if remembered:
+            return _normalize_lang(remembered, home)
+    return DEFAULT_LANGUAGE if include_default else None
 
 
 def get_language() -> str:
     """Resolve the active language using env > config > default order. ``HERMES_LANGUAGE`` is a
     per-profile ``.env`` value, so it is read through the secret scope: under multiplexing a raw
     environ read would impose the default profile's language on every other profile."""
-    return _resolve_language(_current_home())
+    return _resolve_language(_current_home()) or DEFAULT_LANGUAGE
 
 
 def t(key: str, lang: str | None = None, **format_kwargs: Any) -> str:

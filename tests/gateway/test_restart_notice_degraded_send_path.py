@@ -20,8 +20,8 @@ from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from plugins.platforms.telegram import telegram_send_path_recovery as recovery
 from plugins.platforms.telegram.adapter import TelegramAdapter
 
-RESTARTED = "Gateway restarted successfully"
-ONLINE = "Gateway online"
+RESTARTED = "Hermes restarted"
+ONLINE = "Hermes is online"
 
 
 @pytest.fixture

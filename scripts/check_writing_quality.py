@@ -460,6 +460,172 @@ def _check_companion_prompt_and_doctor(root: Path) -> list[str]:
     return violations
 
 
+_DECORATIVE_SLOP_EMOJI_RE = re.compile(r"[♻✨🚀🎉🔥⌛✏]")
+
+_AUDITED_LOCALE_SUBSECTIONS: frozenset[str] = frozenset({
+    "startup",
+    "shutdown",
+    "restart",
+    "reset",
+    "cron_store",
+    "bundles",
+    "approvals",
+    "platform",
+    "session",
+    "progress",
+    "busy",
+    "reload_mcp",
+})
+
+_NO_EMDASH_LOCALE_KEYS: frozenset[str] = frozenset({
+    "gateway.startup.online",
+    "gateway.startup.restarted",
+    "gateway.startup.db_unavailable",
+    "gateway.shutdown.notice_shutdown",
+    "gateway.shutdown.notice_restart",
+    "gateway.restart.in_progress",
+    "gateway.restart.restarting",
+    "gateway.busy.drain_queued",
+    "gateway.busy.drain_rejected",
+    "gateway.busy.drain_rejected_new_work",
+    "gateway.session.auto_reset_context_exhausted",
+    "gateway.progress.timeout_header",
+})
+
+_FR_ENGLISH_LEAK_RE = re.compile(
+    r"\b(?:gateway\s+en\s+ligne|gateway\s+redémarré|le\s+gateway|du\s+gateway|ce\s+gateway|endpoint\s*:)\b",
+    re.IGNORECASE,
+)
+
+_GATEWAY_RUNTIME_TARGETS: tuple[str, ...] = (
+    "gateway/delivery_ledger.py",
+    "persistence/authority/coordination.py",
+    "gateway/session_stall.py",
+    "gateway/session_ingress.py",
+    "gateway/relay/adapter.py",
+    "gateway/relay/prompt_resolvers.py",
+)
+
+_YAML_KEY_RE = re.compile(r"^( +)([A-Za-z0-9_]+):(?:\s*(.*))?$")
+
+
+def _unquote_yaml_scalar(raw: str) -> str:
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+        val = val[1:-1]
+    return val.replace('\\"', '"').replace("\\n", "\n")
+
+
+def _parse_locale_gateway_entries(path: Path) -> list[tuple[int, str, str]]:
+    """Pure-stdlib extractor for ``gateway.<subsection>.<key>`` entries from locales YAML."""
+    entries: list[tuple[int, str, str]] = []
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    in_gateway = False
+    section: str | None = None
+    block_key: str | None = None
+    block_lineno = 0
+    block_indent = 0
+    block_lines: list[str] = []
+
+    def _flush_block() -> None:
+        nonlocal block_key, block_lines
+        if block_key is not None:
+            entries.append((block_lineno, block_key, "\n".join(block_lines).strip()))
+            block_key = None
+            block_lines = []
+
+    for lineno, line in enumerate(lines, start=1):
+        if not in_gateway:
+            if line.startswith("gateway:"):
+                in_gateway = True
+            continue
+        if line and not line[0].isspace() and not line.startswith("#"):
+            _flush_block()
+            break
+        if block_key is not None:
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip(" "))
+            if not stripped or indent >= block_indent:
+                block_lines.append(stripped)
+                continue
+            _flush_block()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _YAML_KEY_RE.match(line)
+        if not match:
+            continue
+        indent = len(match.group(1))
+        key_name = match.group(2)
+        rest = (match.group(3) or "").strip()
+        if indent == 2:
+            section = key_name if not rest else None
+            continue
+        if indent == 4 and section in _AUDITED_LOCALE_SUBSECTIONS:
+            full_key = f"gateway.{section}.{key_name}"
+            if rest in ("|", "|-", "|2-", ">", ">-"):
+                block_key = full_key
+                block_lineno = lineno
+                block_indent = indent + 2
+                block_lines = []
+            elif rest:
+                entries.append((lineno, full_key, _unquote_yaml_scalar(rest)))
+    _flush_block()
+    return entries
+
+
+def _check_gateway_locales(root: Path) -> list[str]:
+    """Scan locales/{en,fr}.yaml gateway notices for decorative emojis, em-dashes, slop & FR leaks."""
+    violations: list[str] = []
+    for lang in ("en", "fr"):
+        rel = f"locales/{lang}.yaml"
+        path = root / rel
+        if not path.is_file():
+            continue
+        for lineno, key, value in _parse_locale_gateway_entries(path):
+            cleaned = strip_markdown_code(value)
+            if _DECORATIVE_SLOP_EMOJI_RE.search(cleaned):
+                violations.append(f"{rel}:{lineno} ({key}): decorative AI-slop emoji -> {cleaned[:90]!r}")
+            if key in _NO_EMDASH_LOCALE_KEYS and "—" in cleaned:
+                violations.append(f"{rel}:{lineno} ({key}): em-dash in gateway status notice -> {cleaned[:90]!r}")
+            hits = scan_prose_for_slop(cleaned, lang=lang)
+            if hits:
+                violations.append(f"{rel}:{lineno} ({key}): banned slop {hits}")
+            if lang == "fr" and _FR_ENGLISH_LEAK_RE.search(cleaned):
+                violations.append(f"{rel}:{lineno} ({key}): English leak in French locale -> {cleaned[:90]!r}")
+            if key in ("gateway.bundles.header", "gateway.bundles.header_plain", "gateway.startup.online", "gateway.startup.restarted"):
+                tc = find_title_case_violations(cleaned)
+                if tc:
+                    violations.append(f"{rel}:{lineno} ({key}): title case {tc} -> {cleaned[:90]!r}")
+    return violations
+
+
+def _check_gateway_runtime_strings(root: Path) -> list[str]:
+    """Pure-stdlib AST scan of gateway delivery/stall/ingress/relay user-facing runtime strings."""
+    violations: list[str] = []
+    for rel in _GATEWAY_RUNTIME_TARGETS:
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        except SyntaxError as exc:
+            violations.append(f"{rel}: syntax error {exc}")
+            continue
+        for stmt in tree.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            names = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+            if not any(n.isupper() or n.startswith("_EXEC_APPROVAL_LABELS") or n.startswith("_SLASH_CONFIRM_LABELS") for n in names):
+                continue
+            for lineno, raw in _iter_static_strings(stmt.value):
+                if _DECORATIVE_SLOP_EMOJI_RE.search(raw):
+                    violations.append(f"{rel}:{lineno}: decorative AI-slop emoji in constant -> {raw[:90]!r}")
+                if "—" in raw:
+                    violations.append(f"{rel}:{lineno}: em-dash in gateway runtime notice -> {raw[:90]!r}")
+    return violations
+
+
 def run_all_checks(root: Path = ROOT) -> list[str]:
     violations: list[str] = []
     violations.extend(_check_catalog())
@@ -467,6 +633,8 @@ def run_all_checks(root: Path = ROOT) -> list[str]:
     violations.extend(_check_docs(root))
     violations.extend(_check_mobile_tools(root))
     violations.extend(_check_companion_prompt_and_doctor(root))
+    violations.extend(_check_gateway_locales(root))
+    violations.extend(_check_gateway_runtime_strings(root))
     return violations
 
 
