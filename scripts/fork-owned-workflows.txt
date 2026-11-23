@@ -1,6 +1,8 @@
+auto-release.yml
 codeql.yml
 dependency-review.yml
 docker-publish.yml
 downstream-ci.yml
 pii-guard.yml
+pr-labeler.yml
 sync-upstream.yml

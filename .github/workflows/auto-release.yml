@@ -1,0 +1,171 @@
+name: Automated SemVer Release
+
+# Fork-owned SemVer tag & GitHub Release automation.
+# Triggers on merged PRs to `main` carrying one of `release: major`, `release: minor`, or
+# `release: patch` (respecting `skip-release` and failing closed on conflicting release labels),
+# or via manual `workflow_dispatch` with a bump level or explicit `vMAJOR.MINOR.PATCH` tag.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'SemVer bump level (ignored if explicit tag is set)'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      tag:
+        description: 'Optional explicit SemVer tag (vMAJOR.MINOR.PATCH)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and publish SemVer release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: write
+    steps:
+      - name: Checkout main with tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Resolve next SemVer tag
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          INPUT_BUMP: ${{ inputs.bump }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+          BUMP_LABELS = {
+              "release: major": "major",
+              "release: minor": "minor",
+              "release: patch": "patch",
+          }
+
+          event = os.environ["EVENT_NAME"]
+          repo = os.environ["REPO"]
+          sha = os.environ["COMMIT_SHA"]
+          out_path = os.environ["GITHUB_OUTPUT"]
+
+          tags_raw = subprocess.check_output(["git", "tag", "--list", "v*"], text=True)
+          parsed_tags = []
+          for line in tags_raw.splitlines():
+              m = SEMVER.match(line.strip())
+              if m:
+                  parsed_tags.append((int(m.group(1)), int(m.group(2)), int(m.group(3)), line.strip()))
+          parsed_tags.sort()
+          latest = parsed_tags[-1] if parsed_tags else None
+          existing = {t[3] for t in parsed_tags}
+
+          def write_out(should_release, tag=""):
+              with open(out_path, "a", encoding="utf-8") as fh:
+                  fh.write(f"should_release={'true' if should_release else 'false'}\n")
+                  fh.write(f"tag={tag}\n")
+
+          bump = None
+          explicit_tag = os.environ.get("INPUT_TAG", "").strip()
+          if event == "workflow_dispatch":
+              if explicit_tag:
+                  if not SEMVER.match(explicit_tag):
+                      print(f"::error::Invalid SemVer tag {explicit_tag!r}; expected vMAJOR.MINOR.PATCH", file=sys.stderr)
+                      sys.exit(1)
+                  if explicit_tag in existing:
+                      print(f"::error::Tag {explicit_tag} already exists", file=sys.stderr)
+                      sys.exit(1)
+                  write_out(True, explicit_tag)
+                  sys.exit(0)
+              bump = os.environ.get("INPUT_BUMP", "patch").strip() or "patch"
+          else:
+              pulls_raw = subprocess.check_output(
+                  ["gh", "api", f"repos/{repo}/commits/{sha}/pulls"], text=True
+              )
+              pulls = json.loads(pulls_raw)
+              labels = {
+                  str(lbl.get("name", "")).strip()
+                  for pr in pulls
+                  for lbl in (pr.get("labels") or [])
+              }
+              if "skip-release" in labels:
+                  print("skip-release label present; skipping release.")
+                  write_out(False)
+                  sys.exit(0)
+              matched = [BUMP_LABELS[lbl] for lbl in BUMP_LABELS if lbl in labels]
+              if len(matched) > 1:
+                  print(f"::error::Conflicting release labels found on PR: {sorted(matched)}", file=sys.stderr)
+                  sys.exit(1)
+              if not matched:
+                  print("No release label on merged PR; skipping release.")
+                  write_out(False)
+                  sys.exit(0)
+              bump = matched[0]
+
+          if latest is None:
+              major, minor, patch = (1, 0, 0) if bump == "major" else ((0, 1, 0) if bump == "minor" else (0, 0, 1))
+          else:
+              major, minor, patch = latest[0], latest[1], latest[2]
+              if bump == "major":
+                  major, minor, patch = major + 1, 0, 0
+              elif bump == "minor":
+                  minor, patch = minor + 1, 0
+              else:
+                  patch += 1
+
+          next_tag = f"v{major}.{minor}.{patch}"
+          if next_tag in existing:
+              print(f"::error::Computed tag {next_tag} already exists", file=sys.stderr)
+              sys.exit(1)
+          print(f"Resolved release tag: {next_tag}")
+          write_out(True, next_tag)
+          PY
+
+      - name: Create annotated tag, GitHub Release, and trigger container build
+        if: steps.plan.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$COMMIT_SHA" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" \
+            --title "Hermes Agent $TAG" \
+            --generate-notes \
+            --verify-tag
+          # Trigger docker-publish explicitly because GITHUB_TOKEN tag pushes do not fire push workflows.
+          gh workflow run docker-publish.yml --ref "$TAG"

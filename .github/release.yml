@@ -1,0 +1,35 @@
+changelog:
+  exclude:
+    labels:
+      - skip-release
+  categories:
+    - title: Mobile Bridge & Companion API
+      labels:
+        - "area: mobile-bridge"
+        - "area: api-server"
+    - title: Security & Profile Isolation
+      labels:
+        - "area: security"
+        - "area: concurrency"
+    - title: Bilingual UX & Internationalization
+      labels:
+        - "area: i18n"
+    - title: Docker & Container Releases
+      labels:
+        - "area: docker"
+    - title: CI, Verification & Automations
+      labels:
+        - "area: ci"
+        - "area: tests"
+    - title: Documentation
+      labels:
+        - "area: docs"
+    - title: Upstream Sync
+      labels:
+        - upstream-sync
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other Changes
+      labels:
+        - "*"
