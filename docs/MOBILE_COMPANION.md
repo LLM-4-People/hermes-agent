@@ -170,13 +170,13 @@ Each person connects Hermes Mobile to their own URL and their own key:
 3. Enter:
    - **Server URL:** the exact URL printed by `mobile_doctor.py` (for example `https://hermes.example.com` or `https://hermes.example.com/p/alice`).
    - **API key:** that profile's `API_SERVER_KEY`.
-4. Open **Activity -> Connection doctor** inside the app to confirm green checks for reachability, companion capabilities (`56/56`), toolsets, and language sync.
+4. Open **Activity -> Connection doctor** inside the app to confirm green checks for reachability, companion capabilities (`59/59`), toolsets, and language sync.
 
 ---
 
-## 5. Full companion surface: 56 capabilities and 17 default toolsets
+## 5. Full companion surface: 59 capabilities and 17 default toolsets
 
-`GET /v1/capabilities` advertises **56 active companion capabilities** (54 enabled feature flags plus the 2 session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **71 authenticated endpoints**:
+`GET /v1/capabilities` advertises **59 active companion capabilities** (57 enabled feature flags plus the 2 session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **84 authenticated endpoints**:
 
 | Area | Active `/v1/capabilities` flags |
 |---|---|
@@ -184,7 +184,7 @@ Each person connects Hermes Mobile to their own URL and their own key:
 | **Live runs, steering, and safety** | `run_submission`, `runs_idempotency`, `run_status`, `run_events_sse`, `run_stop`, `run_steer`, `run_approval_response`, `tool_progress_events`, `approval_events`, `reasoning_streaming`, `run_toolset_selection`, `run_tool_exclusions`, `run_scoped_instructions`, `structured_approval_diffs`, `run_progress_hooks`, `run_unknown_resolution`, `run_clarify_response` |
 | **Coding, models, and workspace** | `model_options`, `run_metrics_v2`, `live_coding_stream`, `model_capability_metadata`, `workspace_browser`, `usage_analytics`, `cron_run_history` |
 | **Brain, notes, sharing, and skills** | `memory_write_api`, `skills_api`, `memory_api`, `skill_studio`, `profile_defaults`, `smart_notes`, `note_sharing`, `universal_sharing`, `habit_suggestions` |
-| **Native Android companion and bilingual** | `live_ui_modding`, `mobile_deliveries`, `device_bridge`, `app_presence_v2`, `interactive_cards`, `deep_android_bridge`, `cursor_pagination`, `bilingual_i18n` |
+| **Native Android companion and bilingual** | `live_ui_modding`, `mobile_deliveries`, `device_bridge`, `app_presence_v2`, `interactive_cards`, `deep_android_bridge`, `cursor_pagination`, `bilingual_i18n`, `frictionless_onboarding`, `profile_management`, `admin_settings` |
 
 *(5 admin or legacy flags remain deliberately disabled on the public API surface by default: `admin_config_rw`, `jobs_admin`, `audio_api`, `realtime_voice`, and `cors` unless explicitly configured.)*
 

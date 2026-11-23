@@ -31,6 +31,7 @@ DOWNSTREAM_TESTS=(
   tests/gateway/test_native_producer_owner_matrix.py
   tests/gateway/api_server/test_mobile_live_ui_push_bridge.py
   tests/gateway/api_server/test_multi_user_concurrency_and_isolation.py
+  tests/gateway/test_mobile_pairing_and_profiles.py
   tests/gateway/api_server/test_infinite_chat_pagination.py
   tests/gateway/api_server/test_workspace_profile_analytics.py
   tests/gateway/api_server/test_transcript_admissions.py

@@ -18,11 +18,11 @@
   "social_preview_asset": "docs/assets/social-preview.png",
   "companion_preview_asset": "docs/assets/mobile-companion-preview.png",
   "live_facts": {
-    "active_capability_count": 56,
-    "active_boolean_capability_count": 54,
+    "active_capability_count": 59,
+    "active_boolean_capability_count": 57,
     "active_header_capability_count": 2,
     "inactive_capability_count": 5,
-    "endpoint_count": 71,
+    "endpoint_count": 84,
     "device_capability_count": 29,
     "core_device_capability_count": 20,
     "deep_android_action_count": 9,
@@ -34,7 +34,7 @@
     "max_concurrent_runs_per_profile": 12,
     "fork_workflow_count": 8,
     "downstream_ci_shards": 2,
-    "mobile_tool_module_count": 7,
+    "mobile_tool_module_count": 8,
     "locale_count": 17,
     "supported_user_langs": [
       "en",

@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from aiohttp import web
 
 from hermes_constants import get_hermes_home
+from gateway.platforms import api_server_profiles as _api_mobile_profiles
 from tools.mobile_deliver import MobileDeliveryStore
 from tools.mobile_ui_patch import MobileUiStore, RevisionConflictError
 
@@ -31,6 +32,9 @@ MOBILE_FEATURE_FLAGS: dict[str, Any] = {
     "deep_android_bridge": True,
     "cursor_pagination": True,
     "bilingual_i18n": True,
+    "frictionless_onboarding": True,
+    "profile_management": True,
+    "admin_settings": True,
 }
 
 
@@ -91,6 +95,19 @@ MOBILE_CAPABILITY_ENDPOINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mobile_deliveries", ("GET", "/api/mobile/deliveries", "mobile_deliveries")),
     ("mobile_delivery", ("GET", "/api/mobile/deliveries/{delivery_id}", "mobile_deliveries")),
     ("mobile_delivery_ack", ("POST", "/api/mobile/deliveries/{delivery_id}/ack", "mobile_deliveries")),
+    ("mobile_pairing_create", ("POST", "/api/mobile/pairing/create", "frictionless_onboarding")),
+    ("mobile_pairing_claim", ("POST", "/api/mobile/pairing/claim", "frictionless_onboarding")),
+    ("mobile_pairing_active", ("GET", "/api/mobile/pairing/active", "frictionless_onboarding")),
+    ("mobile_pairing_revoke", ("DELETE", "/api/mobile/pairing/{ticket_id}", "frictionless_onboarding")),
+    ("mobile_onboarding", ("GET", "/api/mobile/onboarding", "frictionless_onboarding")),
+    ("mobile_profiles_list", ("GET", "/api/mobile/profiles", "profile_management")),
+    ("mobile_profiles_create", ("POST", "/api/mobile/profiles", "profile_management")),
+    ("mobile_profile_update", ("PATCH", "/api/mobile/profiles/{slug}", "profile_management")),
+    ("mobile_profile_invite", ("POST", "/api/mobile/profiles/{slug}/invite", "profile_management")),
+    ("mobile_profile_rotate_key", ("POST", "/api/mobile/profiles/{slug}/rotate-key", "profile_management")),
+    ("mobile_profile_delete", ("DELETE", "/api/mobile/profiles/{slug}", "profile_management")),
+    ("mobile_admin_settings_get", ("GET", "/api/mobile/admin/settings", "admin_settings")),
+    ("mobile_admin_settings_patch", ("PATCH", "/api/mobile/admin/settings", "admin_settings")),
 )
 
 
@@ -247,4 +264,5 @@ def _http_routes(adapter) -> list[tuple[str, str, Any]]:
         ("GET", "/api/mobile/deliveries", handle_list_deliveries),
         ("GET", "/api/mobile/deliveries/{delivery_id}", handle_get_delivery),
         ("POST", "/api/mobile/deliveries/{delivery_id}/ack", handle_ack_delivery),
+        *_api_mobile_profiles._http_routes(adapter),
     ]
