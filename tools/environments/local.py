@@ -1284,6 +1284,8 @@ class LocalEnvironment(BaseEnvironment):
             cmd_string = _append_dropped_path_entries(cmd_string, run_env.get("PATH", ""))
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
+        from tools.profile_landlock import wrap_argv_for_profile_sandbox
+        args = wrap_argv_for_profile_sandbox(args)
         # Not spawn_owned: an awaited command needs no spawn-ledger entry; own_process_groups below hands
         # its group to the owner-death supervisor and _wait_for_process releases it.
         try:
@@ -1337,8 +1339,9 @@ class LocalEnvironment(BaseEnvironment):
         its group die with Hermes however Hermes dies (``spawn_owned``), stdin/stdout as byte pipes.
         ``_stop_long_lived`` kills the group and releases it."""
         from hermes_cli.process_identity import spawn_owned
+        from tools.profile_landlock import wrap_argv_for_profile_sandbox
         proc = spawn_owned(  # windows-footgun: ok — argv list, no shell; group kill gated on _IS_WINDOWS
-            list(argv), purpose="long-lived environment process",
+            wrap_argv_for_profile_sandbox(list(argv)), purpose="long-lived environment process",
             env=_make_run_env({**self.env, **(child_env or {})}), cwd=self.cwd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))

@@ -44,6 +44,8 @@ PROTECTED_EXACT_PATHS: frozenset[str] = frozenset({
     "scripts/fork-owned-workflows.txt",
     "tests/scripts/test_docs_fork.py",
     "tests/scripts/test_release_plan.py",
+    "tools/profile_landlock.py",
+    "tests/tools/test_profile_landlock.py",
     "gateway/i18n.py",
     "gateway/mobile_pairing.py",
     "gateway/mobile_profiles.py",

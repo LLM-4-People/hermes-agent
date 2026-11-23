@@ -80,6 +80,7 @@ DOWNSTREAM_TESTS=(
   tests/persistence_sqlite/conversation/test_session_list_index_choice.py
   tests/contracts/conversation/test_api_transcript_input_contract.py
   tests/tools/test_approval_preview.py
+  tests/tools/test_profile_landlock.py
   tests/tools/test_skills_tool_discovery_cache.py
   tests/tools/test_signal_media.py
   tests/scripts/test_mobile_doctor.py
@@ -199,6 +200,7 @@ case "$MODE" in
     HERMES_SKIP_COMPILEALL=1 scripts/run_tests.sh \
       tests/scripts/test_docs_fork.py \
       tests/scripts/test_release_plan.py \
+      tests/tools/test_profile_landlock.py \
       tests/scripts/test_check_fork_preservation.py \
       tests/ci/test_fork_ci_workflows.py \
       tests/ci/test_docs_drift.py \

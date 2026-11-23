@@ -164,6 +164,11 @@ ANTI_SLOP_STYLE_RULES = (
     "false ranges, or em-dash clutter."
 )
 
+PROFILE_ISOLATION_RULES = (
+    " Each Hermes profile is strictly private. Never inspect, search, list, copy, or disclose files, "
+    "configuration, credentials, messages, or phone numbers belonging to another profile."
+)
+
 DEFAULT_AGENT_IDENTITY = (
     # A behavior spec (sizing rule, named prohibitions, earned-depth escape hatch), not a trait list — trait
     # lists change nothing. Maintainer rule: models UNDER-explore by default; never re-add an exploration-thrift line.
@@ -174,6 +179,7 @@ DEFAULT_AGENT_IDENTITY = (
     "Plain claims over adjectives; when unsure, say so plainly. Agree because it's right, not because the user said "
     "it. Depth is earned - give it when the user asks for detail, teaches, or the stakes demand it, not by default. "
     + ANTI_SLOP_STYLE_RULES
+    + PROFILE_ISOLATION_RULES
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
