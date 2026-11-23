@@ -39,6 +39,7 @@ logger = logging.getLogger("gateway.mobile_profiles")
 
 _VALID_LANGUAGES = frozenset({"auto", "en", "fr"})
 _BADGE_PRESETS = frozenset({"forest", "slate", "terracotta", "indigo", "plum"})
+_NON_ADMIN_EXCLUDED_TOOLSETS = frozenset({"terminal", "code_execution"})
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?API_SERVER_KEY\s*=")
@@ -319,6 +320,7 @@ def _write_profile_config_fields(
     *,
     preferred_language: Optional[str] = None,
     default_model: Optional[str] = None,
+    api_server_toolsets: Optional[list[str]] = None,
 ) -> None:
     """Update ``config.yaml`` through the comment-preserving ``hermes_cli.config.save_config`` seam."""
     from agent.runtime_scope import bind_profile_scope
@@ -349,6 +351,11 @@ def _write_profile_config_fields(
             else:
                 model_cfg.pop("default", None)
             cfg["model"] = model_cfg
+        if api_server_toolsets is not None:
+            raw_pts = cfg.get("platform_toolsets")
+            pts_cfg = dict(raw_pts) if isinstance(raw_pts, dict) else {}
+            pts_cfg["api_server"] = sorted(set(api_server_toolsets))
+            cfg["platform_toolsets"] = pts_cfg
         save_config(cfg)
 
 
@@ -472,7 +479,7 @@ def create_managed_profile(
         canon = normalize_profile_name(slug)
         validate_profile_name(canon)
     except ValueError as exc:
-        raise ProfileManagementError(str(exc), status_code=400, code="invalid_profile_slug") from exc
+        raise ProfileManagementError("Invalid profile slug.", status_code=400, code="invalid_profile_slug") from exc
     if canon == "default":
         raise ProfileManagementError("Cannot create reserved 'default' profile.", status_code=400, code="invalid_profile_slug")
 
@@ -503,9 +510,9 @@ def create_managed_profile(
             )
         )
     except FileExistsError as exc:
-        raise ProfileManagementError(f"Profile '{canon}' already exists.", status_code=409, code="profile_exists") from exc
+        raise ProfileManagementError("Profile already exists.", status_code=409, code="profile_exists") from exc
     except ValueError as exc:
-        raise ProfileManagementError(str(exc), status_code=400, code="invalid_profile_slug") from exc
+        raise ProfileManagementError("Invalid profile slug.", status_code=400, code="invalid_profile_slug") from exc
     finally:
         if prev_home is None:
             os.environ.pop("HERMES_HOME", None)
@@ -516,10 +523,16 @@ def create_managed_profile(
     api_key = generate_api_key()
     write_profile_api_key(canon, api_key, root)
     write_profile_meta(profile_dir, display_name=clean_display)
+    default_toolsets: Optional[list[str]] = None
+    if not is_admin:
+        from hermes_cli.tools_config import _get_platform_tools
+
+        default_toolsets = sorted(_get_platform_tools({}, "api_server") - _NON_ADMIN_EXCLUDED_TOOLSETS)
     _write_profile_config_fields(
         profile_dir,
         preferred_language=clean_lang,
         default_model=clean_model or None,
+        api_server_toolsets=default_toolsets,
     )
 
     with _ADMIN_STATE_LOCK:
@@ -563,7 +576,7 @@ def update_managed_profile(
     caller = (caller_slug or "default").strip().lower()
     target = (target_slug or "").strip().lower()
     if not target or target not in _all_existing_slugs(root):
-        raise ProfileManagementError(f"Profile '{target}' not found.", status_code=404, code="profile_not_found")
+        raise ProfileManagementError("Profile not found.", status_code=404, code="profile_not_found")
 
     caller_is_admin = is_admin_profile(caller, root)
     if caller != target and not caller_is_admin:
@@ -579,7 +592,7 @@ def update_managed_profile(
     unknown = sorted(set(updates) - allowed)
     if unknown:
         raise ProfileManagementError(
-            f"Unsupported profile field(s): {', '.join(unknown)}.",
+            "Unsupported profile field.",
             status_code=400,
             code="unsupported_field",
         )
@@ -656,7 +669,7 @@ def rotate_managed_profile_key(
     caller = (caller_slug or "default").strip().lower()
     target = (target_slug or "").strip().lower()
     if not target or target not in _all_existing_slugs(root):
-        raise ProfileManagementError(f"Profile '{target}' not found.", status_code=404, code="profile_not_found")
+        raise ProfileManagementError("Profile not found.", status_code=404, code="profile_not_found")
     if caller != target and not is_admin_profile(caller, root):
         raise ProfileManagementError(
             "You can only rotate your own profile key.",
@@ -719,7 +732,7 @@ def delete_managed_profile(
             code="default_profile_protected",
         )
     if not target or target not in _all_existing_slugs(root):
-        raise ProfileManagementError(f"Profile '{target}' not found.", status_code=404, code="profile_not_found")
+        raise ProfileManagementError("Profile not found.", status_code=404, code="profile_not_found")
     if (confirm_slug or "").strip().lower() != target:
         raise ProfileManagementError(
             "Explicit confirm_slug matching the target profile is required.",
@@ -788,7 +801,7 @@ def update_admin_settings(
     unknown = sorted(set(updates) - set(_DEFAULT_ADMIN_SETTINGS))
     if unknown:
         raise ProfileManagementError(
-            f"Unsupported admin setting(s): {', '.join(unknown)}.",
+            "Unsupported admin setting.",
             status_code=400,
             code="unsupported_setting",
         )

@@ -155,7 +155,7 @@ async def _mint_pairing_for_target(
         )
     summary = await asyncio.to_thread(get_profile_summary, target, root_home=root)
     if summary is None:
-        return _error_no_store(f"Profile '{target}' not found.", code="profile_not_found", status=404)
+        return _error_no_store("Profile not found.", code="profile_not_found", status=404)
     mode = body.get("mode") or ("device" if target == caller else "invite")
     display_name = str(body.get("display_name") or summary.get("display_name") or target)
     ttl = body.get("ttl_seconds", admin_cfg.get("pairing_ttl_seconds"))

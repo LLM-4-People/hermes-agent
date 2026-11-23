@@ -265,6 +265,29 @@ async def test_http_profiles_admin_isolation_last_admin_guard_and_key_rotation(m
         assert alex_data["profile"]["role"] == "member"
         assert alex_data["pairing_ticket"]["mode"] == "invite"
 
+        # Fail-closed default: new non-admin members do NOT get host terminal/code_execution by default.
+        alex_hdr = {"Authorization": f"Bearer {alex_key}"}
+        alex_prof = await (await client.get("/p/alex/api/profile", headers=alex_hdr)).json()
+        assert "terminal" not in alex_prof["enabled_toolsets"]
+        assert "code_execution" not in alex_prof["enabled_toolsets"]
+        assert "web" in alex_prof["enabled_toolsets"]
+
+        # New admin profile keeps full default toolsets (including terminal).
+        create_bob = await client.post(
+            "/api/mobile/profiles",
+            headers=admin_hdr,
+            json={"slug": "bob", "display_name": "Bob", "is_admin": True},
+        )
+        assert create_bob.status == 201
+        bob_key = (await create_bob.json())["api_key"]
+        bob_prof = await (
+            await client.get("/p/bob/api/profile", headers={"Authorization": f"Bearer {bob_key}"})
+        ).json()
+        assert "terminal" in bob_prof["enabled_toolsets"]
+        assert (
+            await client.delete("/api/mobile/profiles/bob", headers=admin_hdr, json={"confirm_slug": "bob"})
+        ).status == 200
+
         # Claim Alex's invite ticket unauthenticated.
         claim_alex = await client.post(
             "/api/mobile/pairing/claim",
@@ -278,7 +301,6 @@ async def test_http_profiles_admin_isolation_last_admin_guard_and_key_rotation(m
         assert alex_claimed["is_admin"] is False
 
         # 3. Cross-profile privilege escalation checks: member 'alex' CANNOT access admin routes or other profiles!
-        alex_hdr = {"Authorization": f"Bearer {alex_key}"}
         # List profiles as alex -> sees ONLY alex (never default!).
         alex_list = await client.get("/p/alex/api/mobile/profiles", headers=alex_hdr)
         assert alex_list.status == 200

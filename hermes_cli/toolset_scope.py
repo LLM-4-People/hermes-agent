@@ -10,6 +10,7 @@ _TOOLSET_PLATFORM_RESTRICTIONS = {
     "mobile_ui": {"api_server"},
     "mobile_deliver": {"api_server", "cron"},
     "mobile_device": {"api_server"},
+    "mobile_profiles": {"api_server"},
 }
 
 

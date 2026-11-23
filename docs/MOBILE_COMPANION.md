@@ -174,7 +174,7 @@ Each person connects Hermes Mobile to their own URL and their own key:
 
 ---
 
-## 5. Full companion surface: 59 capabilities and 17 default toolsets
+## 5. Full companion surface: 59 capabilities and 18 default toolsets
 
 `GET /v1/capabilities` advertises **59 active companion capabilities** (57 enabled feature flags plus the 2 session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **84 authenticated endpoints**:
 
@@ -188,11 +188,11 @@ Each person connects Hermes Mobile to their own URL and their own key:
 
 *(5 admin or legacy flags remain deliberately disabled on the public API surface by default: `admin_config_rw`, `jobs_admin`, `audio_api`, `realtime_voice`, and `cors` unless explicitly configured.)*
 
-### 17 default enabled toolsets (of 28 built-in configurable toolsets in `hermes_cli/tools_config.py`)
+### 18 default enabled toolsets (of 29 built-in configurable toolsets in `hermes_cli/tools_config.py`)
 
 | Category | Enabled by default |
 |---|---|
-| **Mobile companion (3)** | `mobile_ui` (`mobile_ui_patch`), `mobile_deliver` (`mobile_deliver`), `mobile_device` (`request_device_action`) |
+| **Mobile companion (4)** | `mobile_ui` (`mobile_ui_patch`), `mobile_deliver` (`mobile_deliver`), `mobile_device` (`request_device_action`), `mobile_profiles` (`manage_profiles`) |
 | **Web and research (2)** | `web` (`web_search`, `web_extract`), `browser` (`browser_*`) |
 | **Coding and files (3)** | `file` (`read_file`, `write_file`, `patch`, `search_files`), `terminal` (`terminal`, `process_manage`), `code_execution` (`execute_code`) |
 | **Media and creativity (2)** | `vision` (`vision_analyze`), `image_gen` (`image_generate`) |
