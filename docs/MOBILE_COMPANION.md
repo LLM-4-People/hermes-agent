@@ -1,6 +1,14 @@
 # Hermes Mobile companion guide
 
+<p align="center">
+  <img src="assets/social-preview.png" alt="Hermes Agent — Self-hosted companion fork for Android 16" width="100%">
+</p>
+
 This guide walks you through running **`LLM-4-People/hermes-agent`** as the private backend for **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)** — no deep infrastructure or AI jargon required.
+
+<p align="center">
+  <a href="https://llm-4-people.github.io/hermes-mobile/en/walkthrough/"><img src="assets/mobile-companion-preview.png" alt="Hermes Mobile on Android 16: command palette, everyday workflows, connection doctor, and presence controls" width="100%"></a>
+</p>
 
 ---
 
