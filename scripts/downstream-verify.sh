@@ -17,6 +17,7 @@ PYTHON="${HERMES_PYTHON:-python3}"
 # Static guards + lint. All Python-only, so no Node toolchain is needed.
 "$PYTHON" scripts/check --only \
   footguns,detached-spawns,install-root,config-writers,config-readers,ruff
+"$PYTHON" scripts/check_writing_quality.py
 
 # Downstream regression suite: provider routing + footer identity + Signal media and formatting,
 # plus every consumer that resolves route metadata (main client, Anthropic wire, auxiliary, /model,
@@ -65,6 +66,7 @@ scripts/run_tests.sh \
   tests/gateway/api_server/test_skill_studio.py \
   tests/gateway/api_server/test_workspace_profile_analytics.py \
   tests/gateway/api_server/test_notes_and_habits.py \
+  tests/gateway/test_i18n_and_anti_slop.py \
   tests/tools/test_skills_tool_discovery_cache.py \
   tests/gateway/test_session_mutation_compress.py \
   tests/gateway/test_mirror.py \

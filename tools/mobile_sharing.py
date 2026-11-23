@@ -993,10 +993,12 @@ def mobile_share_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps(payload, ensure_ascii=False)
     except ValueError:
         logger.warning("mobile_share tool invalid parameter on action=%s", action, exc_info=True)
-        return json.dumps({"success": False, "error": "Invalid parameter value.", "code": "invalid_parameter"}, ensure_ascii=False)
+        from gateway.i18n import t as _gt
+        return json.dumps({"success": False, "error": _gt("mobile.invalid_parameter"), "code": "invalid_parameter"}, ensure_ascii=False)
     except (OSError, sqlite3.Error):
         logger.warning("mobile_share tool storage failure on action=%s", action, exc_info=True)
-        return json.dumps({"success": False, "error": "Storage operation failed.", "code": "storage_error"}, ensure_ascii=False)
+        from gateway.i18n import t as _gt
+        return json.dumps({"success": False, "error": _gt("mobile.storage_error"), "code": "storage_error"}, ensure_ascii=False)
 
 
 MOBILE_SHARE_SCHEMA: dict[str, Any] = {

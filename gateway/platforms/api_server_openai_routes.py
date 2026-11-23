@@ -17,6 +17,7 @@ from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.i18n import t
+from gateway.i18n import resolve_request_lang, t as _gt, user_lang_scope
 
 try:
     from aiohttp import web
@@ -862,6 +863,23 @@ class OpenAICompatRoutesMixin:
         agent_task.add_done_callback(_done)
         return agent_task, agent_ref
 
+    def _validate_chat_session_id(self, provided_session_id: str) -> Optional[web.Response]:
+        """Validate X-Hermes-Session-Id header for chat completions in the active user language."""
+        from gateway.platforms.api_server import _error_response, _invalid_request
+        if not self._api_key:
+            logger.warning(
+                "Session continuation via X-Hermes-Session-Id rejected: "
+                "no API key configured.  Set API_SERVER_KEY to enable "
+                "session continuity.")
+            return _error_response(_gt("api.session_auth_required"), 403)
+        # Same guard as the native gateway: ids are interpolated into on-disk filenames.
+        from gateway.session import _is_path_unsafe
+        if re.search(r'[\r\n\x00]', provided_session_id) or _is_path_unsafe(provided_session_id):
+            return _invalid_request(_gt("api.invalid_session_id"))
+        if len(provided_session_id) > self._MAX_SESSION_HEADER_LEN:
+            return _invalid_request(_gt("api.session_id_too_long"))
+        return None
+
     async def _handle_chat_completions(self, request: web.Request) -> web.Response:
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
         from gateway.platforms.api_server import (
@@ -872,47 +890,39 @@ class OpenAICompatRoutesMixin:
         limited = self._concurrency_limited_response()
         if limited is not None:
             return limited
-        try:
-            body = await request.json()
-        except Exception:
-            return _error_response("Invalid JSON in request body", 400)
-        from gateway.platforms.api_server import _request_relay_metadata
-        relay_metadata = _request_relay_metadata(body)
-        messages = body.get("messages")
-        if not messages or not isinstance(messages, list):
-            return _invalid_request("Missing or invalid 'messages' field")
-        stream = _coerce_request_bool(body.get("stream"), default=False)
+        with user_lang_scope(resolve_request_lang(request.headers)):
+            try:
+                body = await request.json()
+            except Exception:
+                return _error_response(_gt("api.invalid_json"), 400)
+            from gateway.platforms.api_server import _request_relay_metadata
+            relay_metadata = _request_relay_metadata(body)
+            messages = body.get("messages")
+            if not messages or not isinstance(messages, list):
+                return _invalid_request(_gt("api.missing_messages"))
+            stream = _coerce_request_bool(body.get("stream"), default=False)
 
-        system_prompt, conversation_messages, messages_err = _parse_chat_messages(messages)
-        if messages_err is not None:
-            return messages_err
-        user_message: Any = (conversation_messages[-1].get("content", "") if conversation_messages else "")
-        history = conversation_messages[:-1]
-        if not _content_has_visible_payload(user_message):
-            return _invalid_request("No user message found in messages")
+            system_prompt, conversation_messages, messages_err = _parse_chat_messages(messages)
+            if messages_err is not None:
+                return messages_err
+            user_message: Any = (conversation_messages[-1].get("content", "") if conversation_messages else "")
+            history = conversation_messages[:-1]
+            if not _content_has_visible_payload(user_message):
+                return _invalid_request(_gt("api.no_user_message"))
 
-        # X-Hermes-Session-Key scopes long-term memory per channel; independent of
-        # X-Hermes-Session-Id (the key persists across transcripts, the id rotates on /new).
-        gateway_session_key, key_err = self._parse_session_key_header(request)
-        if key_err is not None:
-            return key_err
-        # X-Hermes-Session-Id continues an existing session (history from state.db, not the body);
-        # requires a configured API key or any client could read history by guessing ids.
-        provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
+            # X-Hermes-Session-Key scopes long-term memory per channel; independent of
+            # X-Hermes-Session-Id (the key persists across transcripts, the id rotates on /new).
+            gateway_session_key, key_err = self._parse_session_key_header(request)
+            if key_err is not None:
+                return key_err
+            # X-Hermes-Session-Id continues an existing session (history from state.db, not the body);
+            # requires a configured API key or any client could read history by guessing ids.
+            provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
+            if provided_session_id:
+                session_err = self._validate_chat_session_id(provided_session_id)
+                if session_err is not None:
+                    return session_err
         if provided_session_id:
-            if not self._api_key:
-                logger.warning(
-                    "Session continuation via X-Hermes-Session-Id rejected: "
-                    "no API key configured.  Set API_SERVER_KEY to enable "
-                    "session continuity.")
-                return _error_response("Session continuation requires API key authentication. "
-                        "Configure API_SERVER_KEY to enable this feature.", 403)
-            # Same guard as the native gateway: ids are interpolated into on-disk filenames.
-            from gateway.session import _is_path_unsafe
-            if re.search(r'[\r\n\x00]', provided_session_id) or _is_path_unsafe(provided_session_id):
-                return _invalid_request("Invalid session ID")
-            if len(provided_session_id) > self._MAX_SESSION_HEADER_LEN:
-                return _invalid_request("Session ID too long")
             session_id = provided_session_id
             try:
                 store = self._store_beside(await self._ensure_store_async())

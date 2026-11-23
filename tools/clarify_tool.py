@@ -119,7 +119,8 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
     if error:
         return tool_error(error)
     if callback is None:
-        return tool_error(_UNAVAILABLE)
+        from gateway.i18n import t as _gt
+        return tool_error(_gt("clarify.unavailable"))
     from agent.redact import redact_approval_display
     from tools.human_input_hooks import human_input_request
 
@@ -148,7 +149,8 @@ def clarify_tool(questions, callback: Optional[Callable] = None) -> str:
             return _result(normalized, reply, shown)
         except Exception as exc:
             human.outcome = "error"
-            return tool_error(f"Failed to get user input: {exc}")
+            from gateway.i18n import t as _gt
+            return tool_error(_gt("clarify.failed", detail=exc))
 
 
 def check_clarify_requirements() -> bool:

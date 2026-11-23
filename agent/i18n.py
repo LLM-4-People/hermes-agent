@@ -230,6 +230,14 @@ def reset_language_cache() -> None:
 
 
 def _resolve_language(home: str) -> str:
+    scoped: str | None = None
+    try:
+        from gateway.i18n import active_scoped_lang
+        scoped = active_scoped_lang()
+    except ImportError:
+        scoped = None
+    if scoped:
+        return _normalize_lang(scoped, home)
     from agent.secret_scope import UnscopedSecretError, get_secret
     try:
         env_lang = get_secret("HERMES_LANGUAGE")
