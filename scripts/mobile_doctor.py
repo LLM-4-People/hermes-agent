@@ -519,7 +519,7 @@ def format_report_text(report: dict[str, Any]) -> str:
     """Format a secret-free human-readable diagnostic report."""
     badges = {"ok": "[OK]  ", "warn": "[WARN]", "fail": "[FAIL]"}
     lines = [
-        "Hermes Mobile Companion Doctor",
+        "Hermes Mobile companion doctor",
         f"  Target: {report['server_url']} (profile: {report['profile']})",
         "",
     ]

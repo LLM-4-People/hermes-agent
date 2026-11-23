@@ -2,30 +2,30 @@
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
 
-# Hermes Agent — LLM-4-People Companion Fork ☤
+# Hermes Agent — LLM-4-People companion fork ☤
 <p align="center">
-  <a href="docs/MOBILE_COMPANION.md">Mobile Companion Guide</a> |
-  <a href="https://llm-4-people.github.io/hermes-mobile/">Hermes Mobile Android App</a> |
-  <a href="DOWNSTREAM.md">Fork Architecture</a> |
+  <a href="docs/MOBILE_COMPANION.md">Mobile companion guide</a> |
+  <a href="https://llm-4-people.github.io/hermes-mobile/">Hermes Mobile Android app</a> |
+  <a href="DOWNSTREAM.md">Fork architecture</a> |
   <a href="https://hermes-agent.nousresearch.com/">Upstream Hermes</a>
 </p>
 <p align="center">
-  <a href="docs/MOBILE_COMPANION.md"><img src="https://img.shields.io/badge/Hermes_Mobile-Companion_Guide-0F766E?style=for-the-badge" alt="Hermes Mobile Companion Guide"></a>
-  <a href="https://llm-4-people.github.io/hermes-mobile/"><img src="https://img.shields.io/badge/Android_App-Hermes_Mobile-1D4ED8?style=for-the-badge" alt="Hermes Mobile Android App"></a>
-  <a href="https://github.com/LLM-4-People/hermes-agent/pkgs/container/hermes-agent"><img src="https://img.shields.io/badge/GHCR-hermes--agent:edge-0F172A?style=for-the-badge" alt="GHCR Container Image"></a>
+  <a href="docs/MOBILE_COMPANION.md"><img src="https://img.shields.io/badge/Hermes_Mobile-Companion_Guide-0F766E?style=for-the-badge" alt="Hermes Mobile companion guide"></a>
+  <a href="https://llm-4-people.github.io/hermes-mobile/"><img src="https://img.shields.io/badge/Android_App-Hermes_Mobile-1D4ED8?style=for-the-badge" alt="Hermes Mobile Android app"></a>
+  <a href="https://github.com/LLM-4-People/hermes-agent/pkgs/container/hermes-agent"><img src="https://img.shields.io/badge/GHCR-hermes--agent:edge-0F172A?style=for-the-badge" alt="GHCR container image"></a>
   <a href="https://github.com/NousResearch/hermes-agent/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License: MIT"></a>
 </p>
 
-> **LLM-4-People Fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** — built to power the private, native Android companion **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)** while staying automatically synchronized with upstream Hermes.
+> **LLM-4-People fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** — built to power the private, native Android companion **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)** while staying automatically synchronized with upstream Hermes.
 
-### What This Fork Adds for Hermes Mobile
+### What this fork adds for Hermes Mobile
 
-- **Complete Mobile Companion API (51 active capabilities, 71 endpoints, 17 default toolsets)**: live Android UI widgets & custom surfaces (`mobile_ui`), structured phone deliveries (`mobile_deliver`), per-action approved Android device bridge (`mobile_device` / `request_device_action` across 20 OS capabilities), Brain & memory APIs, Skill Studio, smart notes, universal cross-profile sharing, habit suggestions, workspace & git diff browser, per-run tool restrictions, and rich streaming telemetry.
-- **Single-Host Multi-User Profiles (`/p/<profile>`)**: one container serves your whole household or team (`default`, `/p/alice`, `/p/bob`, ...) with isolated `.env` bearer keys, databases, memory, notes, sessions, and workspaces — fail-closed by default (`401` on wrong key, `404` on unknown profile).
-- **Small-LLM Friendly & Bilingual (`fr`/`en`)**: automatic per-run companion guidance (`run_instruction_scope`), forgiving action aliases, auto-derived widget IDs, and automatic French/English language alignment.
-- **Verified Multi-Arch Containers**: signed `linux/amd64` + `linux/arm64` images at `ghcr.io/llm-4-people/hermes-agent:edge` with BuildKit provenance, SPDX SBOM, and keyless Cosign attestation.
+- **Complete mobile companion API (51 active capabilities, 71 endpoints, 17 default toolsets)**: live Android UI widgets & custom surfaces (`mobile_ui`), structured phone deliveries (`mobile_deliver`), per-action approved Android device bridge (`mobile_device` / `request_device_action` across 20 OS capabilities), brain & memory APIs, skill studio, smart notes, universal cross-profile sharing, habit suggestions, workspace & git diff browser, per-run tool restrictions, and rich streaming telemetry.
+- **Single-host multi-user profiles (`/p/<profile>`)**: one container serves your whole household or team (`default`, `/p/alice`, `/p/bob`, ...) with isolated `.env` bearer keys, databases, memory, notes, sessions, and workspaces — fail-closed by default (`401` on wrong key, `404` on unknown profile).
+- **Small-LLM friendly & bilingual (`fr`/`en`)**: automatic per-run companion guidance (`run_instruction_scope`), forgiving action aliases, auto-derived widget IDs, and automatic French/English language alignment.
+- **Verified multi-arch containers**: signed `linux/amd64` + `linux/arm64` images at `ghcr.io/llm-4-people/hermes-agent:edge` with BuildKit provenance, SPDX SBOM, and keyless Cosign attestation.
 
-### 3-Minute Docker Quickstart
+### 3-minute Docker quickstart
 
 ```bash
 # 1. Create a persistent data folder and set a strong API key
@@ -51,9 +51,9 @@ python3 scripts/mobile_doctor.py --hermes-home ~/.hermes --public-url https://he
 
 Then install **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)**, paste the connection URL printed by `scripts/mobile_doctor.py` (for example `https://hermes.example.com` or `https://hermes.example.com/p/alice`) plus that profile's `API_SERVER_KEY`, and start chatting.
 
-- **[Read the full Mobile Companion Guide (`docs/MOBILE_COMPANION.md`)](docs/MOBILE_COMPANION.md)** — Docker Compose, multi-user `/p/<profile>`, all 51 capabilities & 17 toolsets, security boundaries, and troubleshooting.
-- **[Hermes Mobile Android App & Docs](https://llm-4-people.github.io/hermes-mobile/)** — download the Android app, walkthroughs, and user documentation.
-- **[Downstream Fork Notes (`DOWNSTREAM.md`)](DOWNSTREAM.md)** — upstream sync pipeline, provider-scoped routing, Signal media/links, Cosign verification, and local CI gates.
+- **[Read the full mobile companion guide (`docs/MOBILE_COMPANION.md`)](docs/MOBILE_COMPANION.md)** — Docker Compose, multi-user `/p/<profile>`, all 51 capabilities & 17 toolsets, security boundaries, and troubleshooting.
+- **[Hermes Mobile Android app & docs](https://llm-4-people.github.io/hermes-mobile/)** — download the Android app, walkthroughs, and user documentation.
+- **[Downstream fork notes (`DOWNSTREAM.md`)](DOWNSTREAM.md)** — upstream sync pipeline, provider-scoped routing, Signal media/links, Cosign verification, and local CI gates.
 
 ---
 

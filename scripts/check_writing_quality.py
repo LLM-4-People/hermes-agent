@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Fail-closed writing-quality & anti-AI-slop gate for LLM-4-People/hermes-agent.
+"""Fail-closed writing-quality, sentence-case & anti-AI-slop gate for LLM-4-People/hermes-agent.
 
-Scans fork-owned documentation, user-facing mobile tool prose, prompt_builder identity,
-and the gateway/i18n.py EN/FR catalog to enforce:
+Scans fork-owned documentation, user-facing mobile tool prose, mobile companion prompt,
+mobile_doctor CLI output, prompt_builder identity, and the gateway/i18n.py EN/FR catalog to enforce:
   1. Zero Wikipedia "Signs of AI Writing" cliché vocabulary, filler openers, or robotic sign-offs.
-  2. Exact EN/FR key and format-placeholder parity in gateway/i18n.py.
-  3. Zero mixed-language leakage in English-only docs or per-language catalog entries.
+  2. Strict sentence case on Markdown headings, catalog labels, mobile tool titles, and CLI headers.
+  3. Exact EN/FR key and format-placeholder parity in gateway/i18n.py.
+  4. Zero mixed-language leakage in English-only docs or per-language catalog entries.
 
-Pure stdlib; skips fenced code blocks, inline code spans, and URLs to keep false positives at zero.
+Pure stdlib (`python3 -I` safe); skips fenced code blocks, inline code spans, and URLs.
 """
 
 from __future__ import annotations
@@ -32,6 +33,20 @@ _EXTRA_SLOP_WORDS_EN: tuple[str, ...] = (
     "cutting-edge",
     "streamline",
     "revolutionary",
+    "seamless",
+    "supercharge",
+    "bespoke",
+    "next-level",
+    "groundbreaking",
+    "transformative",
+    "synergy",
+    "vibrant",
+    "unleash",
+    "effortless",
+    "effortlessly",
+    "orchestrate",
+    "reimagine",
+    "unlocks",
 )
 
 _EXTRA_SLOP_PHRASES_EN: tuple[str, ...] = (
@@ -42,7 +57,9 @@ _EXTRA_SLOP_PHRASES_EN: tuple[str, ...] = (
 )
 
 _NEGATIVE_PARALLELISM_RE = re.compile(
-    r"\b(?:it's|it is)\s+not\s+just\b|\bnot\s+just\b[^.\n]{1,40}\b(?:it's|it is|but also)\b"
+    r"\b(?:it's|it is)\s+not\s+just\b"
+    r"|\bnot\s+just\b[^.\n]{1,40}\b(?:it's|it is|but also)\b"
+    r"|\bnot\s+only\b[^.\n]{1,60}\bbut\s+also\b"
 )
 
 _EXTRA_SLOP_PHRASES_FR: tuple[str, ...] = (
@@ -51,6 +68,9 @@ _EXTRA_SLOP_PHRASES_FR: tuple[str, ...] = (
     "révolutionnaire",
     "n'hésitez pas si",
     "n’hésitez pas si",
+    "décupler",
+    "sublimer",
+    "sur-mesure",
 )
 
 _DOC_TARGETS: tuple[str, ...] = (
@@ -59,11 +79,88 @@ _DOC_TARGETS: tuple[str, ...] = (
     "DOWNSTREAM.md",
 )
 
+# Stop scanning README.md for fork sentence-case / expanded rules once upstream content begins.
+_UPSTREAM_README_MARKER = "## Upstream Hermes Agent"
+
 _FENCE_RE = re.compile(r"(?ms)^```.*?^```[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _URL_RE = re.compile(r"https?://\S+")
 _PLACEHOLDER_RE = re.compile(r"\{[^{}]+\}")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+_LEADING_NUM_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.\s+|Step\s+\d+\s*[—:-]\s*)")
+_CLAUSE_SPLIT_RE = re.compile(r"(?:\.\s+|\?\s+|!\s+|\s+—\s+|\s+-\s+|:\s+)")
+_WORD_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9][A-Za-zÀ-ÖØ-öø-ÿ0-9'’-]*")
+_ACRONYM_RE = re.compile(r"^[A-Z0-9][A-Z0-9+/_-]*$")
+
+# True proper nouns, product/brand names, languages, and technical names exempt from sentence-case checks.
+_PROPER_NOUNS: frozenset[str] = frozenset({
+    "Hermes",
+    "Mobile",
+    "Agent",
+    "Android",
+    "GitHub",
+    "Pages",
+    "Releases",
+    "Docker",
+    "Compose",
+    "SQLite",
+    "UnifiedPush",
+    "Keystore",
+    "Passkey",
+    "Caddy",
+    "Nginx",
+    "Traefik",
+    "Tailscale",
+    "Serve",
+    "Cosign",
+    "BuildKit",
+    "Codex",
+    "Python",
+    "Gradle",
+    "Signal",
+    "OpenAI",
+    "Anthropic",
+    "NousResearch",
+    "Nous",
+    "Research",
+    "Telegram",
+    "Discord",
+    "Slack",
+    "WhatsApp",
+    "Linux",
+    "Daytona",
+    "Modal",
+    "Vercel",
+    "Sandbox",
+    "Singularity",
+    "Apptainer",
+    "Honcho",
+    "French",
+    "English",
+    "Français",
+    "Atelier",
+    "Activité",
+    "Cerveau",
+    "Montréal",
+    "Wikipedia",
+    "CalVer",
+    "SemVer",
+    "TalkBack",
+    "BiometricPrompt",
+    "Markdown",
+    "Google",
+    "Apple",
+    "Windows",
+    "PowerShell",
+    "Desktop",
+    "People",
+    "Wi-Fi",
+    "Bluetooth",
+    "CodeQL",
+    "I",
+})
 
 
 def strip_markdown_code(text: str) -> str:
@@ -83,6 +180,65 @@ def find_mixed_language_leak(text: str, *, expected_lang: str) -> str | None:
     return None
 
 
+def _is_exempt_capitalized_word(token: str) -> bool:
+    base = token.strip("'’-")
+    if not base:
+        return True
+    if base in _PROPER_NOUNS:
+        return True
+    if _ACRONYM_RE.match(base):
+        return True
+    # Hyphenated tokens like "LLM-4-People" or "Small-LLM": reject any non-exempt Title-Cased sub-part.
+    if "-" in base:
+        parts = [p for p in base.split("-") if p]
+        if len(parts) >= 2:
+            for idx, part in enumerate(parts):
+                if not any(ch.isalpha() for ch in part):
+                    continue
+                if part[0].isupper() and any(ch.islower() for ch in part[1:]):
+                    if part not in _PROPER_NOUNS and idx > 0:
+                        return False
+            return True
+    return False
+
+
+def find_title_case_violations(text: str) -> list[str]:
+    """Return non-exempt Title-Cased words in a heading, title, or UI label."""
+    cleaned = _MD_LINK_RE.sub(r"\1", text)
+    cleaned = _INLINE_CODE_RE.sub(" ", cleaned)
+    cleaned = _URL_RE.sub(" ", cleaned)
+    cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+    cleaned = _PLACEHOLDER_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace("**", "").replace("__", "").replace("*", "")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return []
+
+    offenders: list[str] = []
+    for raw_clause in _CLAUSE_SPLIT_RE.split(cleaned):
+        clause = _LEADING_NUM_RE.sub("", raw_clause.strip())
+        if not clause:
+            continue
+        tokens = [t.strip("'’-") for t in _WORD_TOKEN_RE.findall(clause)]
+        tokens = [t for t in tokens if t]
+        for idx, token in enumerate(tokens):
+            if not any(ch.isalpha() for ch in token):
+                continue
+            has_title_part = any(
+                part and part[0].isupper() and any(ch.islower() for ch in part[1:])
+                for part in token.split("-")
+            )
+            if not has_title_part:
+                continue
+            if idx == 0:
+                if "-" in token and not _is_exempt_capitalized_word(token):
+                    offenders.append(token)
+                continue
+            if not _is_exempt_capitalized_word(token):
+                offenders.append(token)
+    return offenders
+
+
 def scan_prose_for_slop(text: str, *, lang: str = "en") -> list[str]:
     hits = list(find_slop_hits(text, lang=lang))
     lower = text.lower()
@@ -99,6 +255,8 @@ def scan_prose_for_slop(text: str, *, lang: str = "en") -> list[str]:
         for phrase in _EXTRA_SLOP_PHRASES_FR:
             if phrase in lower and phrase not in hits:
                 hits.append(phrase)
+    if text.count("—") >= 3 and "em-dash clutter" not in hits:
+        hits.append("em-dash clutter")
     return hits
 
 
@@ -123,6 +281,11 @@ def _check_catalog() -> list[str]:
             leak = find_mixed_language_leak(value, expected_lang=lang)
             if leak:
                 violations.append(f"gateway/i18n.py[{lang}][{key}]: {leak}")
+            first_line = value.splitlines()[0].strip()
+            if not first_line.startswith("/") and not first_line.startswith("⚠️"):
+                tc = find_title_case_violations(first_line)
+                if tc:
+                    violations.append(f"gateway/i18n.py[{lang}][{key}]: title case {tc} in {first_line!r}")
     for key in sorted(en_keys & fr_keys):
         en_ph = _extract_placeholders(CATALOG["en"][key])
         fr_ph = _extract_placeholders(CATALOG["fr"][key])
@@ -170,6 +333,9 @@ def _check_prompt_builder(root: Path) -> list[str]:
         hits = scan_prose_for_slop(text, lang="en")
         if hits:
             violations.append(f"agent/prompt_builder.py:{name}: banned slop {hits}")
+    rules = env.get("ANTI_SLOP_STYLE_RULES", "")
+    if rules and "sentence case" not in rules.lower():
+        violations.append("agent/prompt_builder.py:ANTI_SLOP_STYLE_RULES: missing sentence-case rule")
     return violations
 
 
@@ -179,7 +345,11 @@ def _check_docs(root: Path) -> list[str]:
         path = root / rel
         if not path.is_file():
             continue
-        prose = strip_markdown_code(path.read_text(encoding="utf-8-sig"))
+        raw_text = path.read_text(encoding="utf-8-sig")
+        if rel == "README.md" and _UPSTREAM_README_MARKER in raw_text:
+            # Scan only the fork-owned section of README.md so upstream NousResearch prose never conflicts.
+            raw_text = raw_text.split(_UPSTREAM_README_MARKER, 1)[0]
+        prose = strip_markdown_code(raw_text)
         for lineno, line in enumerate(prose.splitlines(), start=1):
             hits = scan_prose_for_slop(line, lang="en")
             if hits:
@@ -187,6 +357,35 @@ def _check_docs(root: Path) -> list[str]:
             leak = find_mixed_language_leak(line, expected_lang="en")
             if leak:
                 violations.append(f"{rel}:{lineno}: {leak} -> {line.strip()[:90]}")
+            heading_match = _HEADING_RE.match(line)
+            if heading_match:
+                heading_text = heading_match.group(2)
+                tc = find_title_case_violations(heading_text)
+                if tc:
+                    violations.append(f"{rel}:{lineno}: title-case heading {tc} -> {heading_text[:90]}")
+    return violations
+
+
+def _scan_mobile_tool_dict(path: Path, node: ast.Dict) -> list[str]:
+    violations: list[str] = []
+    for k, v in zip(node.keys, node.values):
+        if not (
+            isinstance(k, ast.Constant)
+            and k.value in ("description", "message", "hint", "summary", "title", "label")
+            and isinstance(v, ast.Constant)
+            and isinstance(v.value, str)
+        ):
+            continue
+        clean_val = strip_markdown_code(v.value)
+        hits = scan_prose_for_slop(clean_val, lang="en")
+        if hits:
+            violations.append(f"tools/{path.name}:{v.lineno}: banned slop {hits} in '{k.value}'")
+        if k.value in ("title", "label") and not clean_val.startswith("http"):
+            tc = find_title_case_violations(clean_val)
+            if tc:
+                violations.append(
+                    f"tools/{path.name}:{v.lineno}: title case {tc} in '{k.value}' -> {clean_val[:80]}"
+                )
     return violations
 
 
@@ -196,26 +395,68 @@ def _check_mobile_tools(root: Path) -> list[str]:
     if not tools_dir.is_dir():
         return violations
     for path in sorted(tools_dir.glob("mobile_*.py")):
-        source = path.read_text(encoding="utf-8-sig")
         try:
-            tree = ast.parse(source, filename=str(path))
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
         except SyntaxError as exc:
             violations.append(f"tools/{path.name}: syntax error {exc}")
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.Dict):
-                for k, v in zip(node.keys, node.values):
-                    if (
-                        isinstance(k, ast.Constant)
-                        and k.value in ("description", "message", "hint", "summary")
-                        and isinstance(v, ast.Constant)
-                        and isinstance(v.value, str)
-                    ):
-                        hits = scan_prose_for_slop(strip_markdown_code(v.value), lang="en")
-                        if hits:
-                            violations.append(
-                                f"tools/{path.name}:{v.lineno}: banned slop {hits} in '{k.value}'"
-                            )
+                violations.extend(_scan_mobile_tool_dict(path, node))
+    return violations
+
+
+def _iter_static_strings(tree: ast.AST) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            out.append((node.lineno, node.value))
+        elif isinstance(node, ast.JoinedStr):
+            parts = [v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)]
+            joined = " ".join(p for p in parts if p.strip())
+            if joined:
+                out.append((node.lineno, joined))
+    return out
+
+
+def _check_doctor_report_titles(rel: str, tree: ast.AST) -> list[str]:
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "format_report_text"):
+            continue
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
+                continue
+            val = sub.value.strip()
+            if len(val) < 8 or val.startswith("[") or val.isupper():
+                continue
+            tc = find_title_case_violations(val)
+            if tc:
+                violations.append(f"{rel}:{sub.lineno}: title case {tc} -> {val[:90]}")
+    return violations
+
+
+def _check_companion_prompt_and_doctor(root: Path) -> list[str]:
+    """Pure-stdlib AST scan of agent/mobile_companion_prompt.py and scripts/mobile_doctor.py."""
+    violations: list[str] = []
+    for rel in ("agent/mobile_companion_prompt.py", "scripts/mobile_doctor.py"):
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+        except SyntaxError as exc:
+            violations.append(f"{rel}: syntax error {exc}")
+            continue
+        for lineno, raw in _iter_static_strings(tree):
+            if len(raw.strip()) < 4 or raw.startswith("http"):
+                continue
+            cleaned = strip_markdown_code(raw)
+            hits = scan_prose_for_slop(cleaned, lang="en")
+            if hits:
+                violations.append(f"{rel}:{lineno}: banned slop {hits} -> {cleaned.strip()[:90]}")
+        if rel == "scripts/mobile_doctor.py":
+            violations.extend(_check_doctor_report_titles(rel, tree))
     return violations
 
 
@@ -225,6 +466,7 @@ def run_all_checks(root: Path = ROOT) -> list[str]:
     violations.extend(_check_prompt_builder(root))
     violations.extend(_check_docs(root))
     violations.extend(_check_mobile_tools(root))
+    violations.extend(_check_companion_prompt_and_doctor(root))
     return violations
 
 

@@ -159,8 +159,9 @@ def _strip_yaml_frontmatter(content: str) -> str:
 
 ANTI_SLOP_STYLE_RULES = (
     "Write in natural, plain human prose in the user's exact language (pure English or pure French; never mix "
-    "languages). Never use sycophantic openers, robotic sign-offs, empty buzzwords, negative-parallelism clichés, "
-    "compulsive three-item padding, false ranges, or em-dash clutter."
+    "languages). Write headings, labels, and UI copy in sentence case (never title case). Never use sycophantic "
+    "openers, robotic sign-offs, empty buzzwords, negative-parallelism clichés, compulsive three-item padding, "
+    "false ranges, or em-dash clutter."
 )
 
 DEFAULT_AGENT_IDENTITY = (

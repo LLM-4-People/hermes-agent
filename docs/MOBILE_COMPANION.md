@@ -1,23 +1,23 @@
-# Hermes Mobile Companion Guide
+# Hermes Mobile companion guide
 
 This guide walks you through running **`LLM-4-People/hermes-agent`** as the private backend for **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)** — no deep infrastructure or AI jargon required.
 
 ---
 
-## 1. Why Use the Companion Fork?
+## 1. Why use the companion fork?
 
-Hermes Mobile can connect to any Hermes API server, but `LLM-4-People/hermes-agent` unlocks the full native Android companion experience out of the box:
+Hermes Mobile can connect to any Hermes API server, but `LLM-4-People/hermes-agent` provides the full native Android companion features out of the box:
 
 - **Live widgets & custom screens** (`mobile_ui`) that Hermes can draft, preview, apply, and revert cleanly.
 - **Phone deliveries & briefings** (`mobile_deliver`) that land in your Activity feed without interrupting your current chat.
 - **Approved Android device actions** (`mobile_device` / `request_device_action`) — timers, calendar drafts, map navigation, nearby places, media controls, clipboard, and notification digests — always behind an explicit on-phone approval sheet.
-- **Brain, Memory, Smart Notes, Skill Studio, Universal Sharing & Habits** with full REST APIs and FTS5 cross-session search.
+- **Brain, memory, smart notes, skill studio, universal sharing & habits** with full REST APIs and FTS5 cross-session search.
 - **Single-host multi-user profiles (`/p/<profile>`)** so one small server can privately serve your family or team.
 - **Small-LLM friendly & bilingual (`fr`/`en`)** companion instructions that work reliably even on fast, lightweight models.
 
 ---
 
-## 2. 3-Minute Docker Compose Setup
+## 2. 3-minute Docker Compose setup
 
 ### Step 1 — Create your data directory and API key
 
@@ -110,7 +110,7 @@ When everything is green, `mobile_doctor.py` prints the exact copy-paste URL for
 
 ---
 
-## 3. Single-Host Multi-User Setup (`/p/<profile>`)
+## 3. Single-host multi-user setup (`/p/<profile>`)
 
 You do **not** need one Docker container per person. One gateway process can safely serve multiple isolated users under `/p/<profile>`:
 
@@ -138,7 +138,7 @@ You do **not** need one Docker container per person. One gateway process can saf
 
 Each person connects Hermes Mobile to their own URL and their own key:
 
-| Profile | Connection URL in Hermes Mobile | Key Source |
+| Profile | Connection URL in Hermes Mobile | Key source |
 |---|---|---|
 | Default (`default`) | `https://hermes.example.com` | `~/.hermes/.env` (`API_SERVER_KEY`) |
 | Secondary (`alice`) | `https://hermes.example.com/p/alice` | `~/.hermes/profiles/alice/.env` (`API_SERVER_KEY`) |
@@ -147,65 +147,65 @@ Each person connects Hermes Mobile to their own URL and their own key:
 **What stays strictly isolated per profile:**
 - Bearer authentication (`401` if a key does not match that profile; `404` for unknown or unserved `/p/<name>` prefixes).
 - Conversations, SQLite transcript databases, search indexes, and uploaded files.
-- Memory, Smart Notes, Skills, Habits, live UI widgets/surfaces, and phone deliveries.
+- Memory, smart notes, skills, habits, live UI widgets/surfaces, and phone deliveries.
 - Workspace files and model/language defaults.
 - When two users on the same server *want* to share a note, thread, or artifact, they can opt in explicitly through **Shared with me** (`/api/shares`), with instant revocation at any time.
 
 ---
 
-## 4. Connecting the Hermes Mobile Android App
+## 4. Connecting the Hermes Mobile Android app
 
 1. Install the latest signed APK from **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)**.
 2. Open the app and create your local profile lock (passphrase + optional biometrics).
 3. Enter:
    - **Server URL:** the exact URL printed by `mobile_doctor.py` (for example `https://hermes.example.com` or `https://hermes.example.com/p/alice`).
-   - **API Key:** that profile's `API_SERVER_KEY`.
-4. Open **Activity → Connection Doctor** inside the app to confirm green checks for reachability, companion capabilities (`51/51`), toolsets, and language sync.
+   - **API key:** that profile's `API_SERVER_KEY`.
+4. Open **Activity → Connection doctor** inside the app to confirm green checks for reachability, companion capabilities (`51/51`), toolsets, and language sync.
 
 ---
 
-## 5. Full Companion Surface: 51 Capabilities & 17 Default Toolsets
+## 5. Full companion surface: 51 capabilities & 17 default toolsets
 
 `GET /v1/capabilities` advertises **51 active companion capabilities** (49 enabled feature flags plus the 2 session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **71 authenticated endpoints**:
 
-| Area | Active `/v1/capabilities` Flags |
+| Area | Active `/v1/capabilities` flags |
 |---|---|
-| **Conversations & Streaming** | `chat_completions`, `chat_completions_streaming`, `responses_api`, `responses_streaming`, `session_resources`, `session_chat`, `session_chat_streaming`, `session_fork`, `session_fork_at_turn`, `session_search`, `session_export`, `session_uploads`, `session_model_lock`, `session_continuity_header`, `session_key_header` |
-| **Live Runs, Steering & Safety** | `run_submission`, `runs_idempotency`, `run_status`, `run_events_sse`, `run_stop`, `run_steer`, `run_approval_response`, `run_clarify_response`, `run_unknown_resolution`, `run_toolset_selection`, `run_tool_exclusions`, `run_scoped_instructions`, `run_progress_hooks`, `tool_progress_events`, `approval_events`, `structured_approval_diffs`, `reasoning_streaming` |
-| **Coding, Models & Workspace** | `live_coding_stream`, `model_options`, `model_capability_metadata`, `run_metrics_v2`, `workspace_browser`, `usage_analytics`, `cron_run_history` |
-| **Brain, Notes, Sharing & Skills** | `memory_api`, `memory_write_api`, `skills_api`, `skill_studio`, `profile_defaults`, `smart_notes`, `note_sharing`, `universal_sharing`, `habit_suggestions` |
-| **Native Android Companion** | `live_ui_modding`, `mobile_deliveries`, `device_bridge` |
+| **Conversations & streaming** | `chat_completions`, `chat_completions_streaming`, `responses_api`, `responses_streaming`, `session_resources`, `session_chat`, `session_chat_streaming`, `session_fork`, `session_fork_at_turn`, `session_search`, `session_export`, `session_uploads`, `session_model_lock`, `session_continuity_header`, `session_key_header` |
+| **Live runs, steering & safety** | `run_submission`, `runs_idempotency`, `run_status`, `run_events_sse`, `run_stop`, `run_steer`, `run_approval_response`, `run_clarify_response`, `run_unknown_resolution`, `run_toolset_selection`, `run_tool_exclusions`, `run_scoped_instructions`, `run_progress_hooks`, `tool_progress_events`, `approval_events`, `structured_approval_diffs`, `reasoning_streaming` |
+| **Coding, models & workspace** | `live_coding_stream`, `model_options`, `model_capability_metadata`, `run_metrics_v2`, `workspace_browser`, `usage_analytics`, `cron_run_history` |
+| **Brain, notes, sharing & skills** | `memory_api`, `memory_write_api`, `skills_api`, `skill_studio`, `profile_defaults`, `smart_notes`, `note_sharing`, `universal_sharing`, `habit_suggestions` |
+| **Native Android companion** | `live_ui_modding`, `mobile_deliveries`, `device_bridge` |
 
 *(Five admin/legacy flags remain deliberately disabled on the public API surface by default: `admin_config_rw`, `jobs_admin`, `audio_api`, `realtime_voice`, and `cors` unless `API_SERVER_CORS_ORIGINS` is configured.)*
 
-### 17 Default Enabled Toolsets (of 29 Total in `/v1/toolsets`)
+### 17 default enabled toolsets (of 29 total in `/v1/toolsets`)
 
-| Category | Enabled by Default |
+| Category | Enabled by default |
 |---|---|
-| **Mobile Companion (3)** | `mobile_ui` (`mobile_ui_patch`), `mobile_deliver` (`mobile_deliver`), `mobile_device` (`request_device_action`) |
-| **Web & Research (2)** | `web` (`web_search`, `web_extract`), `browser` (`browser_*`) |
-| **Coding & Files (3)** | `file` (`read_file`, `write_file`, `patch`, `search_files`), `terminal` (`terminal`, `process_manage`), `code_execution` (`execute_code`) |
-| **Media & Creativity (2)** | `vision` (`vision_analyze`), `image_gen` (`image_generate`) |
-| **Memory, Knowledge & Planning (5)** | `memory` (`memory`, `mobile_notes`, `mobile_share`), `session_search`, `skills` (`skills_list`, `skill_view`, `skill_manage`), `todo`, `cronjob` |
-| **Orchestration & Integrations (2)** | `delegation` (`delegate_task`), `connections` (`manage_connections`) |
+| **Mobile companion (3)** | `mobile_ui` (`mobile_ui_patch`), `mobile_deliver` (`mobile_deliver`), `mobile_device` (`request_device_action`) |
+| **Web & research (2)** | `web` (`web_search`, `web_extract`), `browser` (`browser_*`) |
+| **Coding & files (3)** | `file` (`read_file`, `write_file`, `patch`, `search_files`), `terminal` (`terminal`, `process_manage`), `code_execution` (`execute_code`) |
+| **Media & creativity (2)** | `vision` (`vision_analyze`), `image_gen` (`image_generate`) |
+| **Memory, knowledge & planning (5)** | `memory` (`memory`, `mobile_notes`, `mobile_share`), `session_search`, `skills` (`skills_list`, `skill_view`, `skill_manage`), `todo`, `cronjob` |
+| **Orchestration & integrations (2)** | `delegation` (`delegate_task`), `connections` (`manage_connections`) |
 
 Optional opt-in toolsets (disabled by default until configured): `video`, `video_gen`, `x_search`, `tts`, `stt`, `kanban`, `context_engine`, `clarify`, `discord`, `discord_admin`, `computer_use`, `a2a`.
 
-### 20 Approved Android Device Bridge Capabilities
+### 20 approved Android device bridge capabilities
 
 When the Android app includes `device_capabilities` on a `/v1/runs` request, Hermes may request any advertised action through `request_device_action`, pausing the run until the user taps **Allow** or **Deny** on their phone:
 
-- **Capture & Location:** `camera`, `location_coarse`, `nearby_osm`
-- **Maps & Navigation:** `maps_handoff`, `map_navigation`
-- **Time & Calendar:** `alarm_timer`, `calendar_draft`, `calendar_read`
-- **Communication Drafts (never auto-sent):** `dial_draft`, `sms_draft`, `email_draft`, `contacts_pick`, `contact_draft`, `share_sheet`
-- **Clipboard & Media:** `clipboard_read`, `clipboard_write`, `media_control`
-- **Ambient Notifications (opt-in):** `notifications_digest`, `notification_reply`
-- **Live UI Surfaces:** `ui_surfaces_v2`
+- **Capture & location:** `camera`, `location_coarse`, `nearby_osm`
+- **Maps & navigation:** `maps_handoff`, `map_navigation`
+- **Time & calendar:** `alarm_timer`, `calendar_draft`, `calendar_read`
+- **Communication drafts (never auto-sent):** `dial_draft`, `sms_draft`, `email_draft`, `contacts_pick`, `contact_draft`, `share_sheet`
+- **Clipboard & media:** `clipboard_read`, `clipboard_write`, `media_control`
+- **Ambient notifications (opt-in):** `notifications_digest`, `notification_reply`
+- **Live UI surfaces:** `ui_surfaces_v2`
 
 ---
 
-## 6. Small-LLM Ergonomics & Bilingual (`fr`/`en`) Support
+## 6. Small-LLM ergonomics & bilingual (`fr`/`en`) support
 
 You do not need a frontier-priced model to get a great mobile experience:
 
@@ -215,21 +215,21 @@ You do not need a frontier-priced model to get a great mobile experience:
 
 ---
 
-## 7. Security & Privacy Boundaries
+## 7. Security & privacy boundaries
 
 Hermes Mobile and this fork are designed **fail-closed by default**:
 
-1. **Mandatory Bearer Auth:** Every private endpoint requires the profile's `API_SERVER_KEY` (constant-time verification). Never expose port `8642` directly on the public internet without HTTPS.
-2. **Dynamic Tool Exposure:** `request_device_action` is dynamically attached **only** for the duration of a `/v1/runs` turn that explicitly advertises `device_capabilities`, and immediately detached afterwards.
-3. **Explicit On-Phone Approval:** Every device action and destructive terminal/file action requires explicit human confirmation. Communication actions (`sms_draft`, `email_draft`, `dial_draft`, `calendar_draft`) open editable drafts — they never send silently.
-4. **Zero-Leak Widgets & HTTP Responses:** Mobile UI endpoints send `Cache-Control: no-store`, and secret-pattern scanning blocks credentials or tokens from being written into live UI patches or home-screen widgets.
-5. **Strict Per-Profile Isolation:** Profiles never share memory, notes, transcript rows, or bearer credentials unless explicitly shared via `/api/shares`.
+1. **Mandatory bearer auth:** Every private endpoint requires the profile's `API_SERVER_KEY` (constant-time verification). Never expose port `8642` directly on the public internet without HTTPS.
+2. **Dynamic tool exposure:** `request_device_action` is dynamically attached **only** for the duration of a `/v1/runs` turn that explicitly advertises `device_capabilities`, and immediately detached afterwards.
+3. **Explicit on-phone approval:** Every device action and destructive terminal/file action requires explicit human confirmation. Communication actions (`sms_draft`, `email_draft`, `dial_draft`, `calendar_draft`) open editable drafts — they never send silently.
+4. **Zero-leak widgets & HTTP responses:** Mobile UI endpoints send `Cache-Control: no-store`, and secret-pattern scanning blocks credentials or tokens from being written into live UI patches or home-screen widgets.
+5. **Strict per-profile isolation:** Profiles never share memory, notes, transcript rows, or bearer credentials unless explicitly shared via `/api/shares`.
 
 ---
 
 ## 8. Troubleshooting
 
-| Symptom | Likely Cause | Fix |
+| Symptom | Likely cause | Fix |
 |---|---|---|
 | **`401 Unauthorized`** in app or `mobile_doctor.py` | Missing or mismatched `API_SERVER_KEY` (especially on `/p/<profile>`) | Check the exact profile's `.env` file (`~/.hermes/.env` or `~/.hermes/profiles/<name>/.env`) and restart `hermes` after editing `.env`. |
 | **`404 Unknown or unconfigured profile`** | `gateway.multiplex_profiles: true` is off, or profile name does not exist | Enable `gateway.multiplex_profiles: true` in `~/.hermes/config.yaml`, run `hermes profile create <name>`, and restart the gateway. |
