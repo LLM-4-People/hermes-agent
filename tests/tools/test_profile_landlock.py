@@ -213,14 +213,23 @@ def probe_listdir(name, path):
     except PermissionError as exc:
         results[name] = ('eacces', exc.errno)
 
-# Must be DENIED by Linux kernel (direct, dynamic string concat, .., symlink, listdir)
+def probe_write(name, path):
+    try:
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write('nope')
+        results[name] = ('ok', None)
+    except PermissionError as exc:
+        results[name] = ('eacces', exc.errno)
+
+# Must be DENIED by Linux kernel (direct read, dynamic string concat, .., symlink, and write)
 probe_read('allison_config', {str(allison / 'config.yaml')!r})
 probe_read('allison_concat', ''.join([{str(root)!r}, '/pro', 'files/all', 'ison/config.yaml']))
 probe_read('allison_dotdot', {str(root / 'skills' / '..' / 'profiles' / 'allison' / 'config.yaml')!r})
 probe_read('allison_symlink', {str(multi_profile_tree['link_to_allison'])!r})
-probe_listdir('profiles_dir', {str(root / 'profiles')!r})
+probe_write('allison_write', {str(allison / 'notes' / 'diary.md')!r})
 
-# Must SUCCEED (default's own skills + outside workspace)
+# Must SUCCEED (default's own root listing, skills, and outside workspace)
+probe_listdir('own_root_ls', {str(root)!r})
 probe_read('own_skill', {str(root / 'skills' / 'ok.txt')!r})
 probe_read('outside_file', {str(outside / 'shared.txt')!r})
 print(json.dumps(results))
@@ -229,9 +238,10 @@ print(json.dumps(results))
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     res = json.loads(proc.stdout)
 
-    for blocked_key in ("allison_config", "allison_concat", "allison_dotdot", "allison_symlink", "profiles_dir"):
+    for blocked_key in ("allison_config", "allison_concat", "allison_dotdot", "allison_symlink", "allison_write"):
         assert res[blocked_key] == ["eacces", errno.EACCES], f"Kernel did not block {blocked_key}: {res[blocked_key]}"
 
+    assert res["own_root_ls"][0] == "ok" and "skills" in res["own_root_ls"][1]
     assert res["own_skill"] == ["ok", "default-own-skill"]
     assert res["outside_file"] == ["ok", "public-temp-file"]
 
@@ -254,7 +264,16 @@ def probe_read(name, path):
     except PermissionError as exc:
         results[name] = ('eacces', exc.errno)
 
-# Must be DENIED by Linux kernel (host root .env/config/state.db, sibling bob, symlink)
+def probe_listdir(name, path):
+    try:
+        entries = sorted(os.listdir(path))
+        results[name] = ('ok', entries)
+    except PermissionError as exc:
+        results[name] = ('eacces', exc.errno)
+
+# Must be DENIED by Linux kernel (host root listdir + .env/config/state.db, profiles listdir, sibling bob, symlink)
+probe_listdir('root_listdir', {str(root)!r})
+probe_listdir('profiles_listdir', {str(root / 'profiles')!r})
 probe_read('root_env', {str(root / '.env')!r})
 probe_read('root_config', {str(root / 'config.yaml')!r})
 probe_read('root_state', {str(root / 'state.db')!r})
@@ -273,7 +292,15 @@ print(json.dumps(results))
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     res = json.loads(proc.stdout)
 
-    for blocked_key in ("root_env", "root_config", "root_state", "bob_config", "root_symlink"):
+    for blocked_key in (
+        "root_listdir",
+        "profiles_listdir",
+        "root_env",
+        "root_config",
+        "root_state",
+        "bob_config",
+        "root_symlink",
+    ):
         assert res[blocked_key] == ["eacces", errno.EACCES], f"Kernel did not block {blocked_key}: {res[blocked_key]}"
 
     assert res["own_diary"] == ["ok", "ALLISON_PRIVATE_MARKER"]

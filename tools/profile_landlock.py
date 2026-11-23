@@ -283,11 +283,21 @@ def apply_landlock(current_home: str, hermes_root: str) -> tuple[bool, str]:
         return False, f"landlock_create_ruleset failed: errno={err} ({os.strerror(err)})"
 
     try:
+        real_current = os.path.realpath(current_home)
+        real_root = os.path.realpath(hermes_root)
+        is_named = real_current != real_root and _is_under_posix(real_current, os.path.join(real_root, "profiles"))
+
         rw_paths, ro_exec_paths = compute_allowed_roots(current_home, hermes_root)
         for path in rw_paths:
             _add_path_rule(libc, ruleset_fd, path, dir_access=handled_fs, file_access=file_rw_mask)
         for path in ro_exec_paths:
             _add_path_rule(libc, ruleset_fd, path, dir_access=ro_dir_mask, file_access=ro_file_mask)
+        if not is_named:
+            # Default profile: allow opendir(hermes_root) ONLY (no READ_FILE, WRITE_FILE, EXECUTE,
+            # MAKE_*, REMOVE_*, or TRUNCATE) so `ls` / `search_files` on default's own root work
+            # while every file open/read/write/exec/delete inside `<hermes_root>/profiles/*` stays
+            # blocked by the Linux kernel with EACCES. Named profiles receive ZERO access on root.
+            _add_path_rule(libc, ruleset_fd, real_root, dir_access=handled_fs & _FS_READ_DIR, file_access=0)
 
         rc_prctl = int(
             libc.prctl(
