@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="Hermes Agent" width="100%">
+  <img src="docs/assets/social-preview.png" alt="Hermes Agent — Self-hosted companion fork for Android 16" width="100%">
 </p>
 
 # Hermes Agent — LLM-4-People companion fork ☤
@@ -17,6 +17,10 @@
 </p>
 
 > **LLM-4-People fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)** — built to power the private, native Android companion **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)** while staying automatically synchronized with upstream Hermes.
+
+<p align="center">
+  <a href="https://llm-4-people.github.io/hermes-mobile/en/walkthrough/"><img src="docs/assets/mobile-companion-preview.png" alt="Hermes Mobile on Android 16: command palette, everyday workflows, connection doctor, and presence controls" width="100%"></a>
+</p>
 
 ### What this fork adds for Hermes Mobile
 
