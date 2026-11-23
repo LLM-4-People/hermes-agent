@@ -191,6 +191,53 @@ async def handle_invite_profile(adapter, request: web.Request) -> web.Response:
     return await _mint_pairing_for_target(adapter, request, target_override=target)
 
 
+async def handle_pairing_inspect(adapter, request: web.Request) -> web.Response:
+    """Validate a pairing code without consuming it and return non-secret metadata."""
+    limiter = getattr(adapter, "_auth_limiter", None)
+    client_ip = extract_client_ip(request) if limiter is not None else ""
+    if limiter is not None:
+        retry_after = limiter.check_locked_out(client_ip, _PAIRING_CLAIM_BUCKET)
+        if retry_after is not None:
+            return auth_rate_limited_response(retry_after)
+    body, parse_err = await adapter._read_json_body(request)
+    if parse_err is not None:
+        if limiter is not None:
+            limiter.record_failure(client_ip, _PAIRING_CLAIM_BUCKET)
+        return parse_err
+    root = default_root_home()
+    try:
+        base_host = await asyncio.to_thread(_infer_public_host, request, body, root_home=root)
+    except PairingError as exc:
+        return _error_no_store(exc.message, code=exc.code, status=exc.status_code)
+    try:
+        inspected = await asyncio.to_thread(lambda: PairingStore(root).inspect_ticket(body.get("code")))
+    except PairingError as exc:
+        if limiter is not None:
+            limiter.record_failure(client_ip, _PAIRING_CLAIM_BUCKET)
+        return _error_no_store(exc.message, code=exc.code, status=exc.status_code)
+
+    if limiter is not None:
+        limiter.record_success(client_ip, _PAIRING_CLAIM_BUCKET)
+
+    slug = inspected["profile_slug"]
+    display_name = inspected.get("display_name") or ""
+    if not display_name:
+        summary = await asyncio.to_thread(get_profile_summary, slug, root_home=root)
+        display_name = (summary or {}).get("display_name") or slug
+    server_url = f"{base_host}/p/{slug}" if (base_host and slug != "default") else base_host
+    return _json_no_store({
+        "object": "hermes.mobile.pairing.inspect",
+        "valid": True,
+        "server_url": server_url,
+        "base_host": base_host,
+        "profile_slug": slug,
+        "display_name": display_name,
+        "mode": inspected["mode"],
+        "expires_at": inspected["expires_at"],
+        "ttl_remaining_seconds": inspected["ttl_remaining_seconds"],
+    })
+
+
 async def handle_pairing_claim(adapter, request: web.Request) -> web.Response:
     limiter = getattr(adapter, "_auth_limiter", None)
     client_ip = extract_client_ip(request) if limiter is not None else ""
@@ -494,6 +541,7 @@ async def handle_patch_admin_settings(adapter, request: web.Request) -> web.Resp
 def _http_routes(adapter) -> list[tuple[str, str, Any]]:
     return [
         ("POST", "/api/mobile/pairing/create", functools.partial(handle_pairing_create, adapter)),
+        ("POST", "/api/mobile/pairing/inspect", functools.partial(handle_pairing_inspect, adapter)),
         ("POST", "/api/mobile/pairing/claim", functools.partial(handle_pairing_claim, adapter)),
         ("GET", "/api/mobile/pairing/active", functools.partial(handle_pairing_active, adapter)),
         ("DELETE", "/api/mobile/pairing/{ticket_id}", functools.partial(handle_pairing_revoke, adapter)),

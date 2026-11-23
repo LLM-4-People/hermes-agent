@@ -176,7 +176,7 @@ Each person connects Hermes Mobile to their own URL and their own key:
 
 ## 5. Full companion surface: 59 capabilities and 18 default toolsets
 
-`GET /v1/capabilities` advertises **59 active companion capabilities** (57 enabled feature flags plus the 2 session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **84 authenticated endpoints**:
+`GET /v1/capabilities` advertises **59 active companion capabilities** (57 enabled feature flags plus the 2 session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **85 authenticated endpoints**:
 
 | Area | Active `/v1/capabilities` flags |
 |---|---|
