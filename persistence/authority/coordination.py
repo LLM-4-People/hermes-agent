@@ -121,11 +121,15 @@ OBLIGATION_RETENTION_SECONDS = 7 * 24 * 60 * 60
 #: Rows the obligation prune keeps.
 OBLIGATION_MAX_ROWS = 500
 #: The marker a claimed reconnect replay carries.
-OBLIGATION_RECONNECTED_MARKER = ("♻️ Recovered reply — the messaging platform reconnected after the original "
-                                 "delivery failed, so this may be a duplicate:\n\n")
+OBLIGATION_RECONNECTED_MARKER = (
+    "Recovered reply (the messaging platform reconnected after delivery failed, "
+    "so this may be a duplicate):\n\n"
+)
 #: The marker a claimed flood-refused row carries.
-OBLIGATION_FLOOD_MARKER = ("♻️ Recovered reply — the messaging platform's rate limit refused the original, so part of "
-                           "it may already have arrived above:\n\n")
+OBLIGATION_FLOOD_MARKER = (
+    "Recovered reply (the messaging platform rate-limited the original, "
+    "so part of it may already appear above):\n\n"
+)
 
 _FLOOD_ERROR_PREFIX = "flood_control:"
 _FLOOD_RETRY_DEFAULT_SECONDS = 60.0

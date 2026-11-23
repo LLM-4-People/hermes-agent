@@ -35,16 +35,35 @@ STALE_AFTER_SECONDS = 24 * 60 * 60
 # Visible prefixes for redeliveries that might duplicate an already-received message (crash mid-send /
 # post-rejection retry) — honest at-least-once. Runtime recovery uses a distinct marker: no restart
 # occurred, but a network rejection's acknowledgement can still have been lost independently.
-RECOVERED_MARKER = "♻️ Recovered reply — the gateway restarted during delivery, so this may be a duplicate:\n\n"
-RECONNECTED_MARKER = ("♻️ Recovered reply — the messaging platform reconnected after the original "
-                      "delivery failed, so this may be a duplicate:\n\n")
+RECOVERED_MARKER = "Recovered reply (Hermes restarted during delivery, so this may be a duplicate):\n\n"
+RECONNECTED_MARKER = (
+    "Recovered reply (the messaging platform reconnected after delivery failed, "
+    "so this may be a duplicate):\n\n"
+)
 # A reply refused by flood control may have gone out as several requests (the adapter chunks long replies,
 # and MarkdownV2 escaping alone can push a reply that fits one message into two), and the platform may have
 # accepted the first chunk(s) before refusing the rest; the send result does not say which landed. The raw
 # length of the stored text says nothing about that, so every flood redelivery carries a marker, and neither
 # of the markers above tells the truth here (no restart, no reconnect): the rate limit gets its own.
-FLOOD_MARKER = ("♻️ Recovered reply — the messaging platform's rate limit refused the original, so part of "
-                "it may already have arrived above:\n\n")
+FLOOD_MARKER = (
+    "Recovered reply (the messaging platform rate-limited the original, "
+    "so part of it may already appear above):\n\n"
+)
+
+_MARKER_I18N_KEYS: dict[str, str] = {
+    RECOVERED_MARKER: "delivery.recovered",
+    RECONNECTED_MARKER: "delivery.reconnected",
+    FLOOD_MARKER: "delivery.flood",
+}
+
+
+def localize_delivery_marker(marker: str, *, lang: Optional[str] = None) -> str:
+    """Return the localized delivery redelivery marker (exact English constant when lang is English)."""
+    key = _MARKER_I18N_KEYS.get(marker)
+    if key is None:
+        return marker
+    from gateway.i18n import t as gateway_t
+    return gateway_t(key, lang=lang)
 
 # Errors whose send contract proves the platform never saw the request: retried as soon as the adapter
 # is back, no backoff. Every other rejection is retried too (#91653: a 5xx or a transient parse error

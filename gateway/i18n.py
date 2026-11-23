@@ -15,17 +15,26 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 import contextvars
+import logging
 import math
+import os
+from pathlib import Path
 import re
+import tempfile
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_USER_LANGS: frozenset[str] = frozenset({"en", "fr"})
 DEFAULT_USER_LANG: str = "en"
+_USER_LANG_FILENAME: str = ".user_language"
 
 _current_user_lang: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "hermes_gateway_user_lang",
     default=None,
 )
+# (resolved_home_str) -> (mtime_ns, normalized_lang)
+_remembered_lang_cache: dict[str, tuple[int, Optional[str]]] = {}
 
 _LANG_ALIASES: dict[str, str] = {
     "en": "en",
@@ -164,16 +173,114 @@ def resolve_request_lang(
     )
 
 
+def _resolve_profile_home(home: str | Path | None = None) -> Optional[Path]:
+    if home is not None:
+        return Path(home)
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home()
+    except ImportError:
+        env_home = os.environ.get("HERMES_HOME", "").strip()
+        return Path(env_home) if env_home else None
+
+
+def read_remembered_user_lang(home: str | Path | None = None) -> Optional[str]:
+    """Read the last auto-detected user language (``'en'`` or ``'fr'``) for ``home``."""
+    target_dir = _resolve_profile_home(home)
+    if target_dir is None:
+        return None
+    path = target_dir / _USER_LANG_FILENAME
+    cache_key = str(target_dir)
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        _remembered_lang_cache.pop(cache_key, None)
+        return None
+    cached = _remembered_lang_cache.get(cache_key)
+    if cached is not None and cached[0] == mtime_ns:
+        return cached[1]
+    try:
+        raw = path.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return None
+    lang = normalize_user_lang(raw)
+    resolved = lang if lang in SUPPORTED_USER_LANGS else None
+    _remembered_lang_cache[cache_key] = (mtime_ns, resolved)
+    return resolved
+
+
+def remember_user_lang(lang: Optional[str], home: str | Path | None = None) -> Optional[str]:
+    """Atomically persist the detected user language (``'en'`` or ``'fr'``) for ``home``."""
+    normalized = normalize_user_lang(lang)
+    if normalized not in SUPPORTED_USER_LANGS:
+        return None
+    target_dir = _resolve_profile_home(home)
+    if target_dir is None or not target_dir.is_dir():
+        return None
+    if read_remembered_user_lang(target_dir) == normalized:
+        return normalized
+    path = target_dir / _USER_LANG_FILENAME
+    tmp_path: Optional[Path] = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".user_language.", suffix=".tmp", dir=str(target_dir))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{normalized}\n")
+        os.replace(tmp_path, path)
+        tmp_path = None
+        _remembered_lang_cache[str(target_dir)] = (path.stat().st_mtime_ns, normalized)
+    except OSError as exc:
+        logger.debug("Could not persist remembered user language in %s: %s", target_dir, exc)
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return None
+    return normalized
+
+
+def clear_remembered_user_lang_cache() -> None:
+    """Clear the in-process cache for ``.user_language`` files."""
+    _remembered_lang_cache.clear()
+
+
+def resolve_inbound_user_lang(runner: Any, event: Any, source: Any, is_internal: bool) -> Optional[str]:
+    """Auto-detect and persist user language (EN/FR) per profile on human chat messages."""
+    profile = getattr(source, "profile", None)
+    profile_home = (getattr(runner, "_served_profile_homes", None) or {}).get(profile) if profile else None
+    if not is_internal:
+        detected = detect_text_lang(getattr(event, "text", None))
+        if detected is not None:
+            remember_user_lang(detected, home=profile_home)
+            return detected
+    return read_remembered_user_lang(home=profile_home)
+
+
+def _active_profile_user_lang() -> Optional[str]:
+    try:
+        from agent.i18n import _current_home, _resolve_language
+        resolved = normalize_user_lang(_resolve_language(_current_home(), include_default=False))
+        if resolved in SUPPORTED_USER_LANGS:
+            return resolved
+    except ImportError:
+        pass
+    return read_remembered_user_lang()
+
+
 def active_scoped_lang() -> Optional[str]:
     """Return the active per-request scoped language if set, else ``None``."""
     return _current_user_lang.get()
 
 
 def current_user_lang(default: str = DEFAULT_USER_LANG) -> str:
-    """Return the active user language from the ContextVar, falling back to ``default``."""
+    """Return active scoped lang, else profile lang (env/config/remembered), else ``default``."""
     scoped = _current_user_lang.get()
     if scoped in SUPPORTED_USER_LANGS:
         return scoped
+    profile_lang = _active_profile_user_lang()
+    if profile_lang in SUPPORTED_USER_LANGS:
+        return profile_lang
     fallback = normalize_user_lang(default)
     return fallback if fallback in SUPPORTED_USER_LANGS else DEFAULT_USER_LANG
 
@@ -260,6 +367,28 @@ CATALOG: dict[str, dict[str, str]] = {
         "mobile.deliver_hint": "Use kind in {kinds} (alias 'alert'->'notice'), urgency in {urgencies} (alias 'low'->'silent'), non-empty title, and JSON payload.",
         "mobile.deliver_example_title": "Morning briefing",
         "mobile.deliver_example_summary": "3 priority tasks for today",
+        # Delivery ledger, stall, ingress, relay & turn runtime notices
+        "delivery.recovered": "Recovered reply (Hermes restarted during delivery, so this may be a duplicate):\n\n",
+        "delivery.reconnected": "Recovered reply (the messaging platform reconnected after delivery failed, so this may be a duplicate):\n\n",
+        "delivery.flood": "Recovered reply (the messaging platform rate-limited the original, so part of it may already appear above):\n\n",
+        "gateway.stall_warning": "I seem to be stuck (no activity for {minutes} min). Send /stop to cancel the current task, or /new to start a fresh conversation.",
+        "ingress.queue_full": "Too many messages are already waiting in this conversation; send this again after the current reply.",
+        "ingress.already_admitted": "Hermes already received a different message under this message id, so this version was not saved. Send it again as a new message to continue.",
+        "ingress.refused": "Hermes refused this message ({named}), so it was not saved or answered. Ask the operator to check gateway.log.",
+        "ingress.moved_dropped": "Hermes did not answer this message ({reason}): the conversation it was queued for moved, so it was dropped. Send it again to continue.",
+        "ingress.pause_restarting": "Hermes is restarting. Your message is saved and will be answered when it is back.",
+        "ingress.pause_busy": "Your message is saved and will be answered when the work running in this conversation finishes.",
+        "ingress.pause_unknown": "This conversation is paused: a previous turn did not finish when Hermes restarted, and only you know whether to send it again. Your message is saved. Send {discard} to drop the lost turn and continue (it is not re-run), or /reset to start a fresh conversation.",
+        "ingress.pause_unauthorized": "This conversation is paused: a queued message could not be re-authorized ({reason}). Your message is saved but will not be answered here. Send /reset to start a fresh conversation, or ask the operator to resume this one.",
+        "relay.approval_expired": "Approval expired: no command was waiting.",
+        "relay.type_answer": "Type your answer:",
+        "relay.approved_once": "Approved once",
+        "relay.approved_session": "Approved for session",
+        "relay.approved_always": "Approved permanently",
+        "relay.denied": "Denied",
+        "relay.always_approve": "Always approve",
+        "relay.cancelled": "Cancelled",
+        "turn.launch_credentials_unavailable": "This session's launch credentials are no longer available ({reason}), so this message wasn't processed. Start a new session from the CLI to bind them again.",
     },
     "fr": {
         # Gateway slash commands
@@ -329,6 +458,28 @@ CATALOG: dict[str, dict[str, str]] = {
         "mobile.deliver_hint": "Utilisez kind dans {kinds} (alias 'alert'->'notice'), urgency dans {urgencies} (alias 'low'->'silent'), un titre non vide et un objet JSON.",
         "mobile.deliver_example_title": "Point du matin",
         "mobile.deliver_example_summary": "3 tâches prioritaires pour aujourd’hui",
+        # Delivery ledger, stall, ingress, relay & turn runtime notices
+        "delivery.recovered": "Réponse récupérée (Hermes a redémarré pendant l’envoi, ce message peut être un doublon) :\n\n",
+        "delivery.reconnected": "Réponse récupérée (la plateforme de messagerie s’est reconnectée après un échec d’envoi, ce message peut être un doublon) :\n\n",
+        "delivery.flood": "Réponse récupérée (la plateforme de messagerie a limité l’envoi initial, une partie est peut-être déjà affichée plus haut) :\n\n",
+        "gateway.stall_warning": "Je semble bloqué (aucune activité depuis {minutes} min). Envoyez /stop pour annuler la tâche en cours, ou /new pour ouvrir une nouvelle discussion.",
+        "ingress.queue_full": "Trop de messages sont déjà en attente dans cette discussion ; renvoyez celui-ci après la réponse en cours.",
+        "ingress.already_admitted": "Hermes a déjà reçu un autre message avec cet identifiant ; cette version n’a pas été enregistrée. Renvoyez-la comme nouveau message pour continuer.",
+        "ingress.refused": "Hermes a refusé ce message ({named}) ; il n’a ni été enregistré ni traité. Demandez à l’administrateur de vérifier gateway.log.",
+        "ingress.moved_dropped": "Hermes n’a pas répondu à ce message ({reason}) : la discussion visée a changé, il a donc été ignoré. Renvoyez-le pour continuer.",
+        "ingress.pause_restarting": "Hermes redémarre. Votre message est enregistré et recevra une réponse dès son retour.",
+        "ingress.pause_busy": "Votre message est enregistré et recevra une réponse dès la fin de la tâche en cours dans cette discussion.",
+        "ingress.pause_unknown": "Cette discussion est en pause : un tour précédent ne s’est pas terminé lors du redémarrage de Hermes, et vous seul savez s’il faut le renvoyer. Votre message est enregistré. Envoyez {discard} pour ignorer le tour interrompu et continuer (il ne sera pas relancé), ou /reset pour ouvrir une nouvelle discussion.",
+        "ingress.pause_unauthorized": "Cette discussion est en pause : un message en file n’a pas pu être réautorisé ({reason}). Votre message est enregistré mais ne recevra pas de réponse ici. Envoyez /reset pour ouvrir une nouvelle discussion, ou demandez à l’administrateur de reprendre celle-ci.",
+        "relay.approval_expired": "Approbation expirée : aucune commande n’était en attente.",
+        "relay.type_answer": "Saisissez votre réponse :",
+        "relay.approved_once": "Approuvé une fois",
+        "relay.approved_session": "Approuvé pour la session",
+        "relay.approved_always": "Approuvé de façon permanente",
+        "relay.denied": "Refusé",
+        "relay.always_approve": "Toujours approuver",
+        "relay.cancelled": "Annulé",
+        "turn.launch_credentials_unavailable": "Les identifiants de lancement de cette session ne sont plus disponibles ({reason}) ; ce message n’a pas été traité. Démarrez une nouvelle session depuis le terminal pour les lier à nouveau.",
     },
 }
 
@@ -440,11 +591,15 @@ __all__ = [
     "DEFAULT_USER_LANG",
     "SUPPORTED_USER_LANGS",
     "active_scoped_lang",
+    "clear_remembered_user_lang_cache",
     "current_user_lang",
     "detect_text_lang",
     "find_slop_hits",
     "normalize_user_lang",
     "parse_accept_language_header",
+    "read_remembered_user_lang",
+    "remember_user_lang",
+    "resolve_inbound_user_lang",
     "resolve_request_lang",
     "resolve_user_lang",
     "t",

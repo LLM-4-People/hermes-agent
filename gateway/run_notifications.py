@@ -537,7 +537,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         """
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
-        message = t("gateway.startup.online")
+        homes = getattr(self, "_served_profile_homes", None) or {}
         targets = list(self._served_home_channel_transports())
         # A chat already notified for ANOTHER profile is not notified again.
         notified_chats = {
@@ -559,6 +559,12 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             if chat in notified_chats:
                 delivered.add(target)
                 continue
+            profile_home = homes.get(profile) if profile is not None else None
+            if profile_home is not None:
+                from agent.i18n import _resolve_language
+                message = t("gateway.startup.online", lang=_resolve_language(str(profile_home)))
+            else:
+                message = t("gateway.startup.online")
             if await self._send_home_channel_message(
                 platform, home, transport, message, "Home-channel startup notification failed for %s:%s: %s",
             ):

@@ -482,10 +482,16 @@ class GatewayStartupMixin:
         # No early return on an empty claim: the boot sweep may have ADOPTED flood-refused rows that are
         # not due yet, and those still need their timer armed below.
         try:
-            from gateway.delivery_ledger import RECOVERED_MARKER, mark_delivered, mark_failed
+            from gateway.delivery_ledger import (
+                RECOVERED_MARKER,
+                localize_delivery_marker,
+                mark_delivered,
+                mark_failed,
+            )
         except Exception:
             logger.debug("delivery ledger import failed", exc_info=True)
             return 0
+        homes = getattr(self, "_served_profile_homes", None) or {}
         redelivered = 0
         for row in claimed:
             if row.get("adopted"):
@@ -497,7 +503,14 @@ class GatewayStartupMixin:
                 continue
             content = row["content"]
             if row.get("needs_marker"):
-                content = row.get("marker", RECOVERED_MARKER) + content
+                profile_home = homes.get(row.get("profile")) if row.get("profile") else None
+                marker_lang = None
+                if profile_home is not None:
+                    from agent.i18n import _resolve_language
+                    marker_lang = _resolve_language(str(profile_home))
+                content = localize_delivery_marker(
+                    row.get("marker", RECOVERED_MARKER), lang=marker_lang
+                ) + content
             metadata = {"thread_id": row["thread_id"]} if row.get("thread_id") else None
             try:
                 result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)

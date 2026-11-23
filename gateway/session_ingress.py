@@ -35,11 +35,15 @@ _CONTENT_CLAUSES = frozenset({
 })
 
 # Nothing was committed (main's busy-queue cap); /retry answers it before rewriting (#139257).
-QUEUE_FULL_REPLY = ('⏳ Too many messages are already waiting in this conversation; '
-                    'send this again after the current reply.')
+QUEUE_FULL_REPLY = (
+    'Too many messages are already waiting in this conversation; '
+    'send this again after the current reply.'
+)
 # Nothing new was committed: the message id is already admitted with other content.
-ALREADY_ADMITTED_REPLY = ('⚠️ Hermes already received a different message under this message id, so this '
-                          'version was not saved. Send it again as a new message to continue.')
+ALREADY_ADMITTED_REPLY = (
+    'Hermes already received a different message under this message id, so this '
+    'version was not saved. Send it again as a new message to continue.'
+)
 
 
 async def admit_message(authority, event):
@@ -59,9 +63,9 @@ async def admit_message(authority, event):
             # Refused before commit (_validate_native): a refusal notice instead of a generic turn error.
             # The reply reaches the whole chat, so only content clauses are named; trust and provenance
             # clauses (and any new one) stay generic, and gateway.log keeps the clause (``_refuse``).
+            from gateway.i18n import t as gateway_t
             named = f'{exc.reason}: {exc.field}' if exc.field in _CONTENT_CLAUSES else exc.reason
-            return (f'⚠️ Hermes refused this message ({named}), so it was not saved '
-                    'or answered. Ask the operator to check gateway.log.')
+            return gateway_t('ingress.refused', named=named)
         runner = authority.runner
         if exc.reason == 'runtime_draining' and runner._draining:
             # A restart's after-turn wait or a stop refused it before commit: the same notice the
@@ -71,13 +75,15 @@ async def admit_message(authority, event):
         if exc.reason == 'admission_conflict' and exc.field == ADMITTED_REQUEST_CONFLICT['field']:
             # The provider id is already admitted with other content (a redelivery of the same message
             # resolves to its row in ``reconcile_native_retry``): the earlier message is the one that runs.
+            from gateway.i18n import t as gateway_t
             logger.warning('Native message %s refused: its id is already admitted with other content',
                            getattr(event, 'message_id', None))
-            return ALREADY_ADMITTED_REPLY
+            return gateway_t('ingress.already_admitted')
         if exc.reason != 'queue_full':
             raise
         # Nothing was committed (main's busy-queue cap): say so instead of a generic turn error.
-        return QUEUE_FULL_REPLY
+        from gateway.i18n import t as gateway_t
+        return gateway_t('ingress.queue_full')
     finally:
         messaging_admission.reset(ingress)
     if receipt.status == 'terminal':
@@ -111,8 +117,8 @@ async def admit_message(authority, event):
         row = admissions.get(admission_id=receipt.admission_id)
         if row is not None and row.status == 'terminal':
             # The drain refused this head (``_refuse_head``): cancelled, not saved behind a pause.
-            return (f'⚠️ Hermes did not answer this message ({exc.reason}): the conversation it was '
-                    'queued for moved, so it was dropped. Send it again to continue.')
+            from gateway.i18n import t as gateway_t
+            return gateway_t('ingress.moved_dropped', reason=exc.reason)
         if row is not None:
             note_busy_parked(event)  # still queued (saved): answered after the pause, not dropped
         return pause_notice(authority, receipt.ref, exc.reason)
@@ -260,28 +266,25 @@ def pause_notice(authority, ref, reason):
     """The committed input stays queued behind a paused FIFO (a turn lost across an owner
     restart, or a head the preflight refused). Tell the platform user once per pause episode
     through the ordinary reply path; later messages onto the same pause are admitted silently."""
+    from gateway.i18n import t as gateway_t
     live = authority.sessions[ref.session_id]
     if live.pause_notified:
         return None
     live.pause_notified = True
     if reason == 'runtime_draining':
         # Transient: the row runs when the restarted owner drains it, so /reset would be wrong advice.
-        return '⏳ Hermes is restarting — your message is saved and will be answered when it is back.'
+        return gateway_t('ingress.pause_restarting')
     if reason == 'session_busy':
         # Transient: queued behind work already running on this conversation (a worker execution).
-        return '⏳ Your message is saved and will be answered when the work running in this conversation finishes.'
+        return gateway_t('ingress.pause_busy')
     if reason == 'unknown_execution':
         # GW-10: the way out is in this chat. /discard acknowledges the lost turn (never replayed)
         # through the same fenced resolve_unknown as Desktop/TUI, and the saved messages then run.
         # Slack registers no native /discard (its slash cap): the umbrella `/hermes discard` reaches it.
         slack = getattr(getattr(live.source, 'platform', None), 'value', None) == 'slack'
         discard = '/hermes discard' if slack else '/discard'
-        return ('⏸️ This conversation is paused: a previous turn did not finish when Hermes restarted, '
-                f'and only you know whether to send it again. Your message is saved. Send {discard} to drop '
-                'the lost turn and continue (it is not re-run), or /reset to start a fresh conversation.')
-    cause = f'a queued message could not be re-authorized ({reason})'
-    return (f'⏸️ This conversation is paused: {cause}. Your message is saved but will not be answered here. '
-            'Send /reset to start a fresh conversation, or ask the operator to resume this one.')
+        return gateway_t('ingress.pause_unknown', discard=discard)
+    return gateway_t('ingress.pause_unauthorized', reason=reason)
 
 
 def row_turn_author(policy, row):

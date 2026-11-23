@@ -1352,11 +1352,21 @@ class GatewayInboundMixin(
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """Handle an incoming message from any platform: auth → command check → running-agent
         interrupt → get/create session → build context → run agent → return response."""
-        from gateway.run import _AGENT_PENDING_SENTINEL
+        from gateway.i18n import resolve_inbound_user_lang, user_lang_scope
         _admitted = await self._hm_admit_event(event)
         if _admitted is None:
             return None
         event, source, is_internal = _admitted
+        turn_lang = resolve_inbound_user_lang(self, event, source, is_internal)
+        if turn_lang is not None:
+            with user_lang_scope(turn_lang):
+                return await self._handle_message_admitted(event, source, is_internal)
+        return await self._handle_message_admitted(event, source, is_internal)
+
+    async def _handle_message_admitted(
+        self, event: MessageEvent, source: SessionSource, is_internal: bool
+    ) -> Optional[str]:
+        from gateway.run import _AGENT_PENDING_SENTINEL
         if not is_internal:
             from hermes_cli.observability.shared_metrics_events import record_gateway_slash_command
             record_gateway_slash_command(event)
@@ -1454,7 +1464,7 @@ class GatewayInboundMixin(
                     agent_result=_agent_result, source=source, is_internal=is_internal, event=event,
                 )
             except Exception as _goal_exc:
-                logger.debug("post-turn hook failed: %s", _goal_exc)
+                logger.debug("post-turn hook failed: %s", _goal_exc, exc_info=True)
             return _agent_result
         finally:
             # One-shot restore (/moa, /model --once) must run on EVERY exit path (success,
