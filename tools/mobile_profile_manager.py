@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from gateway.i18n import current_user_lang, normalize_user_lang, t
-from gateway.mobile_pairing import PairingError, PairingStore, normalize_public_host
+from gateway.mobile_pairing import PairingError, PairingStore, resolve_public_host
 from gateway.mobile_profiles import (
     ProfileManagementError,
     build_onboarding_payload,
@@ -107,20 +107,7 @@ MANAGE_PROFILES_SCHEMA: dict[str, Any] = {
 
 
 def _resolve_host_hint(raw_host: Optional[str], root: Path) -> str:
-    candidate = (raw_host or "").strip()
-    if not candidate:
-        from gateway.mobile_profiles import _read_profile_config
-
-        cfg = _read_profile_config(root)
-        gw = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
-        api_cfg = gw.get("api_server") if isinstance(gw.get("api_server"), dict) else {}
-        candidate = str(api_cfg.get("public_url") or "").strip()
-    if not candidate:
-        return ""
-    try:
-        return normalize_public_host(candidate)
-    except PairingError:
-        return ""
+    return resolve_public_host(raw_host or "", root_home=root)
 
 
 def _build_pairing_card(ticket: dict[str, Any], *, lang: str) -> dict[str, Any]:

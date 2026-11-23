@@ -6,15 +6,25 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
+import stat
+import struct
 from unittest.mock import patch
+import zlib
 
 from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
 from gateway.config import Platform, PlatformConfig
 from gateway.i18n import user_lang_scope
-from gateway.mobile_pairing import PairingError, PairingStore, build_pairing_deep_link
+from gateway.mobile_pairing import (
+    PairingError,
+    PairingStore,
+    build_pairing_deep_link,
+    normalize_public_host,
+    resolve_public_host,
+)
 from gateway.mobile_profiles import (
     ProfileManagementError,
     create_managed_profile,
@@ -508,3 +518,479 @@ def test_mobile_setup_cli_invite_pair_and_qr(monkeypatch, tmp_path: Path, capsys
     assert all(matrix[0][c] for c in range(7))
     assert all(matrix[0][n - 7 + c] for c in range(7))
     assert all(matrix[n - 7][c] for c in range(7))
+
+
+def _extract_qr_format_copies(matrix: list[list[bool]]) -> tuple[int, int]:
+    """Read both ISO/IEC 18004 Figure 25 format-info copies (bit 0 = LSB, bit 14 = MSB)."""
+    size = len(matrix)
+    copy1 = 0
+    for i in range(6):
+        copy1 |= (1 if matrix[i][8] else 0) << i
+    copy1 |= (1 if matrix[7][8] else 0) << 6
+    copy1 |= (1 if matrix[8][8] else 0) << 7
+    copy1 |= (1 if matrix[8][7] else 0) << 8
+    for i in range(9, 15):
+        copy1 |= (1 if matrix[8][14 - i] else 0) << i
+
+    copy2 = 0
+    for i in range(8):
+        copy2 |= (1 if matrix[8][size - 1 - i] else 0) << i
+    for i in range(8, 15):
+        copy2 |= (1 if matrix[size - 15 + i][8] else 0) << i
+    return copy1, copy2
+
+
+def _extract_qr_version_copies(matrix: list[list[bool]]) -> tuple[int, int]:
+    """Read both ISO/IEC 18004 Figure 26 18-bit version-info blocks (Version 7+)."""
+    size = len(matrix)
+    top_right = 0
+    bottom_left = 0
+    for i in range(18):
+        a, b = size - 11 + (i % 3), i // 3
+        top_right |= (1 if matrix[b][a] else 0) << i
+        bottom_left |= (1 if matrix[a][b] else 0) << i
+    return top_right, bottom_left
+
+
+def _qr_function_mask(version: int, size: int) -> list[list[bool]]:
+    """Return the ISO/IEC 18004 function-module mask for *version* and *size*."""
+    func = [[False] * size for _ in range(size)]
+    for r0, c0 in ((0, 0), (0, size - 7), (size - 7, 0)):
+        for dr in range(-1, 8):
+            for dc in range(-1, 8):
+                r, c = r0 + dr, c0 + dc
+                if 0 <= r < size and 0 <= c < size:
+                    func[r][c] = True
+    for i in range(8, size - 8):
+        func[6][i] = func[i][6] = True
+    centers = mobile_setup._QR_VERSIONS[version][3]
+    last_center = len(centers) - 1
+    for ri, r in enumerate(centers):
+        for ci, c in enumerate(centers):
+            if (ri == 0 and ci == 0) or (ri == 0 and ci == last_center) or (ri == last_center and ci == 0):
+                continue
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    func[r + dr][c + dc] = True
+    for i in range(9):
+        func[i][8] = func[8][i] = True
+    for i in range(8):
+        func[8][size - 1 - i] = func[size - 1 - i][8] = True
+    if version >= 7:
+        for i in range(18):
+            a, b = size - 11 + (i % 3), i // 3
+            func[b][a] = func[a][b] = True
+    return func
+
+
+def _read_qr_data_bits(matrix: list[list[bool]], func: list[list[bool]], mask: int) -> list[int]:
+    """Read and unmask data bits in standard ISO/IEC 18004 two-column zigzag order."""
+    size = len(matrix)
+    bits: list[int] = []
+    col = size - 1
+    upward = True
+    while col > 0:
+        if col == 6:
+            col -= 1
+        row_iter = range(size - 1, -1, -1) if upward else range(size)
+        for r in row_iter:
+            for dc in (0, -1):
+                c = col + dc
+                if func[r][c]:
+                    continue
+                val = 1 if matrix[r][c] else 0
+                if mobile_setup._mask_bit(mask, r, c):
+                    val ^= 1
+                bits.append(val)
+        col -= 2
+        upward = not upward
+    return bits
+
+
+def _decode_qr_byte_payload_from_matrix(matrix: list[list[bool]]) -> str:
+    """Pure-Python ISO/IEC 18004 byte-mode decoder verifying format, mask, zigzag, and deinterleaving."""
+    size = len(matrix)
+    version = (size - 17) // 4
+    copy1, copy2 = _extract_qr_format_copies(matrix)
+    assert copy1 == copy2
+    unmasked_fmt = copy1 ^ 0x5412
+    fmt_data = unmasked_fmt >> 10
+    ec_bits = (fmt_data >> 3) & 0x3
+    mask = fmt_data & 0x7
+    assert ec_bits == 0b01
+    assert 0 <= mask <= 7
+    assert copy1 == mobile_setup._format_bits(0b01, mask)
+
+    func = _qr_function_mask(version, size)
+    bits = _read_qr_data_bits(matrix, func, mask)
+
+    cap, _, blocks, _ = mobile_setup._QR_VERSIONS[version]
+    codewords = [
+        sum(bits[i + k] << (7 - k) for k in range(8))
+        for i in range(0, cap * 8, 8)
+    ]
+    short_len = cap // blocks
+    num_long = cap % blocks
+    num_short = blocks - num_long
+    block_lens = [short_len + (1 if idx >= num_short else 0) for idx in range(blocks)]
+    reconstructed: list[list[int]] = [[] for _ in range(blocks)]
+    pos = 0
+    for col_idx in range(short_len + (1 if num_long else 0)):
+        for blk_idx in range(blocks):
+            if col_idx < block_lens[blk_idx]:
+                reconstructed[blk_idx].append(codewords[pos])
+                pos += 1
+    data_bytes = [b for blk in reconstructed for b in blk]
+    data_bits = [(b >> s) & 1 for b in data_bytes for s in range(7, -1, -1)]
+    mode = sum(data_bits[k] << (3 - k) for k in range(4))
+    assert mode == 0b0100
+    len_width = 8 if version <= 9 else 16
+    length = sum(data_bits[4 + k] << (len_width - 1 - k) for k in range(len_width))
+    start = 4 + len_width
+    raw = bytes(
+        sum(data_bits[start + i * 8 + k] << (7 - k) for k in range(8))
+        for i in range(length)
+    )
+    return raw.decode("utf-8")
+
+
+def _decode_qr_matrix_from_unicode(rendered: str, *, border: int, invert: bool) -> list[list[bool]]:
+    rows: list[list[bool]] = []
+    for line in rendered.splitlines():
+        top: list[bool] = []
+        bottom: list[bool] = []
+        for ch in line:
+            t_fg = ch in {"█", "▀"}
+            b_fg = ch in {"█", "▄"}
+            top.append((not t_fg) if invert else t_fg)
+            bottom.append((not b_fg) if invert else b_fg)
+        rows.append(top)
+        rows.append(bottom)
+    padded_width = len(rows[0])
+    core_size = padded_width - border * 2
+    return [rows[border + r][border : border + core_size] for r in range(core_size)]
+
+
+def _decode_qr_matrix_from_png(png_bytes: bytes, *, scale: int = 10, border: int = 4) -> list[list[bool]]:
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    pos = 8
+    width = height = 0
+    idat_parts: list[bytes] = []
+    while pos < len(png_bytes):
+        length = struct.unpack(">I", png_bytes[pos : pos + 4])[0]
+        ctype = png_bytes[pos + 4 : pos + 8]
+        cdata = png_bytes[pos + 8 : pos + 8 + length]
+        crc_actual = struct.unpack(">I", png_bytes[pos + 8 + length : pos + 12 + length])[0]
+        crc_expected = zlib.crc32(cdata, zlib.crc32(ctype)) & 0xFFFFFFFF
+        assert crc_actual == crc_expected
+        if ctype == b"IHDR":
+            width, height, bit_depth, color_type, *_ = struct.unpack(">IIBBBBB", cdata)
+            assert width == height and bit_depth == 8 and color_type == 0
+        elif ctype == b"IDAT":
+            idat_parts.append(cdata)
+        elif ctype == b"IEND":
+            break
+        pos += 12 + length
+    raw = zlib.decompress(b"".join(idat_parts))
+    stride = 1 + width
+    assert len(raw) == height * stride
+    padded_modules = width // scale
+    core_size = padded_modules - border * 2
+    matrix: list[list[bool]] = []
+    for r in range(core_size):
+        py = (border + r) * scale + scale // 2
+        row_start = py * stride
+        assert raw[row_start] == 0
+        row: list[bool] = []
+        for c in range(core_size):
+            px = (border + c) * scale + scale // 2
+            pixel = raw[row_start + 1 + px]
+            assert pixel in (0, 255)
+            row.append(pixel == 0)
+        matrix.append(row)
+    return matrix
+
+
+def test_qr_format_and_version_bits_iso18004_versions_1_to_10():
+    # Payloads chosen to exercise every single QR Version 1 through 10.
+    version_lengths = {1: 12, 2: 24, 3: 40, 4: 64, 5: 90, 6: 120, 7: 144, 8: 175, 9: 215, 10: 250}
+    assert mobile_setup._format_bits(0b01, 0) == 0x77C4  # ISO/IEC 18004 Table C.1 EC-L mask 0
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        cv2 = None
+        np = None
+
+    for version, length in version_lengths.items():
+        payload = f"https://chat.hermes.example.com/mobile?v={version}&p=" + ("a" * length)
+        payload = payload[:length]
+        assert mobile_setup._choose_qr_version(len(payload.encode("utf-8"))) == version
+        matrix = mobile_setup.encode_qr_matrix(payload)
+        size = 17 + 4 * version
+        assert len(matrix) == size
+
+        copy1, copy2 = _extract_qr_format_copies(matrix)
+        assert copy1 == copy2, f"V{version} Copy 1 vs Copy 2 mismatch"
+        mask = ((copy1 ^ 0x5412) >> 10) & 0x7
+        expected_fmt = mobile_setup._format_bits(0b01, mask)
+        assert copy1 == expected_fmt, f"V{version} Copy 1 mismatch"
+        assert copy2 == expected_fmt, f"V{version} Copy 2 mismatch"
+        assert matrix[size - 8][8] is True
+
+        if version >= 7:
+            expected_vbits = mobile_setup._version_bits(version)
+            tr, bl = _extract_qr_version_copies(matrix)
+            assert tr == expected_vbits, f"V{version} top-right version block mismatch"
+            assert bl == expected_vbits, f"V{version} bottom-left version block mismatch"
+            # Timing-row alignment center must be present (not skipped by timing pattern).
+            mid_center = mobile_setup._QR_VERSIONS[version][3][1]
+            for cr, cc in ((6, mid_center), (mid_center, 6)):
+                for dr in range(-2, 3):
+                    for dc in range(-2, 3):
+                        assert matrix[cr + dr][cc + dc] is (max(abs(dr), abs(dc)) != 1)
+
+        assert _decode_qr_byte_payload_from_matrix(matrix) == payload
+
+        if cv2 is not None and np is not None:
+            png_bytes = mobile_setup.encode_qr_png(matrix, scale=8, border=4)
+            img = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+            decoded, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+            assert decoded == payload, f"OpenCV failed to decode V{version}"
+
+
+def test_qr_unicode_border_invert_and_png_roundtrip(monkeypatch, tmp_path: Path, capsys):
+    _make_adapter(monkeypatch, tmp_path)
+    target_url = "https://chat.hermes.example.com/mobile"
+    deep_link = build_pairing_deep_link(target_url, "single_use_code_for_roundtrip_123456")
+
+    # 1. Default Unicode border is 4 (ISO/IEC 18004 quiet zone) and round-trips cleanly.
+    rendered = mobile_setup.render_qr_unicode(deep_link)
+    lines = rendered.splitlines()
+    assert lines[0] == " " * len(lines[0])
+    assert lines[1] == " " * len(lines[1])
+    assert all(line[:4] == "    " and line[-4:] == "    " for line in lines)
+    recovered = _decode_qr_matrix_from_unicode(rendered, border=4, invert=False)
+    assert _decode_qr_byte_payload_from_matrix(recovered) == deep_link
+
+    # 2. Inverted Unicode paints the quiet zone white (█) for dark-mode terminals and round-trips identically.
+    inverted = mobile_setup.render_qr_unicode(deep_link, invert=True)
+    inv_lines = inverted.splitlines()
+    assert inv_lines[0] == "█" * len(inv_lines[0])
+    assert inv_lines[1] == "█" * len(inv_lines[1])
+    recovered_inv = _decode_qr_matrix_from_unicode(inverted, border=4, invert=True)
+    assert recovered_inv == recovered
+    assert _decode_qr_byte_payload_from_matrix(recovered_inv) == deep_link
+
+    # 3. CLI --qr --invert --png writes a crisp 0600 PNG that decodes back to the exact deep link.
+    png_out = tmp_path / "pair_qr.png"
+    rc = mobile_setup.main([
+        "--pair",
+        "--public-url", target_url,
+        "--hermes-home", str(tmp_path),
+        "--qr",
+        "--invert",
+        "--png", str(png_out),
+    ])
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    link_line = next(line for line in stdout.splitlines() if line.startswith("Pairing link: "))
+    emitted_link = link_line.split("Pairing link: ", 1)[1].strip()
+    assert emitted_link.startswith("hermes://pair?host=https%3A%2F%2Fchat.hermes.example.com%2Fmobile&code=")
+    assert f"QR PNG (0600): {png_out.resolve()}" in stdout
+    assert png_out.is_file()
+    assert stat.S_IMODE(png_out.stat().st_mode) == 0o600
+
+    png_bytes = png_out.read_bytes()
+    png_matrix = _decode_qr_matrix_from_png(png_bytes, scale=10, border=4)
+    assert _decode_qr_byte_payload_from_matrix(png_matrix) == emitted_link
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        cv2 = None
+        np = None
+    if cv2 is not None and np is not None:
+        img = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        decoded, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+        assert decoded == emitted_link
+
+
+def test_resolve_public_host_precedence_and_fail_closed(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("HERMES_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("API_SERVER_PUBLIC_URL", raising=False)
+
+    # Tier 4a: fallback to request_scheme://request_host.
+    assert (
+        resolve_public_host(root_home=tmp_path, request_scheme="http", request_host="127.0.0.1:8642")
+        == "http://127.0.0.1:8642"
+    )
+    # Tier 4b: reverse-proxy headers including X-Forwarded-Prefix preserve /mobile subpath.
+    proxy_headers = {
+        "X-Forwarded-Proto": "https, http",
+        "X-Forwarded-Host": "chat.hermes.example.com, internal:8642",
+        "X-Forwarded-Prefix": "/mobile/",
+    }
+    assert (
+        resolve_public_host(
+            root_home=tmp_path,
+            request_headers=proxy_headers,
+            request_scheme="http",
+            request_host="127.0.0.1:8642",
+        )
+        == "https://chat.hermes.example.com/mobile"
+    )
+
+    # Tier 3a: config.yaml gateway.api_server.public_url beats reverse-proxy headers.
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("gateway:\n  api_server:\n    public_url: https://gw.example.com/mobile/\n", encoding="utf-8")
+    assert (
+        resolve_public_host(root_home=tmp_path, request_headers=proxy_headers)
+        == "https://gw.example.com/mobile"
+    )
+
+    # Tier 3b: config.yaml api_server.public_url beats gateway.api_server.public_url.
+    cfg_path.write_text(
+        "api_server:\n  public_url: https://top.example.com/mobile/\n"
+        "gateway:\n  api_server:\n    public_url: https://gw.example.com/mobile/\n",
+        encoding="utf-8",
+    )
+    assert (
+        resolve_public_host(root_home=tmp_path, request_headers=proxy_headers)
+        == "https://top.example.com/mobile"
+    )
+
+    # Tier 2a: .env API_SERVER_PUBLIC_URL beats config.yaml and does NOT mutate os.environ.
+    env_path = tmp_path / ".env"
+    env_path.write_text('API_SERVER_PUBLIC_URL="https://dotenv-api.example.com/mobile/"\n', encoding="utf-8")
+    assert resolve_public_host(root_home=tmp_path, request_headers=proxy_headers) == "https://dotenv-api.example.com/mobile"
+    assert "API_SERVER_PUBLIC_URL" not in os.environ
+
+    # Tier 2b: .env HERMES_PUBLIC_URL beats .env API_SERVER_PUBLIC_URL (supports inline comment).
+    env_path.write_text(
+        'API_SERVER_PUBLIC_URL="https://dotenv-api.example.com/mobile"\n'
+        "export HERMES_PUBLIC_URL=https://dotenv-hermes.example.com/mobile/  # prod\n",
+        encoding="utf-8",
+    )
+    assert (
+        resolve_public_host(root_home=tmp_path, request_headers=proxy_headers)
+        == "https://dotenv-hermes.example.com/mobile"
+    )
+    assert "HERMES_PUBLIC_URL" not in os.environ
+
+    # Tier 2c: os.environ beats .env.
+    monkeypatch.setenv("API_SERVER_PUBLIC_URL", "https://env-api.example.com/mobile/")
+    assert resolve_public_host(root_home=tmp_path) == "https://env-api.example.com/mobile"
+    monkeypatch.setenv("HERMES_PUBLIC_URL", "https://env-hermes.example.com/mobile/")
+    assert resolve_public_host(root_home=tmp_path) == "https://env-hermes.example.com/mobile"
+
+    # Tier 1: explicit raw_host overrides everything and preserves subpath.
+    assert (
+        resolve_public_host("https://chat.hermes.example.com/mobile/", root_home=tmp_path)
+        == "https://chat.hermes.example.com/mobile"
+    )
+
+    # Fail-closed validation rejects embedded credentials, control chars, whitespace, query, fragment, bad schemes/ports.
+    for bad in (
+        "https://user:pass@chat.hermes.example.com/mobile",
+        "https://:@chat.hermes.example.com/mobile",
+        "https://chat.hermes.example.com/mobile?foo=bar",
+        "https://chat.hermes.example.com/mobile#frag",
+        "https://chat.hermes.example.com/\nmobile",
+        "https://chat.hermes.example.com /mobile",
+        "javascript:alert(1)",
+        "ftp://chat.hermes.example.com",
+        "https://chat.hermes.example.com:99999/mobile",
+    ):
+        with pytest.raises(PairingError) as exc:
+            normalize_public_host(bad)
+        assert exc.value.code == "invalid_host"
+
+    monkeypatch.delenv("HERMES_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("API_SERVER_PUBLIC_URL", raising=False)
+    env_path.unlink()
+    cfg_path.unlink()
+    for bad_prefix in ("//evil.com", "/mobile/../secret", "/mobile?x=1", "@evil.com", "/mobile\r\n"):
+        with pytest.raises(PairingError) as exc:
+            resolve_public_host(
+                root_home=tmp_path,
+                request_headers={
+                    "X-Forwarded-Proto": "https",
+                    "X-Forwarded-Host": "chat.hermes.example.com",
+                    "X-Forwarded-Prefix": bad_prefix,
+                },
+            )
+        assert exc.value.code == "invalid_host"
+
+
+@pytest.mark.asyncio
+async def test_public_host_ssot_across_api_cli_and_tool(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.delenv("HERMES_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("API_SERVER_PUBLIC_URL", raising=False)
+    default_key = "admin-super-secret-key-123456"
+    adapter = _make_adapter(monkeypatch, tmp_path, default_key=default_key)
+
+    # Configure HERMES_PUBLIC_URL in <root_home>/.env (no env var, no explicit host argument).
+    env_path = tmp_path / ".env"
+    existing = env_path.read_text(encoding="utf-8-sig")
+    env_path.write_text(existing + "HERMES_PUBLIC_URL=https://chat.hermes.example.com/mobile/\n", encoding="utf-8")
+
+    # 1. CLI mobile_setup.py picks up .env HERMES_PUBLIC_URL automatically.
+    rc = mobile_setup.main(["--pair", "--hermes-home", str(tmp_path), "--json"])
+    assert rc == 0
+    cli_out = json.loads(capsys.readouterr().out)
+    assert cli_out["pairing_ticket"]["deep_link"].startswith(
+        "hermes://pair?host=https%3A%2F%2Fchat.hermes.example.com%2Fmobile&code="
+    )
+
+    # 2. LLM tool manage_profiles picks up .env HERMES_PUBLIC_URL automatically.
+    tool_out = json.loads(
+        manage_profiles_tool("create_device_pairing_link", caller_profile="default", root_home=tmp_path)
+    )
+    assert tool_out["ok"] is True
+    assert tool_out["pairing_ticket"]["deep_link"].startswith(
+        "hermes://pair?host=https%3A%2F%2Fchat.hermes.example.com%2Fmobile&code="
+    )
+
+    # 3. API server routes pick up .env HERMES_PUBLIC_URL (and fall back to X-Forwarded-Prefix when absent).
+    client = await _start_test_client(adapter)
+    try:
+        resp = await client.post(
+            "/api/mobile/pairing/create",
+            headers={"Authorization": f"Bearer {default_key}"},
+            json={},
+        )
+        assert resp.status == 201
+        ticket = await resp.json()
+        assert ticket["deep_link"].startswith(
+            "hermes://pair?host=https%3A%2F%2Fchat.hermes.example.com%2Fmobile&code="
+        )
+
+        # Claiming returns base_host + server_url with /mobile preserved.
+        claim_resp = await client.post("/api/mobile/pairing/claim", json={"code": ticket["code"]})
+        assert claim_resp.status == 200
+        claimed = await claim_resp.json()
+        assert claimed["base_host"] == "https://chat.hermes.example.com/mobile"
+        assert claimed["server_url"] == "https://chat.hermes.example.com/mobile"
+
+        # Without .env HERMES_PUBLIC_URL, X-Forwarded-Prefix is honored cleanly.
+        env_path.write_text(existing, encoding="utf-8")
+        resp2 = await client.post(
+            "/api/mobile/pairing/create",
+            headers={
+                "Authorization": f"Bearer {default_key}",
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "chat.hermes.example.com",
+                "X-Forwarded-Prefix": "/mobile",
+            },
+            json={},
+        )
+        assert resp2.status == 201
+        ticket2 = await resp2.json()
+        assert ticket2["deep_link"].startswith(
+            "hermes://pair?host=https%3A%2F%2Fchat.hermes.example.com%2Fmobile&code="
+        )
+    finally:
+        await client.close()
