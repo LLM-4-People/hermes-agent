@@ -68,9 +68,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = "pull_request" ]; then
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "push=false" >> "$GITHUB_OUTPUT"
-            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "should_build=true"
+              echo "push=false"
+              echo "is_release=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "branch" ] && [ "$REF_NAME" = "main" ]; then
@@ -95,14 +97,18 @@ jobs:
           )
             if [ "$should_build" = "false" ]; then
               echo "Skipping container publish for docs/tests-only push on main."
-              echo "should_build=false" >> "$GITHUB_OUTPUT"
-              echo "push=false" >> "$GITHUB_OUTPUT"
-              echo "is_release=false" >> "$GITHUB_OUTPUT"
+              {
+                echo "should_build=false"
+                echo "push=false"
+                echo "is_release=false"
+              } >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
-          echo "should_build=true" >> "$GITHUB_OUTPUT"
-          echo "push=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "should_build=true"
+            echo "push=true"
+          } >> "$GITHUB_OUTPUT"
           if [ "$REF_TYPE" = "tag" ]; then
             # Only a reviewed semver release tag may publish `latest`. A bare `v*` tag would
             # otherwise let any unreviewed commit masquerade as a release.
