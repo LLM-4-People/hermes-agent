@@ -82,6 +82,7 @@ DOWNSTREAM_TESTS=(
   tests/tools/test_skills_tool_discovery_cache.py
   tests/tools/test_signal_media.py
   tests/scripts/test_mobile_doctor.py
+  tests/scripts/test_docs_fork.py
   tests/scripts/test_check_fork_preservation.py
   tests/ci/test_fork_ci_workflows.py
   tests/ci/test_docs_drift.py
@@ -123,6 +124,11 @@ run_static_gate() {
   # Optional anti-AI-slop & language-purity gate when present on this branch.
   if [ -f scripts/check_writing_quality.py ]; then
     "$PYTHON" -B scripts/check_writing_quality.py
+  fi
+
+  # Mechanically generated fork docs & README drift gate (pure stdlib, python3 -I safe).
+  if [ -f scripts/docs_fork.py ]; then
+    "$PYTHON" -I scripts/docs_fork.py --check
   fi
 }
 
@@ -189,6 +195,7 @@ case "$MODE" in
   fast-static)
     run_static_gate
     HERMES_SKIP_COMPILEALL=1 scripts/run_tests.sh \
+      tests/scripts/test_docs_fork.py \
       tests/scripts/test_check_fork_preservation.py \
       tests/ci/test_fork_ci_workflows.py \
       tests/ci/test_docs_drift.py \

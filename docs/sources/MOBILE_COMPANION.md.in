@@ -1,0 +1,228 @@
+# Hermes Mobile companion guide
+
+<p align="center">
+  <img src="assets/social-preview.png" alt="Hermes Agent: self-hosted companion fork for Android 16" width="100%">
+</p>
+
+This guide walks you through running **`{{fork_repo}}`** as the private backend for **[Hermes Mobile]({{companion_pages_url}})** without deep infrastructure or AI jargon.
+
+<p align="center">
+  <a href="{{companion_walkthrough_url}}"><img src="assets/mobile-companion-preview.png" alt="Hermes Mobile on Android 16: command palette, everyday workflows, connection doctor, and presence controls" width="100%"></a>
+</p>
+
+---
+
+## 1. Why use the companion fork?
+
+Hermes Mobile can connect to any Hermes API server, but `{{fork_repo}}` provides the full native Android companion surface out of the box:
+
+- **Live widgets and custom screens** (`mobile_ui`) that Hermes can draft, preview, apply, and revert cleanly.
+- **Phone deliveries and briefings** (`mobile_deliver`) that land in your Activity feed without interrupting your current chat.
+- **Approved Android device actions** (`mobile_device` / `request_device_action`) across {{device_capability_count}} capabilities ({{core_device_capability_count}} core OS actions plus {{deep_android_action_count}} deep Android 16 bidirectional actions), always behind an explicit on-phone approval sheet.
+- **Brain, memory, smart notes, skill studio, universal sharing, and habits** with full REST APIs, keyset cursor pagination, and FTS5 cross-session search.
+- **Single-host multi-user profiles (`/p/<profile>`)** so one small server can privately serve your family or team (up to {{max_concurrent_runs}} concurrent runs globally, {{max_concurrent_runs_per_profile}} per profile by default).
+- **Small-LLM friendly and bilingual ({{supported_user_langs_inline}})** companion instructions that work reliably even on fast, lightweight models.
+
+---
+
+## 2. 3-minute Docker Compose setup
+
+### Step 1 — Create your data directory and API key
+
+Choose a persistent host folder (for example `~/.hermes` or `/srv/hermes`) and generate a long, random bearer key:
+
+```bash
+mkdir -p ~/.hermes
+python3 -c 'import secrets; print("API_SERVER_KEY=" + secrets.token_urlsafe(32))' >> ~/.hermes/.env
+cat >> ~/.hermes/.env <<'EOF'
+API_SERVER_ENABLED=true
+API_SERVER_HOST=0.0.0.0
+API_SERVER_PORT={{default_api_port}}
+EOF
+chmod 600 ~/.hermes/.env
+```
+
+> **Tip:** Never reuse a short password or placeholder like `change-me`. Use at least 24 random characters and keep `.env` readable only by your host user (`chmod 600`).
+
+### Step 2 — Create `docker-compose.yml`
+
+```yaml
+services:
+  hermes:
+    # For production, pin a specific @sha256 digest from GHCR
+    image: {{ghcr_image}}
+    container_name: hermes
+    restart: unless-stopped
+    ports:
+      # Keep bound to localhost and terminate HTTPS in Caddy, Nginx, or Tailscale Serve
+      - "127.0.0.1:{{default_api_port}}:{{default_api_port}}"
+    environment:
+      HERMES_UID: "${HERMES_UID:-1000}"
+      HERMES_GID: "${HERMES_GID:-1000}"
+    volumes:
+      - ~/.hermes:/opt/data
+    command: ["gateway", "run"]
+```
+
+Start Hermes and select your LLM provider/model:
+
+```bash
+HERMES_UID="$(id -u)" HERMES_GID="$(id -g)" docker compose up -d
+docker exec -it hermes hermes model
+```
+
+> **Verify container provenance (optional):** Every image published to `{{ghcr_registry}}` is signed with keyless Cosign and includes BuildKit provenance and an SPDX SBOM. See [DOWNSTREAM.md](../DOWNSTREAM.md#image) for the exact `cosign verify` command.
+
+### Step 3 — Put HTTPS in front of port `{{default_api_port}}`
+
+Hermes Mobile expects HTTPS when connecting outside your home LAN. Keep port `{{default_api_port}}` bound to `127.0.0.1` and expose it through a reverse proxy (Caddy, Nginx, Traefik, or Tailscale Serve) with **streaming/SSE buffering disabled**:
+
+- **Caddy** handles Server-Sent Events (SSE) streaming automatically:
+  ```caddyfile
+  hermes.example.com {
+      reverse_proxy 127.0.0.1:{{default_api_port}}
+  }
+  ```
+- **Nginx** needs proxy buffering turned off so live replies stream word-by-word:
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:{{default_api_port}};
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header Connection "";
+      proxy_buffering off;
+      proxy_cache off;
+      proxy_read_timeout 3600s;
+  }
+  ```
+
+### Step 4 — Run the built-in self-check (`scripts/mobile_doctor.py`)
+
+Before touching your phone, verify the server in one command (uses Python's standard library only — zero extra packages, and never prints secrets):
+
+```bash
+python3 scripts/mobile_doctor.py \
+  --hermes-home ~/.hermes \
+  --public-url https://hermes.example.com
+```
+
+Or run it directly inside the container:
+
+```bash
+docker exec hermes python3 /opt/hermes/scripts/mobile_doctor.py \
+  --hermes-home /opt/data \
+  --public-url https://hermes.example.com
+```
+
+When everything is green, `mobile_doctor.py` prints the exact copy-paste URL for each active profile.
+
+---
+
+## 3. Single-host multi-user setup (`/p/<profile>`)
+
+You do **not** need one Docker container per person. One gateway process can safely serve multiple isolated users under `/p/<profile>`:
+
+1. **Enable profile multiplexing** in `~/.hermes/config.yaml`:
+   ```yaml
+   gateway:
+     multiplex_profiles: true
+   ```
+2. **Create a profile for each user**:
+   ```bash
+   docker exec -it hermes hermes profile create alice
+   ```
+3. **Give that profile its own unique API key** in `~/.hermes/profiles/alice/.env`:
+   ```bash
+   python3 -c 'import secrets; print("API_SERVER_KEY=" + secrets.token_urlsafe(32))' >> ~/.hermes/profiles/alice/.env
+   echo "API_SERVER_ENABLED=true" >> ~/.hermes/profiles/alice/.env
+   chmod 600 ~/.hermes/profiles/alice/.env
+   ```
+4. **Verify every profile** with `mobile_doctor.py`:
+   ```bash
+   python3 scripts/mobile_doctor.py \
+     --hermes-home ~/.hermes \
+     --public-url https://hermes.example.com
+   ```
+
+Each person connects Hermes Mobile to their own URL and their own key:
+
+| Profile | Connection URL in Hermes Mobile | Key source |
+|---|---|---|
+| Default (`default`) | `https://hermes.example.com` | `~/.hermes/.env` (`API_SERVER_KEY`) |
+| Secondary (`alice`) | `https://hermes.example.com/p/alice` | `~/.hermes/profiles/alice/.env` (`API_SERVER_KEY`) |
+| Secondary (`bob`) | `https://hermes.example.com/p/bob` | `~/.hermes/profiles/bob/.env` (`API_SERVER_KEY`) |
+
+**What stays strictly isolated per profile:**
+- Bearer authentication (`401` if a key does not match that profile; `404` for unknown or unserved `/p/<name>` prefixes).
+- Conversations, SQLite transcript databases, search indexes, and uploaded files.
+- Memory, smart notes, skills, habits, live UI widgets/surfaces, and phone deliveries.
+- Workspace files, per-profile concurrency quotas (`{{max_concurrent_runs_per_profile}}` concurrent runs per profile, `{{max_concurrent_runs}}` globally), and model/language defaults.
+- When two users on the same server *want* to share a note, thread, or artifact, they can opt in explicitly through **Shared with me** (`/api/shares`), with instant revocation at any time.
+
+---
+
+## 4. Connecting the Hermes Mobile Android app
+
+1. Install the latest signed APK from **[Hermes Mobile]({{companion_pages_url}})**.
+2. Open the app and create your local profile lock (passphrase plus optional biometrics).
+3. Enter:
+   - **Server URL:** the exact URL printed by `mobile_doctor.py` (for example `https://hermes.example.com` or `https://hermes.example.com/p/alice`).
+   - **API key:** that profile's `API_SERVER_KEY`.
+4. Open **Activity -> Connection doctor** inside the app to confirm green checks for reachability, companion capabilities (`{{active_capability_count}}/{{active_capability_count}}`), toolsets, and language sync.
+
+---
+
+## 5. Full companion surface: {{active_capability_count}} capabilities and {{default_toolset_count}} default toolsets
+
+`GET /v1/capabilities` advertises **{{active_capability_count}} active companion capabilities** ({{active_boolean_capability_count}} enabled feature flags plus the {{active_header_capability_count}} session-continuity headers `X-Hermes-Session-Id` and `X-Hermes-Session-Key`) across **{{endpoint_count}} authenticated endpoints**:
+
+{{capabilities_table}}
+
+*({{inactive_capability_count}} admin or legacy flags remain deliberately disabled on the public API surface by default: {{inactive_capabilities_inline}} unless explicitly configured.)*
+
+### {{default_toolset_count}} default enabled toolsets (of {{configurable_toolset_count}} built-in configurable toolsets in `hermes_cli/tools_config.py`)
+
+{{default_toolsets_table}}
+
+Optional opt-in built-in toolsets (disabled by default until configured; {{optional_toolset_count}} total, plus optional plugin toolsets such as `a2a`): {{optional_toolsets_inline}}.
+
+### {{device_capability_count}} approved Android device bridge capabilities
+
+When the Android app includes `device_capabilities` on a `/v1/runs` request, Hermes may request any advertised action through `request_device_action`, pausing the run until the user taps **Allow** or **Deny** on their phone ({{core_device_capability_count}} core OS capabilities plus {{deep_android_action_count}} deep Android 16 actions):
+
+{{device_capabilities_list}}
+
+---
+
+## 6. Small-LLM ergonomics and bilingual ({{supported_user_langs_inline}}) support
+
+You do not need a frontier-priced model to get a great mobile experience:
+
+- **Focused per-run mobile prompt (`agent/mobile_companion_prompt.py`)**: On mobile-originated runs, Hermes automatically injects a short, capability-filtered instruction block via `run_instruction_scope`. Non-mobile runs, background jobs, and resumed Codex threads never see it.
+- **Forgiving tool inputs**: Friendly aliases (such as `timer` -> `alarm_timer`, `music` -> `media_control`, `agenda` -> `calendar_read`, `photo` -> `camera`) are normalized automatically. `mobile_ui_patch` auto-generates widget IDs from titles and ships WCAG 2.1 AA accent presets (`teal`, `green`, `blue`, `amber`, `coral`).
+- **Automatic bilingual alignment**: Set your profile default `preferred_language` (`auto`, `fr`, or `en`) in the app, or let per-run `user_language` / `X-Hermes-Lang` / `Accept-Language` align responses automatically (`gateway/i18n.py` plus {{locale_count}} locale catalogs in `locales/`).
+
+---
+
+## 7. Security and privacy boundaries
+
+Hermes Mobile and this fork are designed **fail-closed by default**:
+
+1. **Mandatory bearer auth:** Every private endpoint requires the profile's `API_SERVER_KEY` (constant-time verification). Never expose port `{{default_api_port}}` directly on the public internet without HTTPS.
+2. **Dynamic tool exposure:** `request_device_action` is dynamically attached **only** for the duration of a `/v1/runs` turn that explicitly advertises `device_capabilities`, and immediately detached afterwards.
+3. **Explicit on-phone approval:** Every device action and destructive terminal/file action requires explicit human confirmation. Communication actions (`sms_draft`, `email_draft`, `dial_draft`, `calendar_draft`) open editable drafts and never send silently.
+4. **Zero-leak widgets and HTTP responses:** Mobile UI endpoints send `Cache-Control: no-store`, and secret-pattern scanning blocks credentials or tokens from being written into live UI patches or home-screen widgets.
+5. **Strict per-profile isolation:** Profiles never share memory, notes, transcript rows, or bearer credentials unless explicitly shared via `/api/shares`.
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| **`401 Unauthorized`** in app or `mobile_doctor.py` | Missing or mismatched `API_SERVER_KEY` (especially on `/p/<profile>`) | Check the exact profile's `.env` file (`~/.hermes/.env` or `~/.hermes/profiles/<name>/.env`) and restart `hermes` after editing `.env`. |
+| **`404 Unknown or unconfigured profile`** | `gateway.multiplex_profiles: true` is off, or profile name does not exist | Enable `gateway.multiplex_profiles: true` in `~/.hermes/config.yaml`, run `hermes profile create <name>`, and restart the gateway. |
+| **Replies arrive all at once instead of streaming** | Reverse proxy is buffering Server-Sent Events | Disable proxy buffering (`proxy_buffering off;` in Nginx; see Step 3 above). |
+| **Connection doctor warns about missing companion capabilities** | Running stock upstream `{{upstream_repo}}` instead of this fork | Switch your container image to `{{ghcr_image}}` (or a pinned `@sha256` digest from this fork) and recreate the container. |
+| **Model errors on first message** | No LLM provider/API key configured yet | Run `docker exec -it hermes hermes model` to configure your provider and pick a default model. |
+| **Need a safe diagnostic summary to share** | Want to check setup without leaking secrets | Run `python3 scripts/mobile_doctor.py --json` — all secrets are strictly redacted. |
