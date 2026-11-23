@@ -183,6 +183,7 @@ async def test_http_pairing_claim_rate_limit_and_capabilities(monkeypatch, tmp_p
         assert caps["features"]["frictionless_onboarding"] is True
         assert caps["features"]["profile_management"] is True
         assert caps["features"]["admin_settings"] is True
+        assert "mobile_pairing_inspect" in caps["endpoints"]
         assert "mobile_pairing_claim" in caps["endpoints"]
         assert "mobile_admin_settings_get" in caps["endpoints"]
 
@@ -994,3 +995,154 @@ async def test_public_host_ssot_across_api_cli_and_tool(monkeypatch, tmp_path: P
         )
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_pairing_inspect_non_consuming_and_lifecycle(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("HERMES_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("API_SERVER_PUBLIC_URL", raising=False)
+    default_key = "admin-super-secret-key-123456"
+    adapter = _make_adapter(monkeypatch, tmp_path, default_key=default_key)
+    client = await _start_test_client(adapter)
+    try:
+        admin_hdr = {"Authorization": f"Bearer {default_key}"}
+        # Create a pairing ticket for default with a friendly display name.
+        create_resp = await client.post(
+            "/api/mobile/pairing/create",
+            headers=admin_hdr,
+            json={"host": "https://chat.hermes.example.com/mobile", "display_name": "Jacob", "ttl_seconds": 300},
+        )
+        assert create_resp.status == 201
+        ticket = await create_resp.json()
+        assert "&name=Jacob" in ticket["deep_link"]
+
+        # Inspecting repeatedly NEVER consumes the ticket and NEVER returns api_key.
+        for _ in range(3):
+            insp = await client.post(
+                "/api/mobile/pairing/inspect",
+                json={"code": ticket["code"], "host": "https://chat.hermes.example.com/mobile"},
+            )
+            assert insp.status == 200
+            assert insp.headers.get("Cache-Control") == "no-store"
+            body = await insp.json()
+            assert body["object"] == "hermes.mobile.pairing.inspect"
+            assert body["valid"] is True
+            assert body["server_url"] == "https://chat.hermes.example.com/mobile"
+            assert body["base_host"] == "https://chat.hermes.example.com/mobile"
+            assert body["profile_slug"] == "default"
+            assert body["display_name"] == "Jacob"
+            assert body["mode"] == "device"
+            assert body["ttl_remaining_seconds"] > 0
+            assert "api_key" not in body
+            assert "code" not in body
+
+        # Named profile inspect returns /p/<slug> server_url and never leaks api_key.
+        create_alex = await client.post(
+            "/api/mobile/profiles",
+            headers=admin_hdr,
+            json={
+                "slug": "alex",
+                "display_name": "Alex",
+                "create_invite": True,
+                "host": "https://chat.hermes.example.com/mobile",
+            },
+        )
+        assert create_alex.status == 201
+        alex_ticket = (await create_alex.json())["pairing_ticket"]
+        assert "&profile=alex&name=Alex" in alex_ticket["deep_link"]
+        alex_insp = await client.post(
+            "/api/mobile/pairing/inspect",
+            json={"code": alex_ticket["code"], "host": "https://chat.hermes.example.com/mobile"},
+        )
+        assert alex_insp.status == 200
+        alex_body = await alex_insp.json()
+        assert alex_body["server_url"] == "https://chat.hermes.example.com/mobile/p/alex"
+        assert alex_body["profile_slug"] == "alex"
+        assert alex_body["display_name"] == "Alex"
+        assert "api_key" not in alex_body
+
+        # Claiming the ticket succeeds after repeated inspects; then BOTH inspect and claim return 410.
+        claim_resp = await client.post(
+            "/api/mobile/pairing/claim",
+            json={"code": ticket["code"], "host": "https://chat.hermes.example.com/mobile"},
+        )
+        assert claim_resp.status == 200
+        assert (await claim_resp.json())["api_key"] == default_key
+
+        after_inspect = await client.post("/api/mobile/pairing/inspect", json={"code": ticket["code"]})
+        assert after_inspect.status == 410
+        after_claim = await client.post("/api/mobile/pairing/claim", json={"code": ticket["code"]})
+        assert after_claim.status == 410
+
+        # Revoked ticket returns 410 on inspect.
+        rev_resp = await client.delete(f"/api/mobile/pairing/{alex_ticket['ticket_id']}", headers=admin_hdr)
+        assert rev_resp.status == 200
+        rev_insp = await client.post("/api/mobile/pairing/inspect", json={"code": alex_ticket["code"]})
+        assert rev_insp.status == 410
+
+        # Unknown code returns 404, and repeated invalid inspects hit the shared rate limiter (429).
+        statuses = []
+        for idx in range(5):
+            r = await client.post("/api/mobile/pairing/inspect", json={"code": f"unknown-inspect-code-{idx:04d}"})
+            statuses.append(r.status)
+        assert 404 in statuses
+        assert 429 in statuses
+    finally:
+        await client.close()
+
+
+def test_pairing_store_inspect_expired_and_deep_link_name_qr(tmp_path: Path):
+    now = [2000.0]
+    store = PairingStore(tmp_path, clock=lambda: now[0])
+
+    # Missing DB fails closed with 404 without creating a database file.
+    with pytest.raises(PairingError) as missing_exc:
+        store.inspect_ticket("nonexistent_code_123456")
+    assert missing_exc.value.status_code == 404
+    assert not store.db_path.exists()
+
+    ticket = store.create_ticket(
+        profile_slug="default",
+        display_name="Jacob",
+        mode="device",
+        created_by="default",
+        ttl_seconds=60,
+        host="https://chat.hermes.example.com/mobile",
+    )
+    deep_link = ticket["deep_link"]
+    assert deep_link.startswith("hermes://pair?host=https%3A%2F%2Fchat.hermes.example.com%2Fmobile&code=")
+    assert deep_link.endswith("&name=Jacob")
+    assert "profile=" not in deep_link
+
+    # Direct helper omits name when empty and rejects control characters fail-closed.
+    plain_link = build_pairing_deep_link("https://chat.hermes.example.com/mobile", "code_1234567890")
+    assert "name=" not in plain_link
+    with pytest.raises(PairingError) as bad_name:
+        build_pairing_deep_link("https://chat.hermes.example.com/mobile", "code_1234567890", display_name="Bad\nName")
+    assert bad_name.value.code == "invalid_display_name"
+
+    # Deep link with &name=Jacob round-trips cleanly through QR matrix, PNG, and OpenCV when available.
+    matrix = mobile_setup.encode_qr_matrix(deep_link)
+    assert _decode_qr_byte_payload_from_matrix(matrix) == deep_link
+    png_bytes = mobile_setup.encode_qr_png(matrix, scale=10, border=4)
+    assert _decode_qr_byte_payload_from_matrix(_decode_qr_matrix_from_png(png_bytes, scale=10, border=4)) == deep_link
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        cv2 = None
+        np = None
+    if cv2 is not None and np is not None:
+        img = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+        decoded, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+        assert decoded == deep_link
+
+    # Inspect succeeds while active and returns 410 once expired.
+    info = store.inspect_ticket(ticket["code"])
+    assert info["display_name"] == "Jacob"
+    assert info["ttl_remaining_seconds"] == 60
+    now[0] += 61.0
+    with pytest.raises(PairingError) as exp_exc:
+        store.inspect_ticket(ticket["code"])
+    assert exp_exc.value.status_code == 410
+    assert exp_exc.value.code == "pairing_ticket_expired"

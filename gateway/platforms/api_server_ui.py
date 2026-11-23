@@ -96,6 +96,7 @@ MOBILE_CAPABILITY_ENDPOINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mobile_delivery", ("GET", "/api/mobile/deliveries/{delivery_id}", "mobile_deliveries")),
     ("mobile_delivery_ack", ("POST", "/api/mobile/deliveries/{delivery_id}/ack", "mobile_deliveries")),
     ("mobile_pairing_create", ("POST", "/api/mobile/pairing/create", "frictionless_onboarding")),
+    ("mobile_pairing_inspect", ("POST", "/api/mobile/pairing/inspect", "frictionless_onboarding")),
     ("mobile_pairing_claim", ("POST", "/api/mobile/pairing/claim", "frictionless_onboarding")),
     ("mobile_pairing_active", ("GET", "/api/mobile/pairing/active", "frictionless_onboarding")),
     ("mobile_pairing_revoke", ("DELETE", "/api/mobile/pairing/{ticket_id}", "frictionless_onboarding")),

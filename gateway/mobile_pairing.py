@@ -237,7 +237,13 @@ def resolve_public_host(
     return normalize_public_host(f"{scheme}://{host}{forwarded_prefix}")
 
 
-def build_pairing_deep_link(host: str, code: str, *, profile_slug: str = "") -> str:
+def build_pairing_deep_link(
+    host: str,
+    code: str,
+    *,
+    profile_slug: str = "",
+    display_name: str = "",
+) -> str:
     """Build a canonical ``hermes://pair?...`` link for QR codes and 1-tap mobile onboarding."""
     params: list[tuple[str, str]] = []
     norm_host = normalize_public_host(host) if host else ""
@@ -247,6 +253,11 @@ def build_pairing_deep_link(host: str, code: str, *, profile_slug: str = "") -> 
     slug = (profile_slug or "").strip().lower()
     if slug and slug != "default":
         params.append(("profile", slug))
+    if isinstance(display_name, str) and _CONTROL_CHAR_RE.search(display_name):
+        raise PairingError("display_name contains control characters.", status_code=400, code="invalid_display_name")
+    clean_name = (display_name or "").strip()[:80]
+    if clean_name:
+        params.append(("name", clean_name))
     return f"hermes://pair?{urlencode(params)}"
 
 
@@ -274,6 +285,28 @@ def validate_mode(raw_mode: Any) -> str:
     if mode not in _VALID_MODES:
         raise PairingError("mode must be 'device' or 'invite'.", status_code=400, code="invalid_mode")
     return mode
+
+
+def _validate_pairing_code(code: Any) -> str:
+    if not isinstance(code, str) or not code.strip():
+        raise PairingError("Pairing code is required.", status_code=400, code="missing_pairing_code")
+    if _CONTROL_CHAR_RE.search(code):
+        raise PairingError("Invalid pairing code format.", status_code=400, code="invalid_pairing_code")
+    cleaned = code.strip()
+    if len(cleaned) < 12 or len(cleaned) > 256:
+        raise PairingError("Invalid pairing code format.", status_code=400, code="invalid_pairing_code")
+    return cleaned
+
+
+def _validate_ticket_row(row: Any, now: float) -> None:
+    if row is None:
+        raise PairingError("Pairing ticket not found.", status_code=404, code="pairing_ticket_not_found")
+    if row["revoked_at"] is not None:
+        raise PairingError("Pairing ticket was revoked.", status_code=410, code="pairing_ticket_revoked")
+    if row["consumed_at"] is not None:
+        raise PairingError("Pairing ticket was already used.", status_code=410, code="pairing_ticket_consumed")
+    if float(row["expires_at"]) <= now:
+        raise PairingError("Pairing ticket has expired.", status_code=410, code="pairing_ticket_expired")
 
 
 def _default_root_home() -> Path:
@@ -361,20 +394,48 @@ class PairingStore:
             "code": code,
             "expires_at": expires_at,
             "ttl_seconds": ttl,
-            "deep_link": build_pairing_deep_link(norm_host, code, profile_slug=slug),
+            "deep_link": build_pairing_deep_link(
+                norm_host,
+                code,
+                profile_slug=slug,
+                display_name=clean_display,
+            ),
             "profile_slug": slug,
             "display_name": clean_display,
             "mode": clean_mode,
         }
 
+    def inspect_ticket(self, code: Any) -> dict[str, Any]:
+        """Validate a pairing code and return safe metadata without consuming it."""
+        cleaned = _validate_pairing_code(code)
+        digest = hash_pairing_code(cleaned)
+        now = float(self._clock())
+
+        with self._open(write=False) as conn:
+            row = conn.execute(
+                """
+                SELECT ticket_id, profile_slug, display_name, mode,
+                       expires_at, consumed_at, revoked_at
+                FROM pairing_tickets
+                WHERE code_hash = ?
+                """,
+                (digest,),
+            ).fetchone()
+            _validate_ticket_row(row, now)
+
+        expires_at = float(row["expires_at"])
+        return {
+            "ticket_id": row["ticket_id"],
+            "profile_slug": row["profile_slug"],
+            "display_name": row["display_name"],
+            "mode": row["mode"],
+            "expires_at": expires_at,
+            "ttl_remaining_seconds": max(0, int(expires_at - now)),
+        }
+
     def claim_ticket(self, code: Any) -> dict[str, Any]:
         """Atomically consume one unused, non-expired pairing code (single-use guaranteed)."""
-        if not isinstance(code, str) or not code.strip():
-            raise PairingError("Pairing code is required.", status_code=400, code="missing_pairing_code")
-        cleaned = code.strip()
-        if len(cleaned) < 12 or len(cleaned) > 256 or _CONTROL_CHAR_RE.search(cleaned):
-            raise PairingError("Invalid pairing code format.", status_code=400, code="invalid_pairing_code")
-
+        cleaned = _validate_pairing_code(code)
         digest = hash_pairing_code(cleaned)
         now = float(self._clock())
 
@@ -388,14 +449,7 @@ class PairingStore:
                 """,
                 (digest,),
             ).fetchone()
-            if row is None:
-                raise PairingError("Pairing ticket not found.", status_code=404, code="pairing_ticket_not_found")
-            if row["revoked_at"] is not None:
-                raise PairingError("Pairing ticket was revoked.", status_code=410, code="pairing_ticket_revoked")
-            if row["consumed_at"] is not None:
-                raise PairingError("Pairing ticket was already used.", status_code=410, code="pairing_ticket_consumed")
-            if float(row["expires_at"]) <= now:
-                raise PairingError("Pairing ticket has expired.", status_code=410, code="pairing_ticket_expired")
+            _validate_ticket_row(row, now)
 
             cur = conn.execute(
                 """
