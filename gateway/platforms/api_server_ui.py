@@ -7,8 +7,9 @@ mirrors under ``/p/{profile}/...`` and runs inside ``_profile_scope(profile)``.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import logging
-from typing import Any
+from typing import Any, Iterator
 
 from aiohttp import web
 
@@ -25,7 +26,61 @@ MOBILE_FEATURE_FLAGS: dict[str, Any] = {
     "mobile_deliveries": True,
     "device_bridge": True,
     "run_progress_hooks": True,
+    "app_presence_v2": True,
+    "interactive_cards": True,
+    "deep_android_bridge": True,
+    "cursor_pagination": True,
+    "bilingual_i18n": True,
 }
+
+
+@contextmanager
+def optional_user_lang_scope(headers: Any = None, *, explicit_lang: str | None = None) -> Iterator[str | None]:
+    """Bind ``gateway.i18n.user_lang_scope`` when available; no-op fallback if not yet installed."""
+    try:
+        from gateway.i18n import resolve_request_lang, user_lang_scope
+    except ImportError:
+        yield None
+        return
+    lang = resolve_request_lang(headers, explicit_lang=explicit_lang)
+    with user_lang_scope(lang) as active:
+        yield active
+
+
+@web.middleware
+async def language_scope_middleware(request: web.Request, handler):
+    """Bind per-request user language from ``X-Hermes-Lang`` / ``Accept-Language`` for downstream tools."""
+    with optional_user_lang_scope(request.headers):
+        return await handler(request)
+
+
+def instructions_with_app_presence(
+    run_instructions: str | None, app_presence: dict[str, Any] | None
+) -> str | None:
+    """Append bounded ``<mobile_app_presence>`` context onto explicit per-run instructions when present."""
+    from tools.mobile_app_presence import format_app_presence_context
+
+    presence_ctx = format_app_presence_context(app_presence) if app_presence else ""
+    parts = [p for p in (run_instructions, presence_ctx) if isinstance(p, str) and p.strip()]
+    return "\n\n".join(parts) or None
+
+
+def sanitize_optional_app_presence(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate optional ``app_presence`` payload on ``POST /v1/runs`` fail-closed."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        return None, "app_presence must be a JSON object."
+    import json
+    from tools.mobile_app_presence import MAX_PRESENCE_BYTES, sanitize_app_presence
+
+    try:
+        encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return None, "app_presence must be JSON-serializable."
+    if len(encoded) > MAX_PRESENCE_BYTES:
+        return None, f"app_presence exceeds maximum size of {MAX_PRESENCE_BYTES} bytes."
+    return sanitize_app_presence(raw), None
 
 MOBILE_CAPABILITY_ENDPOINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("run_device_result", ("POST", "/v1/runs/{run_id}/device-result", "device_bridge")),

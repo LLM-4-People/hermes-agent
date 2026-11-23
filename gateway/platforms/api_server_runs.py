@@ -31,8 +31,11 @@ except ImportError:
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response, room_run_claims
 from gateway.platforms.api_server_ui import (
-    MOBILE_CAPABILITY_ENDPOINTS as _MOBILE_CAPABILITY_ENDPOINTS,
-    MOBILE_FEATURE_FLAGS as _MOBILE_FEATURE_FLAGS,
+    MOBILE_CAPABILITY_ENDPOINTS as _MOBILE_CAPABILITY_ENDPOINTS, MOBILE_FEATURE_FLAGS as _MOBILE_FEATURE_FLAGS,
+    instructions_with_app_presence as _instructions_with_app_presence,
+    language_scope_middleware as _LANGUAGE_SCOPE_MIDDLEWARE,
+    optional_user_lang_scope as _optional_user_lang_scope,
+    sanitize_optional_app_presence as _sanitize_optional_app_presence,
 )
 from agent.mobile_companion_prompt import combine_run_instructions, normalize_user_language
 from agent.run_instructions import run_instruction_scope, valid_run_instructions
@@ -526,7 +529,7 @@ def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop,
             lock = getattr(self, "_run_state_lock", None) or nullcontext()
             with lock:
                 current_status = self._run_statuses.get(run_id, {}).get("status", "running")
-            self._set_run_status(run_id, current_status, last_event=event.get("event"))
+                self._set_run_status(run_id, current_status, last_event=event.get("event"))
         q = self._run_streams.get(run_id)
         if q is not None:
             with suppress(Exception):
@@ -778,6 +781,7 @@ class _RunLaunch:
     run_instructions: Optional[str] = None
     device_capabilities: Optional[list[str]] = None
     user_language: Optional[str] = None
+    app_presence: Optional[dict[str, Any]] = None
 
     @property
     def approval_session_key(self) -> str:
@@ -940,10 +944,10 @@ def _run_user_message(body, _openai_error) -> tuple:
         _, cap_err = validate_device_capabilities(body["device_capabilities"])
         if cap_err is not None:
             return None, _json_error(_openai_error, cap_err, code="invalid_device_capabilities", status=400)
-    if "user_language" in body:
-        _, lang_err = normalize_user_language(body["user_language"])
-        if lang_err is not None:
-            return None, _json_error(_openai_error, lang_err, code="invalid_user_language", status=400)
+    if "user_language" in body and normalize_user_language(body["user_language"])[1] is not None:
+        return None, _json_error(_openai_error, normalize_user_language(body["user_language"])[1], code="invalid_user_language", status=400)
+    if "app_presence" in body and (pres_err := _sanitize_optional_app_presence(body["app_presence"])[1]) is not None:
+        return None, _json_error(_openai_error, pres_err, code="invalid_app_presence", status=400)
     raw_input = body.get("input")
     if not raw_input:
         return None, _json_error(_openai_error, "Missing 'input' field", status=400)
@@ -969,7 +973,8 @@ async def _admit_run_to_authority(
             launch.admission = await admit_api_turn_async(self, user_message=launch.user_message,
                 conversation_history=launch.conversation_history, active_run_id=run_id,
                 run_owner_scope=self._run_owners[run_id],
-                turn_author=launch.turn_author, run_instructions=launch.run_instructions,
+                turn_author=launch.turn_author,
+                run_instructions=_instructions_with_app_presence(launch.run_instructions, launch.app_presence),
                 device_capabilities=launch.device_capabilities, user_language=launch.user_language, **(launch.tool_options or {}),
                 history_from_session=session_history_delivery,
                 session_history_delivery='1' if session_history_delivery else '',
@@ -1103,8 +1108,6 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     if limited is not None:
         return limited
     run_id = f"run_{uuid.uuid4().hex}"
-    self._run_owners[run_id] = self._run_idempotency_scope(request)
-    self._run_profiles[run_id] = _api_server._api_request_profile.get() or "default"
     # Same precedence as /v1/responses: body session_id > response chain > X-Hermes-Session-Key
     # conversation > run_id (which would otherwise re-key every affinity surface per run).
     # An explicit or chained session owns its routing key and is never rebound to the header.
@@ -1120,6 +1123,8 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     )
     if att_err is not None:
         return att_err
+    self._run_owners[run_id] = self._run_idempotency_scope(request)
+    self._run_profiles[run_id] = _api_server._api_request_profile.get() or "default"
     # History loads for the session the request actually selected — including one resolved from
     # a declared X-Hermes-Session-Key, whose persisted delivery rows must reach the next
     # same-key run's context (#98619).  previous_response_id continuations keep their
@@ -1157,9 +1162,8 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         request_profile=_api_server._api_request_profile.get(), tool_options=selection,
         run_instructions=body.get("run_instructions"),
         device_capabilities=validate_device_capabilities(body.get("device_capabilities"))[0],
-        user_language=normalize_user_language(
-            body.get("user_language"), accept_language=request.headers.get("Accept-Language")
-        )[0],
+        user_language=normalize_user_language(body.get("user_language"), accept_language=request.headers.get("Accept-Language"), x_hermes_lang=request.headers.get("X-Hermes-Lang"))[0],
+        app_presence=_sanitize_optional_app_presence(body.get("app_presence"))[0],
         turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None)
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -1267,20 +1271,10 @@ def _run_agent_sync(
             profile_key = resolve_device_profile_key(self, run.request_profile)
 
             effective_once = combine_run_instructions(
-                run.run_instructions, run.device_capabilities, user_language=run.user_language
-            )
-            with (
-                run_instruction_scope(agent, effective_once),
-                bind_ui_patch_emitter(emit_ui),
-                bind_delivery_emitter(emit_delivery),
-                device_bridge_scope(
-                    agent,
-                    capabilities=run.device_capabilities,
-                    run_id=run.run_id,
-                    profile_key=profile_key,
-                    broker=broker,
-                ),
-            ):
+                run.run_instructions, run.device_capabilities, user_language=run.user_language, app_presence=run.app_presence)
+            with (_optional_user_lang_scope(explicit_lang=run.user_language), run_instruction_scope(agent, effective_once),
+                  bind_ui_patch_emitter(emit_ui), bind_delivery_emitter(emit_delivery),
+                  device_bridge_scope(agent, capabilities=run.device_capabilities, run_id=run.run_id, profile_key=profile_key, broker=broker)):
                 r = agent.run_conversation(user_message=run.user_message, conversation_history=run.conversation_history,
                                            task_id=effective_task_id, **author_kwargs)
         finally:

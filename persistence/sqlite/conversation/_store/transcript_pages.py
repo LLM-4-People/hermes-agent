@@ -436,14 +436,26 @@ def _lineage_fast_keyset_page(conn, segments: list[str], request, visible_only: 
     )
     shown_sql = _VISIBLE if visible_only else "1"
     s_ph = _placeholders(len(segments))
-    vis_filter = f" AND ({_VISIBLE})" if visible_only else ""
 
     # Exact total across lineage in pure SQLite C (zero Python row materialization).
-    total = int(conn.execute(
-        f"SELECT COUNT(DISTINCT display_identity) FROM messages "
-        f"WHERE session_id IN ({s_ph}){active_sql}{DISPLAY_VISIBLE_SQL}{vis_filter}",
-        segments,
-    ).fetchone()[0])
+    # When visible_only is True, evaluate _VISIBLE on each identity's newest winning representative
+    # (matching _winning_representatives) so a hidden newer copy cannot over-count an older visible one.
+    if visible_only:
+        total = int(conn.execute(
+            f"WITH ranked AS ("
+            f"  SELECT ({_VISIBLE}) AS shown, "
+            f"         ROW_NUMBER() OVER (PARTITION BY display_identity ORDER BY active DESC, id DESC) AS rn "
+            f"  FROM messages "
+            f"  WHERE session_id IN ({s_ph}){active_sql}{DISPLAY_VISIBLE_SQL}"
+            f") SELECT COUNT(*) FROM ranked WHERE rn = 1 AND shown = 1",
+            segments,
+        ).fetchone()[0])
+    else:
+        total = int(conn.execute(
+            f"SELECT COUNT(DISTINCT display_identity) FROM messages "
+            f"WHERE session_id IN ({s_ph}){active_sql}{DISPLAY_VISIBLE_SQL}",
+            segments,
+        ).fetchone()[0])
 
     probe_target = None if request.limit is None else (1 if request.limit == 0 else request.limit + 1)
     batch_size = 64 if probe_target is None else max(64, min(probe_target * 2, 512))

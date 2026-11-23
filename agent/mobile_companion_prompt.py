@@ -16,6 +16,7 @@ from collections.abc import Iterable
 import math
 from typing import Any, Optional
 
+from tools.mobile_app_presence import format_app_presence_context
 from tools.mobile_device_bridge import ALLOWED_DEVICE_CAPABILITIES
 
 ALLOWED_USER_LANGUAGES = frozenset({"fr", "en"})
@@ -45,8 +46,17 @@ _CAPABILITY_GUIDANCE: dict[str, str] = {
     "ui_surfaces_v2": (
         'ui_surfaces_v2 -> mobile_ui_patch(ops=[{"op":"upsert_widget","title":"...","template":"metric|checklist|briefing|status|quick_actions",'
         '"accent":"teal|green|blue|amber|coral","items":[{"label":"...","value":"..."}],"home_screen_safe":true}]) '
-        'or op="upsert_surface" (kpi_grid|sparkline|bar_chart|table|form|toggle_group|chip_filter|slider|markdown_card) / "set_theme_override" (IDs auto-slug from title; never put secrets on widgets)'
+        'or op="upsert_surface" (kpi_grid|sparkline|bar_chart|table|form|toggle_group|chip_filter|slider|markdown_card) / "set_theme_override" / interactive_cards (IDs auto-slug from title; never put secrets on widgets)'
     ),
+    "app_navigate": 'app_navigate -> request_device_action(action_type="app_navigate", reason="...", params={"target":"discussions|atelier|cerveau|activite|thread|memory|notes|skills|doctor|templates|presence|settings"})',
+    "app_customize": 'app_customize -> request_device_action(action_type="app_customize", reason="...", params={"operation":"apply|undo|reset","accent":"...","theme":"system|light|dark","density":"compact|comfortable|spacious"})',
+    "app_read_state": 'app_read_state -> request_device_action(action_type="app_read_state", reason="...", params={"include_customization":true,"include_presence":true})',
+    "app_create_template": 'app_create_template -> request_device_action(action_type="app_create_template", reason="...", params={"title":"...","draft_prompt":"..."})',
+    "android_set_timer": 'android_set_timer -> request_device_action(action_type="android_set_timer", reason="...", params={"duration_seconds":600,"label":"..."})',
+    "android_share_sheet": 'android_share_sheet -> request_device_action(action_type="android_share_sheet", reason="...", params={"text":"...","subject":"..."})',
+    "android_open_app": 'android_open_app -> request_device_action(action_type="android_open_app", reason="...", params={"deep_link":"https://..."})',
+    "android_sync_shortcuts": 'android_sync_shortcuts -> request_device_action(action_type="android_sync_shortcuts", reason="...", params={"shortcuts":[{"id":"...","label":"...","draft":"..."}]})',
+    "android_proactive_nudge": 'android_proactive_nudge -> request_device_action(action_type="android_proactive_nudge", reason="...", params={"operation":"configure|send_now|pause","title":"...","body":"..."})',
 }
 
 _HEADER = (
@@ -100,8 +110,9 @@ def normalize_user_language(
     value: Any = None,
     *,
     accept_language: Optional[str] = None,
+    x_hermes_lang: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Validate optional explicit ``user_language`` (``fr`` | ``en``) or fall back to ``Accept-Language``."""
+    """Validate optional explicit ``user_language`` (``fr`` | ``en``) or fall back to ``X-Hermes-Lang`` / ``Accept-Language``."""
     if value is not None:
         if not isinstance(value, str) or not value.strip():
             return None, "user_language must be 'fr' or 'en'."
@@ -109,6 +120,10 @@ def normalize_user_language(
         if primary not in ALLOWED_USER_LANGUAGES:
             return None, f"user_language must be one of {sorted(ALLOWED_USER_LANGUAGES)}."
         return primary, None
+    if isinstance(x_hermes_lang, str) and x_hermes_lang.strip():
+        header_primary = _primary_language_tag(x_hermes_lang)
+        if header_primary in ALLOWED_USER_LANGUAGES:
+            return header_primary, None
     return parse_accept_language(accept_language), None
 
 
@@ -148,8 +163,14 @@ def combine_run_instructions(
     run_instructions: Optional[str],
     device_capabilities: Optional[Iterable[str]],
     user_language: Optional[str] = None,
+    app_presence: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Combine explicit per-run instructions with mobile companion & language guidance when present."""
+    """Combine explicit per-run instructions with mobile companion, presence, and language guidance."""
     companion = build_mobile_companion_instructions(device_capabilities, user_language=user_language)
-    parts = [p.strip() for p in (run_instructions, companion) if isinstance(p, str) and p.strip()]
+    presence_block = format_app_presence_context(app_presence) if app_presence else ""
+    parts = [
+        p.strip()
+        for p in (run_instructions, companion, presence_block)
+        if isinstance(p, str) and p.strip()
+    ]
     return "\n\n".join(parts) if parts else None
