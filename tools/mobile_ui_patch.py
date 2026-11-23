@@ -67,6 +67,12 @@ ALLOWED_SUGGESTED_ACTION_KINDS = frozenset({
     "save_skill",
     "prompt",
 })
+ALLOWED_INTERACTIVE_CARD_KINDS = frozenset({
+    "checklist",
+    "quick_pick",
+    "toggle_confirm",
+    "customization_preview",
+})
 ALLOWED_DESTINATIONS = frozenset({"discussions", "atelier", "cerveau", "activite"})
 
 MAX_OPS_PER_PATCH = 16
@@ -80,6 +86,9 @@ MAX_QUICK_ACTIONS = 12
 MAX_WIDGETS = 16
 MAX_WIDGET_ITEMS = 8
 MAX_SUGGESTED_ACTIONS = 3
+MAX_INTERACTIVE_CARDS = 4
+MAX_CARD_ITEMS = 8
+MAX_CARD_TEXT_LEN = 160
 MIN_WCAG_AA_CONTRAST = 4.5
 MIN_FONT_SCALE_STEP = -2
 MAX_FONT_SCALE_STEP = 3
@@ -648,6 +657,182 @@ _OP_VALIDATORS: dict[str, Callable[[dict[str, Any], int], tuple[Optional[dict[st
 }
 
 
+def _validate_card_item(
+    norm_kind: str, item: Any, prefix: str, item_index: int
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    if not isinstance(item, dict):
+        return None, f"{prefix} must be an object."
+    ilabel = item.get("label")
+    if not _valid_utf8_text(ilabel, max_len=MAX_CARD_TEXT_LEN) or _WIDGET_SECRET_RE.search(ilabel):
+        return None, f"{prefix}.label must be safe UTF-8 text."
+    iid = item.get("id")
+    if iid is None:
+        item_id = f"item_{item_index + 1}"
+    elif isinstance(iid, str) and _SAFE_ID_RE.match(iid.strip()):
+        item_id = iid.strip()
+    else:
+        return None, f"{prefix}.id must be a safe slug."
+
+    row: dict[str, Any] = {"id": item_id, "label": ilabel.strip()}
+    if norm_kind == "checklist":
+        checked = item.get("checked", False)
+        if not isinstance(checked, bool):
+            return None, f"{prefix}.checked must be boolean."
+        row["checked"] = checked
+        if item.get("draft") is not None:
+            if not _valid_utf8_text(item["draft"], max_len=MAX_PROMPT_LEN) or _WIDGET_SECRET_RE.search(item["draft"]):
+                return None, f"{prefix}.draft must be safe UTF-8 text."
+            row["draft"] = item["draft"].strip()
+        return row, None
+
+    if norm_kind == "quick_pick":
+        draft = item.get("draft")
+        if not _valid_utf8_text(draft, max_len=MAX_PROMPT_LEN) or _WIDGET_SECRET_RE.search(draft):
+            return None, f"{prefix}.draft is required for quick_pick."
+        row["draft"] = draft.strip()
+        return row, None
+
+    enabled = item.get("enabled", False)
+    if not isinstance(enabled, bool):
+        return None, f"{prefix}.enabled must be boolean."
+    row["enabled"] = enabled
+    if item.get("description") is not None:
+        if not _valid_utf8_text(item["description"], max_len=MAX_CARD_TEXT_LEN) or _WIDGET_SECRET_RE.search(item["description"]):
+            return None, f"{prefix}.description must be safe text."
+        row["description"] = item["description"].strip()
+    return row, None
+
+
+def _validate_optional_buttons(
+    raw: dict[str, Any], entry: dict[str, Any], keys: tuple[str, ...], prefix: str
+) -> Optional[str]:
+    for btn_key in keys:
+        if raw.get(btn_key) is not None:
+            if not _valid_utf8_text(raw[btn_key], max_len=48):
+                return f"{prefix}.{btn_key} must be valid UTF-8 text (<= 48 chars)."
+            entry[btn_key] = raw[btn_key].strip()
+    return None
+
+
+def _validate_item_card(
+    norm_kind: str, raw: dict[str, Any], entry: dict[str, Any], prefix: str
+) -> Optional[str]:
+    raw_items = raw.get("items")
+    if not isinstance(raw_items, list) or not (1 <= len(raw_items) <= MAX_CARD_ITEMS):
+        return f"{prefix}.items must contain 1..{MAX_CARD_ITEMS} entries."
+    parsed_items: list[dict[str, Any]] = []
+    for j, item in enumerate(raw_items):
+        row, err = _validate_card_item(norm_kind, item, f"{prefix}.items[{j}]", j)
+        if err:
+            return err
+        parsed_items.append(row)  # type: ignore[arg-type]
+    entry["items"] = parsed_items
+    return _validate_optional_buttons(raw, entry, ("confirm_label", "cancel_label"), prefix)
+
+
+def _validate_customization_preview_card(
+    raw: dict[str, Any], entry: dict[str, Any], prefix: str
+) -> Optional[str]:
+    raw_cust = raw.get("customization")
+    if not isinstance(raw_cust, dict) or not raw_cust:
+        return f"{prefix}.customization must be a non-empty object."
+    theme_allowed = {
+        "accent", "accent_hex", "accent_ink_hex", "surface_hex", "ink_hex", "density", "font_scale_step", "surface_style"
+    }
+    theme_keys = {k: v for k, v in raw_cust.items() if k in theme_allowed}
+    cleaned_cust: dict[str, Any] = {}
+    if theme_keys:
+        validated_theme, theme_err = validate_theme_override(theme_keys)
+        if theme_err:
+            return f"{prefix}.customization: {theme_err}"
+        cleaned_cust.update(validated_theme or {})
+    if "theme" in raw_cust:
+        t = raw_cust["theme"]
+        if not isinstance(t, str) or t.strip().lower() not in {"system", "light", "dark"}:
+            return f"{prefix}.customization.theme must be system/light/dark."
+        cleaned_cust["theme"] = t.strip().lower()
+    if "startup_tab" in raw_cust:
+        st = raw_cust["startup_tab"]
+        if not isinstance(st, str) or st.strip().lower() not in ALLOWED_DESTINATIONS:
+            return f"{prefix}.customization.startup_tab is invalid."
+        cleaned_cust["startup_tab"] = st.strip().lower()
+    if "greeting" in raw_cust:
+        gr = raw_cust["greeting"]
+        if not _valid_utf8_text(gr, max_len=120) or _WIDGET_SECRET_RE.search(gr):
+            return f"{prefix}.customization.greeting must be safe UTF-8 text."
+        cleaned_cust["greeting"] = gr.strip()
+    if not cleaned_cust:
+        return f"{prefix}.customization has no supported fields."
+    entry["customization"] = cleaned_cust
+    return _validate_optional_buttons(raw, entry, ("apply_label", "undo_label"), prefix)
+
+
+def _validate_single_interactive_card(
+    raw: Any, idx: int, seen_ids: set[str]
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    prefix = f"interactive_cards[{idx}]"
+    if not isinstance(raw, dict):
+        return None, f"{prefix} must be an object."
+    kind = raw.get("kind")
+    if not isinstance(kind, str) or kind.strip().lower() not in ALLOWED_INTERACTIVE_CARD_KINDS:
+        return None, f"{prefix}.kind must be one of {sorted(ALLOWED_INTERACTIVE_CARD_KINDS)}."
+    norm_kind = kind.strip().lower()
+
+    title = raw.get("title")
+    if not _valid_utf8_text(title, max_len=MAX_CARD_TEXT_LEN) or _WIDGET_SECRET_RE.search(title):
+        return None, f"{prefix}.title must be safe UTF-8 text (<= {MAX_CARD_TEXT_LEN} chars)."
+
+    raw_id = raw.get("id")
+    if raw_id is None:
+        card_id = f"card_{idx + 1}"
+    elif isinstance(raw_id, str) and _SAFE_ID_RE.match(raw_id.strip()):
+        card_id = raw_id.strip()
+    else:
+        return None, f"{prefix}.id must be a safe slug."
+    if card_id in seen_ids:
+        return None, f"{prefix}.id '{card_id}' is duplicated."
+    seen_ids.add(card_id)
+
+    entry: dict[str, Any] = {"id": card_id, "kind": norm_kind, "title": title.strip()}
+    subtitle = raw.get("subtitle")
+    if subtitle is not None:
+        if not _valid_utf8_text(subtitle, max_len=MAX_CARD_TEXT_LEN) or _WIDGET_SECRET_RE.search(subtitle):
+            return None, f"{prefix}.subtitle must be safe UTF-8 text (<= {MAX_CARD_TEXT_LEN} chars)."
+        entry["subtitle"] = subtitle.strip()
+
+    if norm_kind == "customization_preview":
+        body_err = _validate_customization_preview_card(raw, entry, prefix)
+    else:
+        body_err = _validate_item_card(norm_kind, raw, entry, prefix)
+    if body_err:
+        return None, body_err
+    return entry, None
+
+
+def validate_interactive_cards(cards: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
+    """Validate optional bounded ``interactive_cards`` (strictly additive inline interactive cards)."""
+    if cards is None:
+        return None, None
+    if isinstance(cards, dict):
+        cards = [cards]
+    if not isinstance(cards, list) or not cards:
+        return None, "interactive_cards must be a non-empty array when provided."
+    if len(cards) > MAX_INTERACTIVE_CARDS:
+        return None, f"interactive_cards supports at most {MAX_INTERACTIVE_CARDS} cards per patch."
+    scan_err = _scan_strings_safe(cards)
+    if scan_err:
+        return None, scan_err
+
+    cleaned: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for idx, raw in enumerate(cards):
+        entry, err = _validate_single_interactive_card(raw, idx, seen_ids)
+        if err:
+            return None, err
+        cleaned.append(entry)  # type: ignore[arg-type]
+    return cleaned, None
+
+
 def validate_ui_patch_ops(ops: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
     """Validate and normalize a declarative UI patch op list."""
     if isinstance(ops, dict):
@@ -803,6 +988,7 @@ CREATE TABLE IF NOT EXISTS ui_revisions (
     ops_json TEXT NOT NULL,
     state_snapshot_json TEXT NOT NULL,
     suggested_actions_json TEXT,
+    interactive_cards_json TEXT,
     status TEXT NOT NULL,
     requires_apply INTEGER NOT NULL,
     created_at REAL NOT NULL,
@@ -846,6 +1032,8 @@ class MobileUiStore:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(ui_revisions)").fetchall()}
         if "suggested_actions_json" not in cols:
             conn.execute("ALTER TABLE ui_revisions ADD COLUMN suggested_actions_json TEXT")
+        if "interactive_cards_json" not in cols:
+            conn.execute("ALTER TABLE ui_revisions ADD COLUMN interactive_cards_json TEXT")
         try:
             os.chmod(self._db_path, 0o600)
         except OSError:
@@ -863,8 +1051,11 @@ class MobileUiStore:
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-        raw_suggestions = row["suggested_actions_json"] if "suggested_actions_json" in row.keys() else None
+        keys = row.keys()
+        raw_suggestions = row["suggested_actions_json"] if "suggested_actions_json" in keys else None
         suggestions = json.loads(raw_suggestions) if raw_suggestions else None
+        raw_cards = row["interactive_cards_json"] if "interactive_cards_json" in keys else None
+        cards = json.loads(raw_cards) if raw_cards else None
         return {
             "revision_id": row["revision_id"],
             "parent_revision_id": row["parent_revision_id"],
@@ -878,6 +1069,7 @@ class MobileUiStore:
             "created_at": row["created_at"],
             "applied_at": row["applied_at"],
             **({"suggested_actions": suggestions} if suggestions else {}),
+            **({"interactive_cards": cards} if cards else {}),
         }
 
     def propose_or_apply(
@@ -889,6 +1081,7 @@ class MobileUiStore:
         scope: str = "atelier",
         requires_apply: bool = True,
         suggested_actions: Optional[list[dict[str, Any]]] = None,
+        interactive_cards: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         normalized, err = validate_ui_patch_ops(ops)
         if err:
@@ -896,6 +1089,9 @@ class MobileUiStore:
         clean_suggestions, sugg_err = validate_suggested_actions(suggested_actions)
         if sugg_err:
             raise ValueError(sugg_err)
+        clean_cards, cards_err = validate_interactive_cards(interactive_cards)
+        if cards_err:
+            raise ValueError(cards_err)
         if not _valid_utf8_text(summary, max_len=MAX_SUMMARY_LEN):
             raise ValueError(f"summary must be non-empty UTF-8 text (<= {MAX_SUMMARY_LEN} chars).")
         if scope not in ALLOWED_SCOPES:
@@ -913,8 +1109,9 @@ class MobileUiStore:
                 conn.execute(
                     """INSERT INTO ui_revisions
                        (revision_id, parent_revision_id, session_id, scope, summary, ops_json,
-                        state_snapshot_json, suggested_actions_json, status, requires_apply, created_at, applied_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        state_snapshot_json, suggested_actions_json, interactive_cards_json,
+                        status, requires_apply, created_at, applied_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         revision_id,
                         parent_id,
@@ -924,6 +1121,7 @@ class MobileUiStore:
                         json.dumps(normalized, ensure_ascii=False),
                         json.dumps(next_state, ensure_ascii=False),
                         json.dumps(clean_suggestions, ensure_ascii=False) if clean_suggestions else None,
+                        json.dumps(clean_cards, ensure_ascii=False) if clean_cards else None,
                         status,
                         1 if requires_apply else 0,
                         now,
@@ -958,6 +1156,7 @@ class MobileUiStore:
             "created_at": now,
             "applied_at": applied_at,
             **({"suggested_actions": clean_suggestions} if clean_suggestions else {}),
+            **({"interactive_cards": clean_cards} if clean_cards else {}),
         }
         logger.info("mobile_ui revision=%s scope=%s status=%s ops=%d", revision_id, scope, status, len(normalized))
         emit_ui_patch_event(revision)
@@ -1144,6 +1343,14 @@ MOBILE_UI_PATCH_SCHEMA = {
                 ),
                 "items": {"type": "object"},
             },
+            "interactive_cards": {
+                "type": "array",
+                "description": (
+                    "Optional 1-4 bounded native inline interactive cards (checklist, quick_pick, "
+                    "toggle_confirm, customization_preview) rendered natively inside the discussion."
+                ),
+                "items": {"type": "object"},
+            },
         },
         "required": ["summary", "ops"],
     },
@@ -1171,6 +1378,7 @@ def mobile_ui_patch_tool(
     requires_apply: bool = True,
     session_id: Optional[str] = None,
     suggested_actions: Any = None,
+    interactive_cards: Any = None,
 ) -> str:
     """Execute ``mobile_ui_patch`` tool call and return JSON result (with self-correcting hints on error)."""
     if not session_id:
@@ -1190,6 +1398,7 @@ def mobile_ui_patch_tool(
             scope=scope,
             requires_apply=bool(requires_apply),
             suggested_actions=suggested_actions,
+            interactive_cards=interactive_cards,
         )
     except ValueError as exc:
         logger.warning("mobile_ui_patch rejected: %s", exc)
@@ -1219,6 +1428,7 @@ registry.register(
         requires_apply=args.get("requires_apply", True),
         session_id=kw.get("session_id"),
         suggested_actions=args.get("suggested_actions"),
+        interactive_cards=args.get("interactive_cards"),
     ),
     check_fn=lambda: True,
 )
