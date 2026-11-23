@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
 from gateway.i18n import resolve_request_lang
-from gateway.mobile_pairing import PairingError, PairingStore, normalize_public_host
+from gateway.mobile_pairing import PairingError, PairingStore, resolve_public_host
 from gateway.mobile_profiles import (
     ProfileManagementError,
     build_onboarding_payload,
@@ -79,17 +80,22 @@ def _active_runs_for(adapter, slug: str) -> int:
         return 0
 
 
-def _infer_public_host(request: web.Request, body: dict[str, Any] | None = None) -> str:
+def _infer_public_host(
+    request: web.Request,
+    body: dict[str, Any] | None = None,
+    *,
+    root_home: Path | None = None,
+) -> str:
     raw = (body or {}).get("host") if isinstance(body, dict) else None
-    if isinstance(raw, str) and raw.strip():
-        return normalize_public_host(raw)
-    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
-    forwarded_host = (request.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
-    scheme = forwarded_proto if forwarded_proto in {"http", "https"} else (request.scheme or "http")
-    host = forwarded_host or request.host or ""
-    if not host:
-        return ""
-    return normalize_public_host(f"{scheme}://{host}")
+    if raw is not None and not isinstance(raw, str):
+        raise PairingError("Server host must be a string.", status_code=400, code="invalid_host")
+    return resolve_public_host(
+        raw or "",
+        root_home=root_home if root_home is not None else default_root_home(),
+        request_headers=request.headers,
+        request_scheme=request.scheme or "http",
+        request_host=request.host or "",
+    )
 
 
 def _capability_counts(adapter) -> tuple[int, int]:
@@ -160,7 +166,7 @@ async def _mint_pairing_for_target(
     display_name = str(body.get("display_name") or summary.get("display_name") or target)
     ttl = body.get("ttl_seconds", admin_cfg.get("pairing_ttl_seconds"))
     try:
-        host = _infer_public_host(request, body)
+        host = await asyncio.to_thread(_infer_public_host, request, body, root_home=root)
         ticket = await asyncio.to_thread(
             lambda: PairingStore(root).create_ticket(
                 profile_slug=target,
@@ -199,6 +205,10 @@ async def handle_pairing_claim(adapter, request: web.Request) -> web.Response:
         return parse_err
     root = default_root_home()
     try:
+        base_host = await asyncio.to_thread(_infer_public_host, request, body, root_home=root)
+    except PairingError as exc:
+        return _error_no_store(exc.message, code=exc.code, status=exc.status_code)
+    try:
         claimed = await asyncio.to_thread(lambda: PairingStore(root).claim_ticket(body.get("code")))
     except PairingError as exc:
         if limiter is not None:
@@ -218,7 +228,6 @@ async def handle_pairing_claim(adapter, request: web.Request) -> web.Response:
             code="profile_key_unavailable",
             status=503,
         )
-    base_host = _infer_public_host(request, body)
     server_url = f"{base_host}/p/{slug}" if (base_host and slug != "default") else base_host
     lang = resolve_request_lang(request.headers)
     active_caps, endpoint_count = _capability_counts(adapter)
@@ -312,7 +321,7 @@ async def handle_create_profile(adapter, request: web.Request) -> web.Response:
     caller = _caller_profile_slug()
     root = default_root_home()
     try:
-        host = _infer_public_host(request, body)
+        host = await asyncio.to_thread(_infer_public_host, request, body, root_home=root)
         created = await asyncio.to_thread(
             lambda: create_managed_profile(
                 caller_slug=caller,
@@ -367,7 +376,7 @@ async def handle_rotate_profile_key(adapter, request: web.Request) -> web.Respon
         adapter._api_key = new_key
 
     try:
-        host = _infer_public_host(request, body)
+        host = await asyncio.to_thread(_infer_public_host, request, body, root_home=root)
         rotated = await asyncio.to_thread(
             lambda: rotate_managed_profile_key(
                 caller_slug=caller,

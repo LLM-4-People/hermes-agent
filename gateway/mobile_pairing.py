@@ -11,8 +11,10 @@ Single source of truth for single-use, short-lived, high-entropy pairing tickets
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import logging
+import os
 from pathlib import Path
 import re
 import secrets
@@ -30,6 +32,7 @@ MAX_TTL_SECONDS = 900
 MAX_ACTIVE_TICKETS_PER_PROFILE = 12
 _CODE_TOKEN_BYTES = 24
 _VALID_MODES = frozenset({"device", "invite"})
+_PUBLIC_URL_ENV_KEYS: tuple[str, ...] = ("HERMES_PUBLIC_URL", "API_SERVER_PUBLIC_URL")
 _TICKET_ID_RE = re.compile(r"^pair_[0-9a-f]{24}$")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -69,23 +72,169 @@ def hash_pairing_code(code: str) -> str:
 
 
 def normalize_public_host(raw_host: str) -> str:
-    """Normalize an optional server base URL for ``hermes://pair`` links (strips path/credentials)."""
+    """Normalize an optional server base URL for ``hermes://pair`` links.
+
+    Preserves base subpaths (such as ``/mobile``), strips trailing slashes, and
+    rejects control characters, whitespace, embedded credentials, invalid ports,
+    and query or fragment components fail-closed.
+    """
+    if isinstance(raw_host, str) and _CONTROL_CHAR_RE.search(raw_host):
+        raise PairingError("Server host contains invalid characters.", status_code=400, code="invalid_host")
     cleaned = (raw_host or "").strip()
     if not cleaned:
         return ""
-    if _CONTROL_CHAR_RE.search(cleaned):
+    if any(ch.isspace() for ch in cleaned):
         raise PairingError("Server host contains invalid characters.", status_code=400, code="invalid_host")
     candidate = cleaned if "://" in cleaned else f"https://{cleaned}"
     parsed = urlparse(candidate)
     scheme = (parsed.scheme or "").lower()
-    if scheme not in {"http", "https"} or not parsed.netloc:
+    if scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         raise PairingError("Server host must be a valid http(s) URL.", status_code=400, code="invalid_host")
-    if parsed.username or parsed.password:
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
         raise PairingError("Server host must not contain embedded credentials.", status_code=400, code="invalid_host")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise PairingError("Server host contains an invalid port.", status_code=400, code="invalid_host") from exc
     if parsed.query or parsed.fragment:
         raise PairingError("Server host must not include query or fragment.", status_code=400, code="invalid_host")
     base_path = (parsed.path or "").rstrip("/")
     return f"{scheme}://{parsed.netloc}{base_path}"
+
+
+def _read_dotenv_keys(env_path: Path, keys: tuple[str, ...]) -> dict[str, str]:
+    """Read selected keys from a ``.env`` file without mutating ``os.environ`` or logging values."""
+    wanted = set(keys)
+    found: dict[str, str] = {}
+    if not env_path.is_file():
+        return found
+    try:
+        text = env_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return found
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        key, _, raw_val = line.partition("=")
+        key = key.strip()
+        if key not in wanted:
+            continue
+        val = raw_val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in {"'", '"'}:
+            val = val[1:-1]
+        elif " #" in val:
+            val = val.split(" #", 1)[0].rstrip()
+        found[key] = val.strip()
+    return found
+
+
+def _read_config_public_url(root_home: Path) -> str:
+    """Read ``api_server.public_url`` or ``gateway.api_server.public_url`` via config backend."""
+    try:
+        from agent.runtime_scope import bind_profile_scope
+        from hermes_cli.config import load_config_readonly
+
+        with bind_profile_scope(root_home):
+            cfg = load_config_readonly() or {}
+    except (ImportError, OSError, ValueError, RuntimeError):
+        return ""
+    if not isinstance(cfg, dict):
+        return ""
+    top_api = cfg.get("api_server")
+    if isinstance(top_api, dict):
+        top_val = top_api.get("public_url")
+        if isinstance(top_val, str) and top_val.strip():
+            return top_val.strip()
+    gw = cfg.get("gateway")
+    if isinstance(gw, dict):
+        gw_api = gw.get("api_server")
+        if isinstance(gw_api, dict):
+            gw_val = gw_api.get("public_url")
+            if isinstance(gw_val, str) and gw_val.strip():
+                return gw_val.strip()
+    return ""
+
+
+def _header_first_value(headers: Optional[Mapping[str, str]], name: str) -> str:
+    if not headers:
+        return ""
+    target = name.lower()
+    for k, v in headers.items():
+        if isinstance(k, str) and k.lower() == target and isinstance(v, str):
+            first = v.split(",", 1)[0]
+            if _CONTROL_CHAR_RE.search(first):
+                raise PairingError(f"Header {name} contains invalid characters.", status_code=400, code="invalid_host")
+            return first.strip()
+    return ""
+
+
+def _normalize_forwarded_prefix(raw_prefix: str) -> str:
+    if isinstance(raw_prefix, str) and _CONTROL_CHAR_RE.search(raw_prefix):
+        raise PairingError("Server host prefix contains invalid characters.", status_code=400, code="invalid_host")
+    cleaned = (raw_prefix or "").strip()
+    if not cleaned or cleaned == "/":
+        return ""
+    if (
+        any(ch.isspace() for ch in cleaned)
+        or any(tok in cleaned for tok in ("?", "#", "\\", "@", "://", "//"))
+    ):
+        raise PairingError("Server host prefix contains invalid characters.", status_code=400, code="invalid_host")
+    prefixed = cleaned if cleaned.startswith("/") else f"/{cleaned}"
+    if ".." in prefixed.split("/"):
+        raise PairingError("Server host prefix must not contain path traversal.", status_code=400, code="invalid_host")
+    return prefixed.rstrip("/")
+
+
+def resolve_public_host(
+    raw_host: str = "",
+    *,
+    root_home: Optional[Path] = None,
+    request_headers: Optional[Mapping[str, str]] = None,
+    request_scheme: str = "",
+    request_host: str = "",
+) -> str:
+    """Single source of truth for external public URL resolution across API, CLI, and tools.
+
+    Precedence:
+    1. Explicit ``raw_host`` (if non-empty)
+    2. ``HERMES_PUBLIC_URL`` or ``API_SERVER_PUBLIC_URL`` from ``os.environ``, then ``<root_home>/.env``
+    3. ``api_server.public_url`` or ``gateway.api_server.public_url`` from ``<root_home>/config.yaml``
+    4. Reverse-proxy headers (``X-Forwarded-Proto``, ``X-Forwarded-Host``, optional ``X-Forwarded-Prefix``),
+       falling back to ``request_scheme://request_host``
+    """
+    if raw_host is not None and not isinstance(raw_host, str):
+        raise PairingError("Server host must be a string.", status_code=400, code="invalid_host")
+    if isinstance(raw_host, str) and raw_host.strip():
+        return normalize_public_host(raw_host)
+
+    for env_key in _PUBLIC_URL_ENV_KEYS:
+        env_val = os.environ.get(env_key, "").strip()
+        if env_val:
+            return normalize_public_host(env_val)
+
+    root = Path(root_home) if root_home is not None else _default_root_home()
+    dotenv_vals = _read_dotenv_keys(root / ".env", _PUBLIC_URL_ENV_KEYS)
+    for env_key in _PUBLIC_URL_ENV_KEYS:
+        dotenv_val = dotenv_vals.get(env_key, "").strip()
+        if dotenv_val:
+            return normalize_public_host(dotenv_val)
+
+    cfg_url = _read_config_public_url(root)
+    if cfg_url:
+        return normalize_public_host(cfg_url)
+
+    forwarded_proto = _header_first_value(request_headers, "X-Forwarded-Proto").lower()
+    forwarded_host = _header_first_value(request_headers, "X-Forwarded-Host")
+    forwarded_prefix = _normalize_forwarded_prefix(_header_first_value(request_headers, "X-Forwarded-Prefix"))
+    fallback_scheme = (request_scheme or "").strip().lower()
+    scheme = forwarded_proto if forwarded_proto in {"http", "https"} else (fallback_scheme or "http")
+    host = forwarded_host or (request_host or "").strip()
+    if not host:
+        return ""
+    return normalize_public_host(f"{scheme}://{host}{forwarded_prefix}")
 
 
 def build_pairing_deep_link(host: str, code: str, *, profile_slug: str = "") -> str:

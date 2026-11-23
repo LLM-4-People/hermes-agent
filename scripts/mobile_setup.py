@@ -16,8 +16,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+import struct
 import sys
+import tempfile
 from typing import Any
+import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -182,32 +185,96 @@ def _version_bits(version: int) -> int:
 def _write_format_and_version(matrix: list[list[int]], func: list[list[bool]], version: int, mask: int) -> None:
     size = len(matrix)
     fmt = _format_bits(0b01, mask)  # EC-L = 01
+    # Copy 1 around top-left finder (ISO/IEC 18004 Figure 25): LSB=bit 0 at (0, 8), MSB=bit 14 at (8, 0).
     for i in range(6):
-        bit = (fmt >> i) & 1
-        matrix[8][i] = bit
-        matrix[size - 1 - i][8] = bit
-        func[8][i] = func[size - 1 - i][8] = True
-    for idx, (r1, c1, r2, c2) in enumerate(
-        ((8, 7, size - 7, 8), (8, 8, 8, size - 8), (7, 8, 8, size - 7)),
-        start=6,
-    ):
-        bit = (fmt >> idx) & 1
-        matrix[r1][c1] = matrix[r2][c2] = bit
-        func[r1][c1] = func[r2][c2] = True
+        matrix[i][8] = (fmt >> i) & 1
+        func[i][8] = True
+    matrix[7][8] = (fmt >> 6) & 1
+    matrix[8][8] = (fmt >> 7) & 1
+    matrix[8][7] = (fmt >> 8) & 1
+    func[7][8] = func[8][8] = func[8][7] = True
     for i in range(9, 15):
-        bit = (fmt >> i) & 1
-        matrix[14 - i][8] = bit
-        matrix[8][size - 15 + i] = bit
-        func[14 - i][8] = func[8][size - 15 + i] = True
+        matrix[8][14 - i] = (fmt >> i) & 1
+        func[8][14 - i] = True
+    # Copy 2 across top-right (bits 0..7) and bottom-left (bits 8..14).
+    for i in range(8):
+        matrix[8][size - 1 - i] = (fmt >> i) & 1
+        func[8][size - 1 - i] = True
+    for i in range(8, 15):
+        matrix[size - 15 + i][8] = (fmt >> i) & 1
+        func[size - 15 + i][8] = True
+    # Fixed dark module.
     matrix[size - 8][8] = 1
     func[size - 8][8] = True
+    # Version information blocks for Version 7-10 (ISO/IEC 18004 Figure 26).
     if version >= 7:
         vbits = _version_bits(version)
         for i in range(18):
             bit = (vbits >> i) & 1
-            a, b = i // 3, size - 11 + (i % 3)
-            matrix[a][b] = matrix[b][a] = bit
-            func[a][b] = func[b][a] = True
+            a, b = size - 11 + (i % 3), i // 3
+            matrix[b][a] = matrix[a][b] = bit
+            func[b][a] = func[a][b] = True
+
+
+def _mask_bit(mask: int, r: int, c: int) -> bool:
+    if mask == 0:
+        return (r + c) % 2 == 0
+    if mask == 1:
+        return r % 2 == 0
+    if mask == 2:
+        return c % 3 == 0
+    if mask == 3:
+        return (r + c) % 3 == 0
+    if mask == 4:
+        return (r // 2 + c // 3) % 2 == 0
+    if mask == 5:
+        return (r * c) % 2 + (r * c) % 3 == 0
+    if mask == 6:
+        return ((r * c) % 2 + (r * c) % 3) % 2 == 0
+    return ((r + c) % 2 + (r * c) % 3) % 2 == 0
+
+
+def _qr_penalty_score(matrix: list[list[int]]) -> int:
+    """Compute ISO/IEC 18004 section 7.8.3.1 mask penalty score (N1 + N2 + N3 + N4)."""
+    size = len(matrix)
+    score = 0
+    finder_a = (1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0)
+    finder_b = (0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1)
+
+    # N1 (adjacent runs >= 5) and N3 (finder-like 1:1:3:1:1 patterns) across rows & columns.
+    for lines in (matrix, [[matrix[r][c] for r in range(size)] for c in range(size)]):
+        for line in lines:
+            run_val = line[0]
+            run_len = 1
+            for cell in line[1:]:
+                if cell == run_val:
+                    run_len += 1
+                else:
+                    if run_len >= 5:
+                        score += 3 + (run_len - 5)
+                    run_val = cell
+                    run_len = 1
+            if run_len >= 5:
+                score += 3 + (run_len - 5)
+            for idx in range(size - 10):
+                window = tuple(line[idx : idx + 11])
+                if window == finder_a or window == finder_b:
+                    score += 40
+
+    # N2 (2x2 same-color blocks).
+    for r in range(size - 1):
+        row0, row1 = matrix[r], matrix[r + 1]
+        for c in range(size - 1):
+            v = row0[c]
+            if v == row0[c + 1] == row1[c] == row1[c + 1]:
+                score += 3
+
+    # N4 (dark/light balance deviation from 50% in 5% steps).
+    dark = sum(sum(row) for row in matrix)
+    total = size * size
+    k = (abs(dark * 2 - total) * 10) // total
+    score += k * 10
+    return score
 
 
 def encode_qr_matrix(text: str) -> list[list[bool]]:
@@ -215,26 +282,29 @@ def encode_qr_matrix(text: str) -> list[list[bool]]:
     payload = text.encode("utf-8")
     version = _choose_qr_version(len(payload))
     size = 17 + 4 * version
-    matrix = [[0] * size for _ in range(size)]
+    base_matrix = [[0] * size for _ in range(size)]
     func = [[False] * size for _ in range(size)]
 
-    _place_finder(matrix, func, 0, 0)
-    _place_finder(matrix, func, 0, size - 7)
-    _place_finder(matrix, func, size - 7, 0)
+    _place_finder(base_matrix, func, 0, 0)
+    _place_finder(base_matrix, func, 0, size - 7)
+    _place_finder(base_matrix, func, size - 7, 0)
 
     for i in range(8, size - 8):
         bit = 1 if i % 2 == 0 else 0
-        matrix[6][i] = matrix[i][6] = bit
+        base_matrix[6][i] = base_matrix[i][6] = bit
         func[6][i] = func[i][6] = True
 
     centers = _QR_VERSIONS[version][3]
-    for r in centers:
-        for c in centers:
-            if not func[r][c]:
-                _place_alignment(matrix, func, r, c)
+    last_center = len(centers) - 1
+    for ri, r in enumerate(centers):
+        for ci, c in enumerate(centers):
+            # Skip only the three corners occupied by the finder patterns (keep timing-row centers on V7-10).
+            if (ri == 0 and ci == 0) or (ri == 0 and ci == last_center) or (ri == last_center and ci == 0):
+                continue
+            _place_alignment(base_matrix, func, r, c)
 
-    mask = 0  # (r + c) % 2 == 0
-    _write_format_and_version(matrix, func, version, mask)
+    # Reserve format & version function modules before placing data bits.
+    _write_format_and_version(base_matrix, func, version, 0)
 
     codewords = _encode_qr_codewords(payload, version)
     bit_stream = [(cw >> s) & 1 for cw in codewords for s in range(7, -1, -1)]
@@ -250,19 +320,39 @@ def encode_qr_matrix(text: str) -> list[list[bool]]:
                 c = col + dc
                 if func[r][c]:
                     continue
-                bit = bit_stream[bit_idx] if bit_idx < len(bit_stream) else 0
+                base_matrix[r][c] = bit_stream[bit_idx] if bit_idx < len(bit_stream) else 0
                 bit_idx += 1
-                if (r + c) % 2 == 0:
-                    bit ^= 1
-                matrix[r][c] = bit
         col -= 2
         upward = not upward
 
-    return [[bool(cell) for cell in row] for row in matrix]
+    # Evaluate all 8 ISO/IEC 18004 masks and pick the lowest-penalty pattern for reliable scanning.
+    best_matrix: list[list[int]] | None = None
+    best_penalty = 1 << 30
+    for mask in range(8):
+        candidate = [
+            [
+                base_matrix[r][c] ^ (1 if (not func[r][c] and _mask_bit(mask, r, c)) else 0)
+                for c in range(size)
+            ]
+            for r in range(size)
+        ]
+        _write_format_and_version(candidate, func, version, mask)
+        penalty = _qr_penalty_score(candidate)
+        if penalty < best_penalty:
+            best_penalty = penalty
+            best_matrix = candidate
+
+    assert best_matrix is not None
+    return [[bool(cell) for cell in row] for row in best_matrix]
 
 
-def render_qr_unicode(text: str, *, border: int = 2) -> str:
-    """Render *text* as a compact Unicode half-block QR code suitable for terminals."""
+def render_qr_unicode(text: str, *, border: int = 4, invert: bool = False) -> str:
+    """Render *text* as a compact Unicode half-block QR code suitable for terminals.
+
+    Uses the ISO/IEC 18004 standard 4-module quiet zone by default. Set ``invert=True``
+    for dark-mode terminals so foreground blocks draw the white background and empty cells
+    draw dark modules.
+    """
     core = encode_qr_matrix(text)
     size = len(core)
     padded_width = size + border * 2
@@ -276,17 +366,74 @@ def render_qr_unicode(text: str, *, border: int = 2) -> str:
         top = grid[r]
         bottom = grid[r + 1] if r + 1 < padded_width else [False] * padded_width
         chars: list[str] = []
-        for t_dark, b_dark in zip(top, bottom):
-            if t_dark and b_dark:
+        for t_cell, b_cell in zip(top, bottom):
+            t_fg = (not t_cell) if invert else t_cell
+            b_fg = (not b_cell) if invert else b_cell
+            if t_fg and b_fg:
                 chars.append("█")
-            elif t_dark:
+            elif t_fg:
                 chars.append("▀")
-            elif b_dark:
+            elif b_fg:
                 chars.append("▄")
             else:
                 chars.append(" ")
         lines.append("".join(chars))
     return "\n".join(lines)
+
+
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    crc = zlib.crc32(chunk_type)
+    crc = zlib.crc32(data, crc) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
+
+
+def encode_qr_png(matrix: list[list[bool]], *, scale: int = 10, border: int = 4) -> bytes:
+    """Encode a boolean QR matrix into an 8-bit grayscale black-on-white PNG (stdlib only)."""
+    if scale < 1:
+        raise ValueError("QR PNG scale must be at least 1.")
+    if border < 0:
+        raise ValueError("QR PNG border must be non-negative.")
+    size = len(matrix)
+    dim = (size + border * 2) * scale
+    white_row = b"\x00" + (b"\xff" * dim)
+    raw_rows: list[bytes] = [white_row] * (border * scale)
+    border_px = b"\xff" * (border * scale)
+    dark_px = b"\x00" * scale
+    light_px = b"\xff" * scale
+    for row in matrix:
+        scanline = b"\x00" + border_px + b"".join(dark_px if cell else light_px for cell in row) + border_px
+        raw_rows.extend([scanline] * scale)
+    raw_rows.extend([white_row] * (border * scale))
+
+    ihdr = struct.pack(">IIBBBBB", dim, dim, 8, 0, 0, 0, 0)
+    idat = zlib.compress(b"".join(raw_rows), level=9)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", idat)
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def write_qr_png(text: str, path: str | Path, *, scale: int = 10, border: int = 4) -> Path:
+    """Atomically write a black-on-white QR PNG for *text* with strict ``0600`` permissions."""
+    dest = Path(path).expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    png_bytes = encode_qr_png(encode_qr_matrix(text), scale=scale, border=border)
+    fd, tmp_name = tempfile.mkstemp(prefix=".hermes_qr_", suffix=".png", dir=str(dest.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(png_bytes)
+        os.replace(tmp_name, dest)
+        os.chmod(dest, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return dest
 
 
 def _resolve_root(raw_home: str | None) -> Path:
@@ -298,16 +445,24 @@ def _resolve_root(raw_home: str | None) -> Path:
     return (Path.home() / ".hermes").resolve()
 
 
-def _format_ticket_text(ticket: dict[str, Any], *, show_qr: bool) -> str:
+def _format_ticket_text(
+    ticket: dict[str, Any],
+    *,
+    show_qr: bool,
+    invert_qr: bool = False,
+    png_path: Path | None = None,
+) -> str:
     lines = [
         f"Hermes Mobile pairing ready for '{ticket['display_name']}' ({ticket['profile_slug']})",
         f"Pairing link: {ticket['deep_link']}",
         f"Expires in: {ticket['ttl_seconds']}s (single-use)",
         f"Android APK: {ANDROID_RELEASE_URL}",
     ]
+    if png_path is not None:
+        lines.append(f"QR PNG (0600): {png_path}")
     if show_qr:
         lines.append("")
-        lines.append(render_qr_unicode(ticket["deep_link"]))
+        lines.append(render_qr_unicode(ticket["deep_link"], invert=invert_qr))
     return "\n".join(lines) + "\n"
 
 
@@ -322,11 +477,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lang", default="auto", choices=("auto", "en", "fr"), help="Preferred language for --invite.")
     parser.add_argument("--admin", action="store_true", help="Grant admin role to the profile created by --invite.")
     parser.add_argument("--ttl", type=int, default=300, help="Ticket expiry in seconds (30-900, default 300).")
-    parser.add_argument("--public-url", default=os.environ.get("HERMES_PUBLIC_URL", ""), help="Public HTTPS server URL.")
+    parser.add_argument(
+        "--public-url",
+        default="",
+        help="Public HTTPS server URL (defaults to HERMES_PUBLIC_URL, API_SERVER_PUBLIC_URL, or config.yaml).",
+    )
     parser.add_argument("--hermes-home", default=None, help="Override HERMES_HOME root directory.")
     parser.add_argument("--qr", action="store_true", help="Print a scannable Unicode QR code in the terminal.")
+    parser.add_argument(
+        "--invert",
+        action="store_true",
+        help="Invert dark and light QR blocks for dark-mode terminals.",
+    )
+    parser.add_argument(
+        "--png",
+        metavar="PATH",
+        default="",
+        help="Write a black-on-white QR PNG file with 0600 permissions to PATH.",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json", help="Emit machine-readable JSON output.")
     args = parser.parse_args(argv)
+
+    from gateway.mobile_pairing import PairingError, PairingStore, resolve_public_host
+
+    root = _resolve_root(args.hermes_home)
+    try:
+        public_url = resolve_public_host(args.public_url, root_home=root)
+    except PairingError as exc:
+        sys.stderr.write(f"error ({exc.code}): {exc.message}\n")
+        return 1
 
     if args.doctor:
         from scripts import mobile_doctor
@@ -334,20 +513,18 @@ def main(argv: list[str] | None = None) -> int:
         doctor_args: list[str] = []
         if args.hermes_home:
             doctor_args.extend(["--hermes-home", args.hermes_home])
-        if args.public_url:
-            doctor_args.extend(["--public-url", args.public_url])
+        if public_url:
+            doctor_args.extend(["--public-url", public_url])
         if args.as_json:
             doctor_args.append("--json")
         return mobile_doctor.main(doctor_args)
 
-    from gateway.mobile_pairing import PairingError, PairingStore
     from gateway.mobile_profiles import (
         ProfileManagementError,
         create_managed_profile,
         get_profile_summary,
     )
 
-    root = _resolve_root(args.hermes_home)
     try:
         if args.invite:
             created = create_managed_profile(
@@ -357,12 +534,16 @@ def main(argv: list[str] | None = None) -> int:
                 preferred_language=args.lang,
                 is_admin=bool(args.admin),
                 create_invite=True,
-                host=args.public_url,
+                host=public_url,
                 ttl_seconds=args.ttl,
                 root_home=root,
             )
             ticket = created["pairing_ticket"]
-            payload = {"profile": created["profile"], "pairing_ticket": ticket, "android_apk": ANDROID_RELEASE_URL}
+            payload: dict[str, Any] = {
+                "profile": created["profile"],
+                "pairing_ticket": ticket,
+                "android_apk": ANDROID_RELEASE_URL,
+            }
         else:
             slug = args.profile.strip().lower() or "default"
             summary = get_profile_summary(slug, root_home=root)
@@ -374,17 +555,33 @@ def main(argv: list[str] | None = None) -> int:
                 mode="device",
                 created_by="default",
                 ttl_seconds=args.ttl,
-                host=args.public_url,
+                host=public_url,
             )
             payload = {"profile": summary, "pairing_ticket": ticket, "android_apk": ANDROID_RELEASE_URL}
     except (ProfileManagementError, PairingError) as exc:
         sys.stderr.write(f"error ({exc.code}): {exc.message}\n")
         return 1
 
+    png_path: Path | None = None
+    if args.png:
+        try:
+            png_path = write_qr_png(ticket["deep_link"], args.png)
+        except OSError as exc:
+            sys.stderr.write(f"error (png_write_failed): {exc}\n")
+            return 1
+        payload["qr_png"] = str(png_path)
+
     if args.as_json:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     else:
-        sys.stdout.write(_format_ticket_text(ticket, show_qr=bool(args.qr)))
+        sys.stdout.write(
+            _format_ticket_text(
+                ticket,
+                show_qr=bool(args.qr),
+                invert_qr=bool(args.invert),
+                png_path=png_path,
+            )
+        )
     return 0
 
 
