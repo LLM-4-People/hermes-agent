@@ -137,9 +137,11 @@ class ForkCiWorkflowsTest(unittest.TestCase):
         self.assertEqual(job["permissions"]["contents"], "write")
         self.assertEqual(job["permissions"]["actions"], "write")
         plan_run = job["steps"][1]["run"]
-        self.assertIn('(1, 0, 0) if bump == "major"', plan_run)
-        self.assertIn('(0, 1, 0) if bump == "minor"', plan_run)
-        self.assertIn('(0, 0, 1)', plan_run)
+        self.assertIn("scripts/release_plan.py", plan_run)
+        self.assertIn("--changed-files-json", plan_run)
+        self.assertIn("--paginate --jq '.[].filename'", plan_run)
+        self.assertNotIn("--paginate --jq '[.[].filename]'", plan_run)
+        self.assertIn("RELEASE_BOT_TOKEN", job["steps"][2]["env"]["GH_TOKEN"])
 
     def test_downstream_verify_sharding_partitions_all_files_with_zero_overlap(self):
         shard1 = subprocess.check_output(
