@@ -16,7 +16,7 @@ def _parse_optional_cursor(raw: Optional[str]) -> tuple[Optional[int], bool]:
     return int(raw), True
 
 
-def _read(store, session_id, page_request, visible_only, before_id, after_id):
+def _read(store, session_id, page_request, visible_only, before_id=None, after_id=None):
     for _ in range(3):
         with store.messages.read_snapshot() as consistent:
             sid = store.lineage.resolve_resume_target(session_id)
