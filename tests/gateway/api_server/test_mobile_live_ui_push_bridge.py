@@ -1076,3 +1076,150 @@ async def test_user_language_accept_language_and_extended_device_capabilities(tm
     assert "French (fr)" in seen_prompts[0] and "sms_draft" in seen_prompts[0]
     assert "English (en)" in seen_prompts[1] and "[Hermes Mobile Companion]" not in seen_prompts[1]
     assert seen_prompts[2] == "BASE"
+
+
+@pytest.mark.asyncio
+async def test_device_bridge_scope_exposes_tool_on_real_agent_and_restores(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agent.agent_init import _load_tools
+    from tools.hosted_tool_policy import restrict_tools, run_tool_refusal
+
+    def _make_loaded_agent(*, platform="api_server", enabled_toolsets=None, disabled_toolsets=None):
+        agent = SimpleNamespace(
+            platform=platform,
+            quiet_mode=True,
+            save_trajectories=False,
+            ephemeral_system_prompt=None,
+            is_subagent=False,
+        )
+        _load_tools(agent, enabled_toolsets, disabled_toolsets)
+        return agent
+
+    broker = DeviceBridgeBroker()
+
+    with override_hermes_home(tmp_path):
+        # 1. Agent built BEFORE device_bridge_scope (live /v1/runs & TurnRunner order):
+        #    request_device_action is absent before, attached during, and cleanly detached after.
+        api_agent = _make_loaded_agent(platform="api_server", enabled_toolsets=["web", "mobile_device"])
+        assert "request_device_action" not in api_agent.valid_tool_names
+        assert not any((t.get("function") or {}).get("name") == "request_device_action" for t in api_agent.tools)
+        base_count = len(api_agent.tools)
+
+        with device_bridge_scope(
+            api_agent,
+            capabilities=["alarm_timer", "calendar_draft", "media_control"],
+            run_id="run-dev-1",
+            profile_key="default",
+            broker=broker,
+        ):
+            assert "request_device_action" in api_agent.valid_tool_names
+            matched = [t for t in api_agent.tools if (t.get("function") or {}).get("name") == "request_device_action"]
+            assert len(matched) == 1
+            assert matched[0]["function"]["parameters"]["required"] == ["action_type", "reason"]
+
+        assert "request_device_action" not in api_agent.valid_tool_names
+        assert len(api_agent.tools) == base_count
+
+        # 2. Agent built INSIDE device_bridge_scope natively includes the tool without duplicating it.
+        with device_bridge_scope(
+            None,
+            capabilities=["alarm_timer"],
+            run_id="run-dev-pre",
+            profile_key="default",
+            broker=broker,
+        ):
+            inside_agent = _make_loaded_agent(platform="api_server", enabled_toolsets=["web", "mobile_device"])
+            assert "request_device_action" in inside_agent.valid_tool_names
+            with device_bridge_scope(
+                inside_agent,
+                capabilities=["alarm_timer"],
+                run_id="run-dev-nested",
+                profile_key="default",
+                broker=broker,
+            ):
+                assert sum(
+                    1 for t in inside_agent.tools if (t.get("function") or {}).get("name") == "request_device_action"
+                ) == 1
+
+        # 3. Negative: empty capabilities never exposes request_device_action.
+        with device_bridge_scope(api_agent, capabilities=[], run_id="run-empty", profile_key="default", broker=broker):
+            assert "request_device_action" not in api_agent.valid_tool_names
+
+        # 4. Negative: disabled mobile_device toolset or omitted enabled_toolsets blocks exposure.
+        disabled_agent = _make_loaded_agent(platform="api_server", disabled_toolsets=["mobile_device"])
+        with device_bridge_scope(
+            disabled_agent, capabilities=["alarm_timer"], run_id="run-dis", profile_key="default", broker=broker
+        ):
+            assert "request_device_action" not in disabled_agent.valid_tool_names
+
+        narrow_agent = _make_loaded_agent(platform="api_server", enabled_toolsets=["web"])
+        with device_bridge_scope(
+            narrow_agent, capabilities=["alarm_timer"], run_id="run-narrow", profile_key="default", broker=broker
+        ):
+            assert "request_device_action" not in narrow_agent.valid_tool_names
+
+        # 5. Negative: non-api_server platform (e.g. cli) never exposes request_device_action.
+        cli_agent = _make_loaded_agent(platform="cli")
+        with device_bridge_scope(
+            cli_agent, capabilities=["alarm_timer"], run_id="run-cli", profile_key="default", broker=broker
+        ):
+            assert "request_device_action" not in cli_agent.valid_tool_names
+
+        # 6. Per-run restrict_tools: permitted when mobile_device allowed, refused when omitted or excluded.
+        with restrict_tools(["web", "mobile_device"], ["web_search"], []):
+            with device_bridge_scope(
+                api_agent, capabilities=["alarm_timer"], run_id="run-allow", profile_key="default", broker=broker
+            ):
+                assert "request_device_action" in api_agent.valid_tool_names
+                assert run_tool_refusal("request_device_action", api_agent) is None
+        with restrict_tools(["web"], ["web_search"], []):
+            with device_bridge_scope(
+                api_agent, capabilities=["alarm_timer"], run_id="run-no-ts", profile_key="default", broker=broker
+            ):
+                assert "request_device_action" not in api_agent.valid_tool_names
+                assert run_tool_refusal("request_device_action", api_agent) is not None
+        with restrict_tools(["web", "mobile_device"], ["web_search"], ["request_device_action"]):
+            with device_bridge_scope(
+                api_agent, capabilities=["alarm_timer"], run_id="run-excl", profile_key="default", broker=broker
+            ):
+                assert "request_device_action" not in api_agent.valid_tool_names
+                assert run_tool_refusal("request_device_action", api_agent) is not None
+
+        # 7. End-to-end POST /v1/runs with real tool-loaded agent: exposed on run 1, gone on run 2.
+        adapter = _make_adapter()
+        adapter._api_key = "owner-key"
+        live_agent = _make_loaded_agent(platform="api_server", enabled_toolsets=["web", "mobile_device"])
+        seen_has_tool: list[bool] = []
+
+        def _fake_run(**kwargs):
+            in_names = "request_device_action" in live_agent.valid_tool_names
+            in_tools = any(
+                (t.get("function") or {}).get("name") == "request_device_action" for t in live_agent.tools
+            )
+            seen_has_tool.append(in_names and in_tools)
+            return {"final_response": "ok"}
+
+        live_agent.run_conversation = _fake_run
+        monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: live_agent)
+        app = _mount_full_mobile_app(adapter)
+        headers = {"Authorization": "Bearer owner-key"}
+
+        async with TestClient(TestServer(app)) as client:
+            r1 = await client.post(
+                "/v1/runs",
+                json={"input": "set timer", "device_capabilities": ["alarm_timer"]},
+                headers=headers,
+            )
+            assert r1.status == 202
+            run1_id = (await r1.json())["run_id"]
+            async with client.get(f"/v1/runs/{run1_id}/events", headers=headers) as stream:
+                await stream.read()
+
+            r2 = await client.post("/v1/runs", json={"input": "plain chat"}, headers=headers)
+            assert r2.status == 202
+            run2_id = (await r2.json())["run_id"]
+            async with client.get(f"/v1/runs/{run2_id}/events", headers=headers) as stream:
+                await stream.read()
+
+        assert seen_has_tool == [True, False]
+        assert "request_device_action" not in live_agent.valid_tool_names

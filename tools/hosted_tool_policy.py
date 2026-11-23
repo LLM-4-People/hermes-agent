@@ -112,6 +112,9 @@ def _run_permits(name, selection, agent):
         return False
     if name in names:
         return True
+    if name == "request_device_action" and "mobile_device" in toolsets:
+        from tools.mobile_device_bridge import current_device_capabilities
+        return bool(current_device_capabilities())
     if agent is None or name not in getattr(agent, "valid_tool_names", ()):
         return False
     # These two providers attach tools directly to an agent after registry discovery. A grant

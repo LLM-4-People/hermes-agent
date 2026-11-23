@@ -7,6 +7,7 @@ and a thread-safe pause/resume broker keyed by ``(profile_key, run_id)``.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import threading
@@ -152,9 +153,67 @@ class _BoundDeviceScope:
     timeout_seconds: Optional[float] = None
 
 
+_DEVICE_TOOL_NAME = "request_device_action"
+
 _active_device_scope: ContextVar[Optional[_BoundDeviceScope]] = ContextVar(
     "mobile_device_bridge_scope", default=None
 )
+
+
+def _toolsets_include_tool(toolset_names: Any, tool_name: str) -> bool:
+    from toolsets import resolve_toolset
+
+    return any(tool_name in resolve_toolset(ts) for ts in toolset_names)
+
+
+def _owner_allows_device_tool(owner: Any) -> bool:
+    """True when ``owner`` carries a mutable tool surface permitted to expose ``request_device_action``."""
+    if not isinstance(getattr(owner, "tools", None), list) or not isinstance(
+        getattr(owner, "valid_tool_names", None), set
+    ):
+        return False
+    from tools.hosted_tool_policy import hosted_tool_refusal, run_tool_refusal
+    from toolsets import agent_tool_drops
+
+    if hosted_tool_refusal(_DEVICE_TOOL_NAME) is not None:
+        return False
+    if run_tool_refusal(_DEVICE_TOOL_NAME, owner) is not None:
+        return False
+    if _DEVICE_TOOL_NAME in agent_tool_drops(owner):
+        return False
+    selection = getattr(owner, "_tool_snapshot_selection", None)
+    if isinstance(selection, tuple) and len(selection) == 2:
+        enabled, disabled = selection
+        if (
+            enabled is not None
+            and "all" not in enabled
+            and "*" not in enabled
+            and not _toolsets_include_tool(enabled, _DEVICE_TOOL_NAME)
+        ):
+            return False
+        if disabled and _toolsets_include_tool(disabled, _DEVICE_TOOL_NAME):
+            return False
+    else:
+        disabled_ts = getattr(owner, "disabled_toolsets", None)
+        if disabled_ts and _toolsets_include_tool(disabled_ts, _DEVICE_TOOL_NAME):
+            return False
+    return True
+
+
+def _attach_device_tool(owner: Any) -> bool:
+    if not _owner_allows_device_tool(owner) or _DEVICE_TOOL_NAME in owner.valid_tool_names:
+        return False
+    owner.tools.append({"type": "function", "function": copy.deepcopy(REQUEST_DEVICE_ACTION_SCHEMA)})
+    owner.valid_tool_names.add(_DEVICE_TOOL_NAME)
+    return True
+
+
+def _detach_device_tool(owner: Any) -> None:
+    owner.tools[:] = [
+        tool for tool in owner.tools
+        if not (isinstance(tool, dict) and (tool.get("function") or {}).get("name") == _DEVICE_TOOL_NAME)
+    ]
+    owner.valid_tool_names.discard(_DEVICE_TOOL_NAME)
 
 
 @contextmanager
@@ -167,7 +226,7 @@ def device_bridge_scope(
     broker: Optional[DeviceBridgeBroker],
     timeout_seconds: Optional[float] = None,
 ):
-    """Bind per-run Android device capabilities; expires cleanly even in copied contexts."""
+    """Bind per-run Android device capabilities and dynamically attach ``request_device_action`` to ``owner``."""
     caps = frozenset(c for c in (capabilities or ()) if c in ALLOWED_DEVICE_CAPABILITIES)
     bound = (
         _BoundDeviceScope(
@@ -182,9 +241,12 @@ def device_bridge_scope(
         else None
     )
     token = _active_device_scope.set(bound)
+    attached = _attach_device_tool(owner) if bound is not None and owner is not None else False
     try:
         yield
     finally:
+        if attached:
+            _detach_device_tool(owner)
         if bound is not None:
             # Copied execution contexts share this object; scrub it so delayed tasks cannot reuse it.
             bound.capabilities = frozenset()
