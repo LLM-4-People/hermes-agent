@@ -83,6 +83,7 @@ DOWNSTREAM_TESTS=(
   tests/tools/test_signal_media.py
   tests/scripts/test_mobile_doctor.py
   tests/scripts/test_docs_fork.py
+  tests/scripts/test_release_plan.py
   tests/scripts/test_check_fork_preservation.py
   tests/ci/test_fork_ci_workflows.py
   tests/ci/test_docs_drift.py
@@ -196,6 +197,7 @@ case "$MODE" in
     run_static_gate
     HERMES_SKIP_COMPILEALL=1 scripts/run_tests.sh \
       tests/scripts/test_docs_fork.py \
+      tests/scripts/test_release_plan.py \
       tests/scripts/test_check_fork_preservation.py \
       tests/ci/test_fork_ci_workflows.py \
       tests/ci/test_docs_drift.py \

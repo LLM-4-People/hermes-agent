@@ -1,9 +1,11 @@
 name: Automated SemVer Release
 
-# Fork-owned SemVer tag & GitHub Release automation.
-# Triggers on merged PRs to `main` carrying one of `release: major`, `release: minor`, or
-# `release: patch` (respecting `skip-release` and failing closed on conflicting release labels),
-# or via manual `workflow_dispatch` with a bump level or explicit `vMAJOR.MINOR.PATCH` tag.
+# Fork-owned code-driven SemVer tag & GitHub Release automation.
+# Uses scripts/release_plan.py (SSoT):
+#   - Honors `skip-release` and explicit `release: major|minor|patch` labels (fail-closed on conflict)
+#   - Automatically classifies merged runtime code changes on `main` via Conventional Commits
+#     (skipping docs-only, tests-only, evals-only, and CI/scripts-only merges)
+#   - Supports manual `workflow_dispatch` with a bump level or explicit `vMAJOR.MINOR.PATCH` tag.
 
 on:
   push:
@@ -49,112 +51,132 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+          token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
 
-      - name: Resolve next SemVer tag
+      - name: Resolve next release plan
         id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
           INPUT_BUMP: ${{ inputs.bump }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
+          tags_file="$(mktemp)"
+          trap 'rm -f "$tags_file"' EXIT
+          git tag --list 'v*' > "$tags_file"
 
-          SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-          BUMP_LABELS = {
-              "release: major": "major",
-              "release: minor": "minor",
-              "release: patch": "patch",
-          }
+          labels_json="[]"
+          files_json="[]"
+          pr_title=""
+          pr_body=""
 
-          event = os.environ["EVENT_NAME"]
-          repo = os.environ["REPO"]
-          sha = os.environ["COMMIT_SHA"]
-          out_path = os.environ["GITHUB_OUTPUT"]
-
-          tags_raw = subprocess.check_output(["git", "tag", "--list", "v*"], text=True)
-          parsed_tags = []
-          for line in tags_raw.splitlines():
-              m = SEMVER.match(line.strip())
-              if m:
-                  parsed_tags.append((int(m.group(1)), int(m.group(2)), int(m.group(3)), line.strip()))
-          parsed_tags.sort()
-          latest = parsed_tags[-1] if parsed_tags else None
-          existing = {t[3] for t in parsed_tags}
-
-          def write_out(should_release, tag=""):
-              with open(out_path, "a", encoding="utf-8") as fh:
-                  fh.write(f"should_release={'true' if should_release else 'false'}\n")
-                  fh.write(f"tag={tag}\n")
-
-          bump = None
-          explicit_tag = os.environ.get("INPUT_TAG", "").strip()
-          if event == "workflow_dispatch":
-              if explicit_tag:
-                  if not SEMVER.match(explicit_tag):
-                      print(f"::error::Invalid SemVer tag {explicit_tag!r}; expected vMAJOR.MINOR.PATCH", file=sys.stderr)
-                      sys.exit(1)
-                  if explicit_tag in existing:
-                      print(f"::error::Tag {explicit_tag} already exists", file=sys.stderr)
-                      sys.exit(1)
-                  write_out(True, explicit_tag)
-                  sys.exit(0)
-              bump = os.environ.get("INPUT_BUMP", "patch").strip() or "patch"
-          else:
-              pulls_raw = subprocess.check_output(
-                  ["gh", "api", f"repos/{repo}/commits/{sha}/pulls"], text=True
-              )
-              pulls = json.loads(pulls_raw)
-              labels = {
-                  str(lbl.get("name", "")).strip()
-                  for pr in pulls
-                  for lbl in (pr.get("labels") or [])
-              }
-              if "skip-release" in labels:
-                  print("skip-release label present; skipping release.")
-                  write_out(False)
-                  sys.exit(0)
-              matched = [BUMP_LABELS[lbl] for lbl in BUMP_LABELS if lbl in labels]
-              if len(matched) > 1:
-                  print(f"::error::Conflicting release labels found on PR: {sorted(matched)}", file=sys.stderr)
-                  sys.exit(1)
-              if not matched:
-                  print("No release label on merged PR; skipping release.")
-                  write_out(False)
-                  sys.exit(0)
-              bump = matched[0]
-
-          if latest is None:
-              major, minor, patch = (1, 0, 0) if bump == "major" else ((0, 1, 0) if bump == "minor" else (0, 0, 1))
-          else:
-              major, minor, patch = latest[0], latest[1], latest[2]
-              if bump == "major":
-                  major, minor, patch = major + 1, 0, 0
-              elif bump == "minor":
-                  minor, patch = minor + 1, 0
-              else:
-                  patch += 1
-
-          next_tag = f"v{major}.{minor}.{patch}"
-          if next_tag in existing:
-              print(f"::error::Computed tag {next_tag} already exists", file=sys.stderr)
-              sys.exit(1)
-          print(f"Resolved release tag: {next_tag}")
-          write_out(True, next_tag)
+          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            pulls_json="$(gh api "repos/${REPO}/commits/${COMMIT_SHA}/pulls" 2>/dev/null || echo '[]')"
+            labels_json="$(python3 -I - "$pulls_json" <<'PY'
+          import json, sys
+          pulls = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
+          labels = sorted({
+              str(lbl.get("name", "")).strip()
+              for pr in pulls if isinstance(pr, dict)
+              for lbl in (pr.get("labels") or [])
+              if isinstance(lbl, dict) and str(lbl.get("name", "")).strip()
+          })
+          print(json.dumps(labels))
           PY
+          )"
+
+            pr_number="$(python3 -I - "$pulls_json" <<'PY'
+          import json, sys
+          pulls = json.loads(sys.argv[1]) if sys.argv[1].strip() else []
+          print(pulls[0].get("number", "") if pulls and isinstance(pulls[0], dict) else "")
+          PY
+          )"
+
+            if [ -n "$pr_number" ]; then
+              pr_title="$(python3 -I - "$pulls_json" <<'PY'
+          import json, sys
+          pulls = json.loads(sys.argv[1])
+          print(str(pulls[0].get("title") or ""))
+          PY
+          )"
+              pr_body="$(python3 -I - "$pulls_json" <<'PY'
+          import json, sys
+          pulls = json.loads(sys.argv[1])
+          print(str(pulls[0].get("body") or ""))
+          PY
+          )"
+              files_raw="$(gh api "repos/${REPO}/pulls/${pr_number}/files" --paginate --jq '.[].filename' 2>/dev/null || true)"
+              if [ -n "$files_raw" ]; then
+                files_json="$(python3 -I - "$files_raw" <<'PY'
+          import json, sys
+          files = [line.strip() for line in sys.argv[1].splitlines() if line.strip()]
+          print(json.dumps(files))
+          PY
+          )"
+              fi
+            fi
+
+            if [ -z "$pr_title" ]; then
+              pr_title="$(git log -1 --format=%s "$COMMIT_SHA")"
+              pr_body="$(git log -1 --format=%b "$COMMIT_SHA")"
+            fi
+
+            if [ "$files_json" = "[]" ]; then
+              if [ -n "$BEFORE_SHA" ] && [[ ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+                changed_raw="$(git diff --name-only "${BEFORE_SHA}..${COMMIT_SHA}")"
+              else
+                changed_raw="$(git diff-tree --no-commit-id --name-only -r "$COMMIT_SHA")"
+              fi
+              files_json="$(python3 -I - "$changed_raw" <<'PY'
+          import json, sys
+          files = [line.strip() for line in sys.argv[1].splitlines() if line.strip()]
+          print(json.dumps(files))
+          PY
+          )"
+            fi
+          fi
+
+          plan_json="$(python3 -I scripts/release_plan.py \
+            --event "$EVENT_NAME" \
+            --labels-json "$labels_json" \
+            --changed-files-json "$files_json" \
+            --tags-file "$tags_file" \
+            --title "$pr_title" \
+            --body "$pr_body" \
+            --input-bump "$INPUT_BUMP" \
+            --input-tag "$INPUT_TAG" \
+            --github-output "$GITHUB_OUTPUT" \
+            --json)"
+
+          echo "$plan_json"
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            python3 -I - "$plan_json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          plan = json.loads(sys.argv[1])
+          with open(sys.argv[2], "a", encoding="utf-8") as fh:
+              fh.write("### Automated release plan\n\n")
+              fh.write(f"- Should release: `{plan['should_release']}`\n")
+              fh.write(f"- Tag: `{plan['tag'] or 'none'}`\n")
+              fh.write(f"- Bump: `{plan['bump']}`\n")
+              fh.write(f"- Trigger source: `{plan['trigger_source']}`\n")
+              fh.write(f"- Reason: {plan['reason']}\n")
+              if plan["shippable_files"]:
+                  preview = ", ".join(f"`{p}`" for p in plan["shippable_files"][:10])
+                  extra = len(plan["shippable_files"]) - 10
+                  suffix = f" (+{extra} more)" if extra > 0 else ""
+                  fh.write(f"- Shippable files: {preview}{suffix}\n")
+          PY
+          fi
 
       - name: Create annotated tag, GitHub Release, and trigger container build
         if: steps.plan.outputs.should_release == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          HAS_RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN != '' }}
           TAG: ${{ steps.plan.outputs.tag }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -162,7 +184,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" "$COMMIT_SHA" -m "Release $TAG"
-          git push origin "refs/tags/$TAG"
+          if ! git push origin "refs/tags/$TAG"; then
+            if [ "$HAS_RELEASE_BOT_TOKEN" != "true" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### Tag push blocked"
+                echo ""
+                echo "Pushing \`refs/tags/${TAG}\` failed using default \`GITHUB_TOKEN\`."
+                echo "If a repository tag ruleset protects \`v*\` tags, configure repository secret \`RELEASE_BOT_TOKEN\` with tag push permission."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "::error::Failed to push tag ${TAG}. Configure RELEASE_BOT_TOKEN if protected by a tag ruleset." >&2
+            exit 1
+          fi
           gh release create "$TAG" \
             --title "Hermes Agent $TAG" \
             --generate-notes \
