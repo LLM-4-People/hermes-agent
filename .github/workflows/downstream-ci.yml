@@ -1,14 +1,16 @@
 name: Downstream CI
 
-# Fork-owned gate. Upstream's workflows target Blacksmith runners and Docker Hub credentials
-# that do not exist here (all disabled in this repository); this workflow runs on GitHub-hosted
-# runners and proves the downstream provider-routing patch still works.
+# Fork-owned Turbo CI v2 gate. Upstream's workflows target Blacksmith runners and Docker Hub
+# credentials that do not exist here (all disabled in this repository); this workflow runs on
+# GitHub-hosted runners with path-smart routing, a fast static gate, parallel test sharding,
+# and a fail-closed final aggregator.
 #
 # scripts/downstream-verify.sh is the single owner of the check set; sync-upstream.yml runs the
-# same script before it pushes an upstream merge.
+# same script (zero-arg full mode) before it pushes an upstream merge.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - main
@@ -22,10 +24,130 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  verify:
-    name: Lint and provider-routing tests
+  changes:
+    name: Route changed paths
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.route.outputs.docs_only }}
+      run_python_tests: ${{ steps.route.outputs.run_python_tests }}
+      run_workflows: ${{ steps.route.outputs.run_workflows }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import fnmatch
+          import json
+          import os
+          import subprocess
+
+          event = os.environ["EVENT_NAME"]
+          out_path = os.environ["GITHUB_OUTPUT"]
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+          docs_patterns = ("*.md", "**/*.md", "docs/*", "docs/**", "website/docs/**", ".github/labeler.yml")
+          workflow_patterns = (".github/workflows/**", ".github/actions/**", "scripts/fork-owned-workflows.txt")
+
+          def matches_any(path, patterns):
+              return any(fnmatch.fnmatch(path, pat) for pat in patterns)
+
+          labels = []
+          raw_labels = os.environ.get("PR_LABELS_JSON", "").strip()
+          if raw_labels:
+              try:
+                  parsed = json.loads(raw_labels)
+                  if isinstance(parsed, list):
+                      labels = [str(x) for x in parsed]
+              except json.JSONDecodeError:
+                  labels = []
+
+          if event != "pull_request" or "run-full-ci" in labels:
+              docs_only = False
+              run_python_tests = True
+              run_workflows = True
+              changed = []
+          else:
+              base = os.environ["BASE_SHA"]
+              head = os.environ["HEAD_SHA"]
+              raw = subprocess.check_output(
+                  ["git", "diff", "--name-only", base, head], text=True
+              )
+              changed = [line.strip() for line in raw.splitlines() if line.strip()]
+              if not changed:
+                  docs_only = False
+                  run_python_tests = True
+                  run_workflows = True
+              else:
+                  docs_only = all(matches_any(p, docs_patterns) for p in changed)
+                  run_python_tests = not docs_only
+                  run_workflows = any(matches_any(p, workflow_patterns) for p in changed)
+
+          with open(out_path, "a", encoding="utf-8") as fh:
+              fh.write(f"docs_only={'true' if docs_only else 'false'}\n")
+              fh.write(f"run_python_tests={'true' if run_python_tests else 'false'}\n")
+              fh.write(f"run_workflows={'true' if run_workflows else 'false'}\n")
+
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("### Downstream CI Path Routing\n\n")
+                  fh.write(f"- Event: `{event}`\n")
+                  fh.write(f"- Changed files inspected: `{len(changed)}`\n")
+                  fh.write(f"- `docs_only`: `{docs_only}`\n")
+                  fh.write(f"- `run_python_tests`: `{run_python_tests}`\n")
+                  fh.write(f"- `run_workflows`: `{run_workflows}`\n")
+          PY
+
+  fast-static:
+    name: Fast static gate
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up the locked PM test environment
+        uses: ./.github/actions/setup-pm
+        with:
+          test-environment: 'true'
+          extras: '["sms"]'
+          prune-python-cache: true
+
+      - name: Run fast static checks, docs & PII hygiene
+        run: ./scripts/downstream-verify.sh --fast-static
+
+  verify:
+    name: Downstream tests (${{ matrix.shard }}/2)
+    needs: changes
+    if: needs.changes.outputs.run_python_tests == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -40,11 +162,15 @@ jobs:
           extras: '["sms"]'  # The HTTP regression needs aiohttp; this extra installs only that dependency.
           prune-python-cache: true
 
-      - name: Verify downstream patch
-        run: ./scripts/downstream-verify.sh
+      - name: Run downstream test shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: ./scripts/downstream-verify.sh --shard "${SHARD}/2"
 
   workflow-lint:
     name: Workflow lint
+    needs: changes
+    if: needs.changes.outputs.run_workflows == 'true' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -95,3 +221,62 @@ jobs:
             echo "Disabling upstream workflow: $name ($path)"
             gh workflow disable "$file"
           done
+
+  gate:
+    name: Downstream CI Gate
+    if: always()
+    needs: [changes, fast-static, verify, workflow-lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Enforce fail-closed downstream CI gate
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+          GITHUB_REF_VALUE: ${{ github.ref }}
+          GITHUB_EVENT_VALUE: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          ref = os.environ["GITHUB_REF_VALUE"]
+          event = os.environ["GITHUB_EVENT_VALUE"]
+
+          errors = []
+          changes = needs.get("changes", {})
+          if changes.get("result") != "success":
+              errors.append(f"changes must succeed (got {changes.get('result')!r})")
+
+          outputs = changes.get("outputs") or {}
+          run_python = outputs.get("run_python_tests") == "true"
+          run_workflows = (
+              outputs.get("run_workflows") == "true"
+              or ref == "refs/heads/main"
+              or event == "workflow_dispatch"
+          )
+
+          checks = [
+              ("fast-static", True),
+              ("verify", run_python),
+              ("workflow-lint", run_workflows),
+          ]
+          for job, required in checks:
+              res = (needs.get(job) or {}).get("result")
+              if required:
+                  if res != "success":
+                      errors.append(f"{job} required success, got {res!r}")
+              else:
+                  if res not in ("skipped", "success"):
+                      errors.append(f"{job} expected skipped/success, got {res!r}")
+
+          if errors:
+              for err in errors:
+                  print(f"::error::{err}", file=sys.stderr)
+              sys.exit(1)
+          print("Downstream CI Gate passed.")
+          PY

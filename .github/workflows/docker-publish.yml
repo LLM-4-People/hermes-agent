@@ -6,9 +6,9 @@ name: Publish container image
 # to GHCR, and signs the index keylessly.
 #
 # Tag scheme:
-#   main        -> edge, latest, sha-<short>
+#   main        -> edge, latest, sha-<short> (skips docs/test-only merges)
 #   vX.Y.Z tag  -> X.Y.Z, X.Y, latest, sha-<short>
-#   PR          -> build only (no push)
+#   PR          -> build only (no push, read-only GHA layer cache)
 
 on:
   push:
@@ -43,23 +43,65 @@ jobs:
     name: Resolve build mode
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
+      should_build: ${{ steps.mode.outputs.should_build }}
       push: ${{ steps.mode.outputs.push }}
       is_release: ${{ steps.mode.outputs.is_release }}
     steps:
-      - name: Resolve push
+      - name: Checkout commit history for path check
+        if: github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name == 'main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Resolve push and build necessity
         id: mode
         env:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "pull_request" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "push=false" >> "$GITHUB_OUTPUT"
             echo "is_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "branch" ] && [ "$REF_NAME" = "main" ]; then
+            should_build=$(python3 - <<'PY'
+          import fnmatch, os, subprocess
+          ignore = ("docs/**", "*.md", "**/*.md", "tests/**", ".github/labeler.yml")
+          before = os.environ.get("BEFORE_SHA", "")
+          head = os.environ.get("HEAD_SHA", "HEAD")
+          try:
+              if before and set(before) != {"0"}:
+                  raw = subprocess.check_output(["git", "diff", "--name-only", before, head], text=True)
+              else:
+                  raw = subprocess.check_output(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", head], text=True)
+              files = [l.strip() for l in raw.splitlines() if l.strip()]
+          except subprocess.CalledProcessError:
+              files = []
+          if files and all(any(fnmatch.fnmatch(p, pat) for pat in ignore) for p in files):
+              print("false")
+          else:
+              print("true")
+          PY
+          )
+            if [ "$should_build" = "false" ]; then
+              echo "Skipping container publish for docs/tests-only push on main."
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              echo "push=false" >> "$GITHUB_OUTPUT"
+              echo "is_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
           echo "push=true" >> "$GITHUB_OUTPUT"
           if [ "$REF_TYPE" = "tag" ]; then
             # Only a reviewed semver release tag may publish `latest`. A bare `v*` tag would
@@ -78,6 +120,7 @@ jobs:
   build:
     name: Build ${{ matrix.arch }}
     needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -149,7 +192,7 @@ jobs:
           push: ${{ needs.prepare.outputs.push == 'true' }}
           outputs: ${{ needs.prepare.outputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE_NAME) || '' }}
           cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          cache-to: ${{ needs.prepare.outputs.push == 'true' && format('type=gha,mode=max,scope={0}', matrix.arch) || '' }}
 
       - name: Record digest
         if: needs.prepare.outputs.push == 'true'
@@ -174,7 +217,7 @@ jobs:
     needs:
       - prepare
       - build
-    if: needs.prepare.outputs.push == 'true'
+    if: needs.prepare.outputs.should_build == 'true' && needs.prepare.outputs.push == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -236,6 +279,7 @@ jobs:
     needs:
       - prepare
       - merge
+    if: needs.prepare.outputs.should_build == 'true' && needs.prepare.outputs.push == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

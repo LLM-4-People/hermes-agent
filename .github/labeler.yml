@@ -1,0 +1,74 @@
+"area: api-server":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'gateway/platforms/api_server*.py'
+          - 'gateway/run_turn_runner.py'
+
+"area: mobile-bridge":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tools/mobile_*.py'
+          - 'docs/MOBILE_COMPANION.md'
+          - 'scripts/mobile_doctor.py'
+
+"area: security":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tools/hosted_tool_policy.py'
+          - 'gateway/platforms/api_server_profile_prefix.py'
+          - 'scripts/check_public_pii.py'
+          - '.github/workflows/codeql.yml'
+          - '.github/workflows/pii-guard.yml'
+          - '.github/workflows/dependency-review.yml'
+
+"area: concurrency":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'hermes_state.py'
+          - 'gateway/platforms/api_server_runs.py'
+          - 'tests/gateway/api_server/test_multi_user_concurrency*.py'
+
+"area: i18n":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'gateway/i18n.py'
+          - 'scripts/check_writing_quality.py'
+          - 'tests/gateway/test_i18n*.py'
+
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**'
+          - 'website/docs/**'
+
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/**'
+          - '.github/actions/**'
+          - '.github/labeler.yml'
+          - '.github/release.yml'
+          - 'scripts/downstream-verify.sh'
+          - 'scripts/fork-owned-workflows.txt'
+          - 'scripts/check_fork_preservation.py'
+
+"area: tests":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tests/**'
+
+"area: docker":
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'Dockerfile'
+          - '.dockerignore'
+          - 'docker/**'
+          - '.github/workflows/docker-publish.yml'
+
+upstream-sync:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/workflows/sync-upstream.yml'
+          - 'scripts/check_fork_preservation.py'
+          - 'DOWNSTREAM.md'
