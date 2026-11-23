@@ -11,13 +11,15 @@ on:
   # zizmor: ignore[dangerous-triggers] -- the candidate is checked out as data only; the checker
   # and this workflow come from the trusted base commit, and no candidate code is executed.
   pull_request_target:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 concurrency:
   group: pii-guard-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   scan:
@@ -30,14 +32,14 @@ jobs:
       - name: Checkout the trusted checker
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           persist-credentials: false
 
       - name: Checkout the candidate as data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           path: candidate
           persist-credentials: false
 

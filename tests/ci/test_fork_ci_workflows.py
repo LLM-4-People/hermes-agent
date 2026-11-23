@@ -77,6 +77,11 @@ class ForkCiWorkflowsTest(unittest.TestCase):
 
     def test_downstream_ci_has_routing_fast_static_sharded_verify_and_fail_closed_gate(self):
         wf = _load_yaml(WORKFLOWS_DIR / "downstream-ci.yml")
+        triggers = _trigger_block(wf)
+        self.assertIn("merge_group", triggers)
+        self.assertIn("checks_requested", triggers["merge_group"].get("types", []))
+        self.assertIn("merge_group", str(wf["concurrency"]["cancel-in-progress"]))
+
         jobs = wf["jobs"]
         self.assertIn("changes", jobs)
         self.assertIn("fast-static", jobs)
@@ -84,10 +89,29 @@ class ForkCiWorkflowsTest(unittest.TestCase):
         self.assertIn("workflow-lint", jobs)
         self.assertIn("gate", jobs)
 
+        route_step = jobs["changes"]["steps"][1]
+        self.assertIn("merge_group.base_sha", route_step["env"]["BASE_SHA"])
+        self.assertIn("merge_group.head_sha", route_step["env"]["HEAD_SHA"])
+        self.assertIn('"merge_group"', route_step["run"])
+
         self.assertEqual(jobs["verify"]["strategy"]["matrix"]["shard"], [1, 2])
         self.assertEqual(jobs["gate"]["if"], "always()")
         gate_needs = set(jobs["gate"]["needs"])
         self.assertTrue({"changes", "fast-static", "verify", "workflow-lint"}.issubset(gate_needs))
+
+    def test_pii_guard_supports_merge_group_without_weakening_trust_boundary(self):
+        wf = _load_yaml(WORKFLOWS_DIR / "pii-guard.yml")
+        triggers = _trigger_block(wf)
+        self.assertIn("pull_request_target", triggers)
+        self.assertIn("merge_group", triggers)
+        self.assertIn("checks_requested", triggers["merge_group"].get("types", []))
+        self.assertIn("merge_group", str(wf["concurrency"]["cancel-in-progress"]))
+
+        steps = wf["jobs"]["scan"]["steps"]
+        self.assertIn("merge_group.base_sha", steps[0]["with"]["ref"])
+        self.assertIn("merge_group.head_sha", steps[1]["with"]["ref"])
+        self.assertIn("github.repository", steps[1]["with"]["repository"])
+        self.assertEqual(steps[1]["with"]["path"], "candidate")
 
     def test_codeql_and_docker_publish_skip_docs_only_work_without_weakening_main_or_tags(self):
         codeql = _load_yaml(WORKFLOWS_DIR / "codeql.yml")
