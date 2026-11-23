@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.i18n import CATALOG, find_slop_hits
+from gateway.i18n import CATALOG, detect_text_lang, find_slop_hits
 
 _EXTRA_SLOP_WORDS_EN: tuple[str, ...] = (
     "comprehensive",
@@ -62,13 +62,25 @@ _DOC_TARGETS: tuple[str, ...] = (
 _FENCE_RE = re.compile(r"(?ms)^```.*?^```[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _URL_RE = re.compile(r"https?://\S+")
+_PLACEHOLDER_RE = re.compile(r"\{[^{}]+\}")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def strip_markdown_code(text: str) -> str:
-    cleaned = _FENCE_RE.sub("", text)
+    """Strip fenced/inline code and URLs while preserving exact 1-based line numbers."""
+    cleaned = _FENCE_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     cleaned = _INLINE_CODE_RE.sub("", cleaned)
     cleaned = _URL_RE.sub("", cleaned)
     return cleaned
+
+
+def find_mixed_language_leak(text: str, *, expected_lang: str) -> str | None:
+    """Return an error reason when prose in ``text`` switches to the opposite EN/FR language."""
+    cleaned = _HTML_TAG_RE.sub(" ", _PLACEHOLDER_RE.sub(" ", text))
+    detected = detect_text_lang(cleaned)
+    if detected is not None and detected != expected_lang:
+        return f"mixed-language leakage (expected {expected_lang}, detected {detected})"
+    return None
 
 
 def scan_prose_for_slop(text: str, *, lang: str = "en") -> list[str]:
@@ -108,6 +120,9 @@ def _check_catalog() -> list[str]:
             hits = scan_prose_for_slop(value, lang=lang)
             if hits:
                 violations.append(f"gateway/i18n.py[{lang}][{key}]: banned slop {hits}")
+            leak = find_mixed_language_leak(value, expected_lang=lang)
+            if leak:
+                violations.append(f"gateway/i18n.py[{lang}][{key}]: {leak}")
     for key in sorted(en_keys & fr_keys):
         en_ph = _extract_placeholders(CATALOG["en"][key])
         fr_ph = _extract_placeholders(CATALOG["fr"][key])
@@ -169,6 +184,9 @@ def _check_docs(root: Path) -> list[str]:
             hits = scan_prose_for_slop(line, lang="en")
             if hits:
                 violations.append(f"{rel}:{lineno}: banned slop {hits} -> {line.strip()[:90]}")
+            leak = find_mixed_language_leak(line, expected_lang="en")
+            if leak:
+                violations.append(f"{rel}:{lineno}: {leak} -> {line.strip()[:90]}")
     return violations
 
 

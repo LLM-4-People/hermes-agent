@@ -157,7 +157,7 @@ def resolve_request_lang(
                 accept_language = str(v)
     return resolve_user_lang(
         accept_language=accept_language,
-        explicit_lang=explicit_lang or header_explicit,
+        explicit_lang=normalize_user_lang(explicit_lang) or header_explicit,
         profile_lang=profile_lang,
         text=text,
         default=default,

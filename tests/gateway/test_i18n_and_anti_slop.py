@@ -98,10 +98,14 @@ def test_resolve_user_lang_precedence_and_text_heuristic() -> None:
     assert resolve_user_lang(text="Explique cette erreur dans mon projet merci") == "fr"
     assert resolve_user_lang() == "en"
 
-    # HTTP header helper supports X-Hermes-Lang > Accept-Language.
+    # HTTP header helper supports X-Hermes-Lang > Accept-Language, and unsupported explicit_lang
+    # must never shadow a valid X-Hermes-Lang header.
     assert resolve_request_lang({"Accept-Language": "en-US", "X-Hermes-Lang": "fr"}) == "fr"
     assert resolve_request_lang({"Accept-Language": "fr-FR,fr;q=0.9"}) == "fr"
     assert resolve_request_lang({"Accept-Language": "en-US,en;q=0.9"}) == "en"
+    assert resolve_request_lang({"X-Hermes-Lang": "fr"}, explicit_lang="de") == "fr"
+    assert resolve_request_lang({"X-Hermes-Lang": "fr"}, explicit_lang="invalid") == "fr"
+    assert resolve_request_lang({"Accept-Language": "fr-CA"}, explicit_lang="es") == "fr"
 
 
 def test_concurrent_user_lang_scope_isolation_and_agent_i18n_bridge() -> None:
@@ -230,6 +234,21 @@ def test_writing_quality_ci_gate_passes_and_catches_slop(tmp_path) -> None:
     assert "comprehensive" in wq.scan_prose_for_slop("A comprehensive seamless experience.", lang="en")
     assert "sans couture" in wq.scan_prose_for_slop("Une expérience sans couture.", lang="fr")
 
-    # Code blocks, inline code, and URLs do not trigger false positives.
-    sample = "Plain line.\n```python\nword = 'delve tapestry'\n```\nUse `delve` at https://example.com/delve."
-    assert wq.scan_prose_for_slop(wq.strip_markdown_code(sample), lang="en") == []
+    # Code blocks, inline code, and URLs do not trigger false positives AND preserve exact line numbers.
+    sample = "Line 1.\n```python\nword = 'delve tapestry'\nline_4 = 1\n```\nUse `delve` at https://example.com/delve."
+    stripped = wq.strip_markdown_code(sample)
+    assert stripped.count("\n") == sample.count("\n")
+    assert wq.scan_prose_for_slop(stripped, lang="en") == []
+
+    # Mixed-language leakage checks catch opposite-language prose and report accurate line numbers after fences.
+    assert wq.find_mixed_language_leak("Bonjour, merci pour votre aide aujourd'hui.", expected_lang="en") is not None
+    assert wq.find_mixed_language_leak("Please explain this error and summarize the fix.", expected_lang="fr") is not None
+    assert wq.find_mixed_language_leak("Plain English documentation line.", expected_lang="en") is None
+    assert wq.find_mixed_language_leak("Vérifiez la clé API de ce profil.", expected_lang="fr") is None
+
+    (tmp_path / "README.md").write_text(
+        "# Title\n```bash\necho hi\necho bye\n```\nBonjour, merci pour votre aide.\n",
+        encoding="utf-8",
+    )
+    doc_hits = wq._check_docs(tmp_path)
+    assert any("README.md:6:" in hit and "mixed-language leakage" in hit for hit in doc_hits)
