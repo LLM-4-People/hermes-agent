@@ -17,9 +17,13 @@ from tools.mobile_ui_patch import _FORBIDDEN_PAYLOAD_RE, _WIDGET_SECRET_RE
 # ── Single Source of Truth Constants ─────────────────────────────────────────
 
 ALLOWED_SCREENS = frozenset({
+    "discussion",
     "discussions",
+    "home",
     "atelier",
+    "brain",
     "cerveau",
+    "activity",
     "activite",
     "thread",
     "memory",
@@ -31,9 +35,12 @@ ALLOWED_SCREENS = frozenset({
     "profile_defaults",
     "ambient",
     "doctor",
+    "connection_doctor",
     "templates",
+    "workflow_templates",
     "palette",
     "presence",
+    "presence_control",
     "settings",
 })
 

@@ -37,6 +37,8 @@ PROTECTED_EXACT_PATHS: frozenset[str] = frozenset({
     "scripts/downstream-verify.sh",
     "scripts/mobile_doctor.py",
     "scripts/check_fork_preservation.py",
+    "scripts/check_writing_quality.py",
+    "scripts/fork-owned-workflows.txt",
     "gateway/i18n.py",
     ".github/workflows/sync-upstream.yml",
     ".github/workflows/downstream-ci.yml",
@@ -139,6 +141,19 @@ def _matches_protected_glob(path: str) -> bool:
     return any(fnmatch(path, pattern) for pattern in PROTECTED_GLOB_PATTERNS)
 
 
+def _load_fork_owned_workflows(repo: Path, base_sha: str) -> set[str]:
+    """Load fork-owned workflow paths from ``scripts/fork-owned-workflows.txt`` at ``base_sha`` (SSoT)."""
+    proc = _run_git(repo, "show", f"{base_sha}:scripts/fork-owned-workflows.txt", check=False)
+    if proc.returncode != 0:
+        return set()
+    workflows: set[str] = set()
+    for raw_line in proc.stdout.splitlines():
+        name = raw_line.split("#", 1)[0].strip()
+        if name:
+            workflows.add(name if name.startswith(".github/workflows/") else f".github/workflows/{name}")
+    return workflows
+
+
 def check_preservation(
     *,
     repo: Path,
@@ -165,7 +180,8 @@ def check_preservation(
     merged_tree = _tree_paths(repo, merged_sha)
     present_paths = base_tree | merged_tree
 
-    explicit_protected = {path for path in PROTECTED_EXACT_PATHS if path in present_paths}
+    declared_protected = PROTECTED_EXACT_PATHS | _load_fork_owned_workflows(repo, base_sha)
+    explicit_protected = {path for path in declared_protected if path in present_paths}
     glob_protected = {path for path in present_paths if _matches_protected_glob(path)}
     protected_paths = fork_added | explicit_protected | glob_protected
 
