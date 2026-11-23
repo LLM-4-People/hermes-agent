@@ -1,0 +1,61 @@
+<p align="center">
+  <img src="{{social_preview_asset}}" alt="Hermes Agent: self-hosted companion fork for Android 16" width="100%">
+</p>
+
+# Hermes Agent (LLM-4-People companion fork)
+<p align="center">
+  <a href="docs/MOBILE_COMPANION.md">Mobile companion guide</a> |
+  <a href="{{companion_pages_url}}">Hermes Mobile Android app</a> |
+  <a href="DOWNSTREAM.md">Fork architecture</a> |
+  <a href="{{latest_release_url}}">Release {{latest_release_tag}}</a> |
+  <a href="{{upstream_docs_url}}">Upstream Hermes</a>
+</p>
+<p align="center">
+  <a href="docs/MOBILE_COMPANION.md"><img src="https://img.shields.io/badge/Hermes_Mobile-Companion_Guide-0F766E?style=for-the-badge" alt="Hermes Mobile companion guide"></a>
+  <a href="{{companion_pages_url}}"><img src="https://img.shields.io/badge/Android_App-Hermes_Mobile-1D4ED8?style=for-the-badge" alt="Hermes Mobile Android app"></a>
+  <a href="{{ghcr_package_url}}"><img src="https://img.shields.io/badge/GHCR-hermes--agent:edge-0F172A?style=for-the-badge" alt="GHCR container image"></a>
+  <a href="{{license_url}}"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License: MIT"></a>
+</p>
+
+> **LLM-4-People fork of [{{upstream_repo}}]({{upstream_url}})** built to power the private, native Android companion **[Hermes Mobile]({{companion_pages_url}})** while staying automatically synchronized with upstream Hermes.
+
+<p align="center">
+  <a href="{{companion_walkthrough_url}}"><img src="{{companion_preview_asset}}" alt="Hermes Mobile on Android 16: command palette, everyday workflows, connection doctor, and presence controls" width="100%"></a>
+</p>
+
+### What this fork adds for Hermes Mobile
+
+- **Full mobile companion API ({{active_capability_count}} active capabilities, {{endpoint_count}} endpoints, {{default_toolset_count}} default toolsets)**: live Android UI widgets and custom surfaces (`mobile_ui`), structured phone deliveries (`mobile_deliver`), per-action approved Android device bridge (`mobile_device` / `request_device_action` across {{device_capability_count}} capabilities including {{deep_android_action_count}} deep Android 16 actions), brain and memory APIs, skill studio, smart notes, universal cross-profile sharing, habit suggestions, workspace and git diff browser, cursor pagination, per-run tool restrictions, and rich streaming telemetry across {{mobile_tool_module_count}} mobile tool modules.
+- **Single-host multi-user profiles (`/p/<profile>`) and bounded concurrency**: one container serves your whole household or team (`default`, `/p/alice`, `/p/bob`, ...) with isolated `.env` bearer keys, databases, memory, notes, sessions, and workspaces, fail-closed by default (`401` on wrong key, `404` on unknown profile), capped at {{max_concurrent_runs}} global concurrent runs and {{max_concurrent_runs_per_profile}} per profile.
+- **Small-LLM friendly and bilingual ({{supported_user_langs_inline}})**: automatic per-run companion guidance (`run_instruction_scope`), forgiving action aliases, auto-derived widget IDs, and automatic French/English language alignment backed by {{locale_count}} locale catalogs.
+- **Verified multi-arch containers and automated CI**: signed `linux/amd64` + `linux/arm64` images at `{{ghcr_image}}` (latest release `{{latest_release_tag}}`) with BuildKit provenance, SPDX SBOM, keyless Cosign attestation, and {{fork_workflow_count}} fork-owned CI workflows ({{downstream_ci_shards}}-shard downstream test gate).
+
+### 3-minute Docker quickstart
+
+```bash
+# 1. Create a persistent data folder and set a strong API key
+mkdir -p ~/.hermes
+cat >> ~/.hermes/.env <<'EOF'
+API_SERVER_ENABLED=true
+API_SERVER_HOST=0.0.0.0
+API_SERVER_PORT={{default_api_port}}
+API_SERVER_KEY=<replace-with-a-long-random-secret>
+EOF
+
+# 2. Run the signed companion container (bind to localhost behind your HTTPS proxy)
+docker run -d --name hermes --restart unless-stopped \
+  -p 127.0.0.1:{{default_api_port}}:{{default_api_port}} \
+  -e HERMES_UID="$(id -u)" -e HERMES_GID="$(id -g)" \
+  -v ~/.hermes:/opt/data \
+  {{ghcr_image}} gateway run
+
+# 3. Pick your model/provider and verify everything is ready for Hermes Mobile
+docker exec -it hermes hermes model
+python3 scripts/mobile_doctor.py --hermes-home ~/.hermes --public-url https://hermes.example.com
+```
+
+Then install **[Hermes Mobile]({{companion_pages_url}})**, paste the connection URL printed by `scripts/mobile_doctor.py` (for example `https://hermes.example.com` or `https://hermes.example.com/p/alice`) plus that profile's `API_SERVER_KEY`, and start chatting.
+
+- **[Read the full mobile companion guide (`docs/MOBILE_COMPANION.md`)](docs/MOBILE_COMPANION.md)** — Docker Compose, multi-user `/p/<profile>`, all {{active_capability_count}} capabilities and {{default_toolset_count}} default toolsets, {{device_capability_count}} device bridge actions, security boundaries, and troubleshooting.
+- **[Hermes Mobile Android app and docs]({{companion_pages_url}})** — download the Android app, walkthroughs, and user documentation.
+- **[Downstream fork notes (`DOWNSTREAM.md`)](DOWNSTREAM.md)** — upstream sync pipeline, provider-scoped routing, Signal media and links, Cosign verification, and local CI gates.

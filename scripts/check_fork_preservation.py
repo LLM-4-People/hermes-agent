@@ -36,9 +36,11 @@ PROTECTED_EXACT_PATHS: frozenset[str] = frozenset({
     "docs/MOBILE_COMPANION.md",
     "scripts/downstream-verify.sh",
     "scripts/mobile_doctor.py",
+    "scripts/docs_fork.py",
     "scripts/check_fork_preservation.py",
     "scripts/check_writing_quality.py",
     "scripts/fork-owned-workflows.txt",
+    "tests/scripts/test_docs_fork.py",
     "gateway/i18n.py",
     ".github/workflows/sync-upstream.yml",
     ".github/workflows/downstream-ci.yml",
@@ -50,6 +52,7 @@ PROTECTED_EXACT_PATHS: frozenset[str] = frozenset({
 
 PROTECTED_GLOB_PATTERNS: tuple[str, ...] = (
     "tools/mobile_*.py",
+    "docs/sources/*",
 )
 
 _GIT_TIMEOUT_SECONDS = 60
