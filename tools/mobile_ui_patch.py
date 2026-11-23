@@ -71,6 +71,7 @@ ALLOWED_INTERACTIVE_CARD_KINDS = frozenset({
     "quick_pick",
     "toggle_confirm",
     "customization_preview",
+    "pairing_invite",
 })
 ALLOWED_DESTINATIONS = frozenset({"discussions", "atelier", "cerveau", "activite"})
 
@@ -752,6 +753,32 @@ def _validate_customization_preview_card(
     return _validate_optional_buttons(raw, entry, ("apply_label", "undo_label"), prefix)
 
 
+def _validate_pairing_invite_card(raw: dict[str, Any], entry: dict[str, Any], prefix: str) -> Optional[str]:
+    pairing = raw.get("pairing")
+    if not isinstance(pairing, dict):
+        return f"{prefix}.pairing must be an object."
+    deep_link = pairing.get("deep_link")
+    if not isinstance(deep_link, str) or not deep_link.strip().startswith("hermes://pair?"):
+        return f"{prefix}.pairing.deep_link must be a hermes://pair link."
+    if len(deep_link) > 512:
+        return f"{prefix}.pairing.deep_link exceeds 512 chars."
+    profile_slug = str(pairing.get("profile_slug") or "default").strip().lower()
+    display_name = str(pairing.get("display_name") or profile_slug).strip()[:64]
+    mode = str(pairing.get("mode") or "device").strip().lower()
+    if mode not in {"device", "invite"}:
+        return f"{prefix}.pairing.mode must be 'device' or 'invite'."
+    entry["pairing"] = {
+        "ticket_id": str(pairing.get("ticket_id") or "").strip()[:64],
+        "deep_link": deep_link.strip(),
+        "profile_slug": profile_slug,
+        "display_name": display_name,
+        "mode": mode,
+        "expires_at": pairing.get("expires_at"),
+        "ttl_seconds": pairing.get("ttl_seconds", 300),
+    }
+    return _validate_optional_buttons(raw, entry, ("share_label", "copy_label"), prefix)
+
+
 def _validate_single_interactive_card(
     raw: Any, idx: int, seen_ids: set[str]
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -787,6 +814,8 @@ def _validate_single_interactive_card(
 
     if norm_kind == "customization_preview":
         body_err = _validate_customization_preview_card(raw, entry, prefix)
+    elif norm_kind == "pairing_invite":
+        body_err = _validate_pairing_invite_card(raw, entry, prefix)
     else:
         body_err = _validate_item_card(norm_kind, raw, entry, prefix)
     if body_err:

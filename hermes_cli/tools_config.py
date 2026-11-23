@@ -95,6 +95,7 @@ CONFIGURABLE_TOOLSETS = [
     ("mobile_ui",       "📱 Mobile Live UI",           "propose/apply reversible declarative UI patches & widgets"),
     ("mobile_deliver",  "🔔 Mobile Deliveries",        "deliver structured notices, cards, files & briefings to Hermes Mobile"),
     ("mobile_device",   "📲 Mobile Device Bridge",     "request explicitly approved Android device actions"),
+    ("mobile_profiles", "👥 Mobile Profiles",          "manage Hermes Mobile user profiles, pairing links, and onboarding"),
 ]
 
 

@@ -128,7 +128,7 @@ _CAPABILITY_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
 )
 
 _TOOLSET_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Mobile companion", ("mobile_ui", "mobile_deliver", "mobile_device")),
+    ("Mobile companion", ("mobile_ui", "mobile_deliver", "mobile_device", "mobile_profiles")),
     ("Web and research", ("web", "browser")),
     ("Coding and files", ("file", "terminal", "code_execution")),
     ("Media and creativity", ("vision", "image_gen")),
@@ -140,6 +140,7 @@ _TOOLSET_TOOL_HINTS: dict[str, str] = {
     "mobile_ui": "`mobile_ui` (`mobile_ui_patch`)",
     "mobile_deliver": "`mobile_deliver` (`mobile_deliver`)",
     "mobile_device": "`mobile_device` (`request_device_action`)",
+    "mobile_profiles": "`mobile_profiles` (`manage_profiles`)",
     "web": "`web` (`web_search`, `web_extract`)",
     "browser": "`browser` (`browser_*`)",
     "file": "`file` (`read_file`, `write_file`, `patch`, `search_files`)",

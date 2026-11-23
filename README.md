@@ -28,7 +28,7 @@
 
 ### What this fork adds for Hermes Mobile
 
-- **Full mobile companion API (56 active capabilities, 71 endpoints, 17 default toolsets)**: live Android UI widgets and custom surfaces (`mobile_ui`), structured phone deliveries (`mobile_deliver`), per-action approved Android device bridge (`mobile_device` / `request_device_action` across 29 capabilities including 9 deep Android 16 actions), brain and memory APIs, skill studio, smart notes, universal cross-profile sharing, habit suggestions, workspace and git diff browser, cursor pagination, per-run tool restrictions, and rich streaming telemetry across 7 mobile tool modules.
+- **Full mobile companion API (59 active capabilities, 84 endpoints, 18 default toolsets)**: live Android UI widgets and custom surfaces (`mobile_ui`), structured phone deliveries (`mobile_deliver`), per-action approved Android device bridge (`mobile_device` / `request_device_action` across 29 capabilities including 9 deep Android 16 actions), brain and memory APIs, skill studio, smart notes, universal cross-profile sharing, habit suggestions, workspace and git diff browser, cursor pagination, per-run tool restrictions, and rich streaming telemetry across 8 mobile tool modules.
 - **Single-host multi-user profiles (`/p/<profile>`) and bounded concurrency**: one container serves your whole household or team (`default`, `/p/alice`, `/p/bob`, ...) with isolated `.env` bearer keys, databases, memory, notes, sessions, and workspaces, fail-closed by default (`401` on wrong key, `404` on unknown profile), capped at 32 global concurrent runs and 12 per profile.
 - **Small-LLM friendly and bilingual (`en`/`fr`)**: automatic per-run companion guidance (`run_instruction_scope`), forgiving action aliases, auto-derived widget IDs, and automatic French/English language alignment backed by 17 locale catalogs.
 - **Verified multi-arch containers and automated CI**: signed `linux/amd64` + `linux/arm64` images at `ghcr.io/llm-4-people/hermes-agent:edge` (latest release `v2026.11.22`) with BuildKit provenance, SPDX SBOM, keyless Cosign attestation, and 8 fork-owned CI workflows (2-shard downstream test gate).
@@ -59,7 +59,7 @@ python3 scripts/mobile_doctor.py --hermes-home ~/.hermes --public-url https://he
 
 Then install **[Hermes Mobile](https://llm-4-people.github.io/hermes-mobile/)**, paste the connection URL printed by `scripts/mobile_doctor.py` (for example `https://hermes.example.com` or `https://hermes.example.com/p/alice`) plus that profile's `API_SERVER_KEY`, and start chatting.
 
-- **[Read the full mobile companion guide (`docs/MOBILE_COMPANION.md`)](docs/MOBILE_COMPANION.md)** — Docker Compose, multi-user `/p/<profile>`, all 56 capabilities and 17 default toolsets, 29 device bridge actions, security boundaries, and troubleshooting.
+- **[Read the full mobile companion guide (`docs/MOBILE_COMPANION.md`)](docs/MOBILE_COMPANION.md)** — Docker Compose, multi-user `/p/<profile>`, all 59 capabilities and 18 default toolsets, 29 device bridge actions, security boundaries, and troubleshooting.
 - **[Hermes Mobile Android app and docs](https://llm-4-people.github.io/hermes-mobile/)** — download the Android app, walkthroughs, and user documentation.
 - **[Downstream fork notes (`DOWNSTREAM.md`)](DOWNSTREAM.md)** — upstream sync pipeline, provider-scoped routing, Signal media and links, Cosign verification, and local CI gates.
 <!-- END:HERMES_FORK_DOCS -->

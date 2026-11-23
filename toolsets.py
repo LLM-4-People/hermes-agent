@@ -163,6 +163,11 @@ TOOLSETS = {
         ["request_device_action"],
         platforms=frozenset({"api_server"}),
     ),
+    "mobile_profiles": _ts(
+        "Manage Hermes Mobile user profiles, onboarding readiness, and ephemeral pairing links",
+        ["manage_profiles"],
+        platforms=frozenset({"api_server"}),
+    ),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "kanban": _ts(
@@ -207,7 +212,7 @@ TOOLSETS = {
         "OpenAI-compatible API server — full agent tools accessible via HTTP (no "
         "interactive UI tools like clarify or send_message)",
         _core_without("text_to_speech", "clarify", "computer_use", kanban=False)
-        + ["mobile_ui_patch", "mobile_deliver", "request_device_action"],
+        + ["mobile_ui_patch", "mobile_deliver", "request_device_action", "manage_profiles"],
     ),
     "hermes-cli": _bundle("Full interactive CLI toolset - all default tools plus cronjob management"),
 
