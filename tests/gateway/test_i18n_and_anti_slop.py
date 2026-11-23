@@ -196,11 +196,34 @@ def test_tools_localize_user_facing_messages_preserving_machine_codes(tmp_path, 
     assert "ARRÊT : ne relancez pas" in pp_fr["message"]
 
 
-def test_writing_quality_ci_gate_passes_and_catches_slop() -> None:
+def test_writing_quality_ci_gate_passes_and_catches_slop(tmp_path) -> None:
+    import subprocess
+    import sys
     from scripts import check_writing_quality as wq
 
     # Repository prose, i18n catalog, prompt_builder, and mobile tools pass with 0 violations.
     assert wq.run_all_checks() == []
+
+    # Pure-stdlib isolated execution (`python3 -I`) must succeed with zero third-party deps.
+    proc = subprocess.run(
+        [sys.executable, "-I", str(wq.ROOT / "scripts" / "check_writing_quality.py")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"python3 -I failed: {proc.stderr}"
+    assert "OK (0 violations)" in proc.stdout
+
+    # AST prompt_builder check catches slop in synthetic prompt_builder.py without importing it.
+    fake_agent = tmp_path / "agent"
+    fake_agent.mkdir()
+    (fake_agent / "prompt_builder.py").write_text(
+        'ANTI_SLOP_STYLE_RULES = "Plain prose."\n'
+        'DEFAULT_AGENT_IDENTITY = "Great question! Let us delve into this." + ANTI_SLOP_STYLE_RULES\n',
+        encoding="utf-8",
+    )
+    pb_hits = wq._check_prompt_builder(tmp_path)
+    assert pb_hits and "DEFAULT_AGENT_IDENTITY" in pb_hits[0]
 
     # Negative checks: catches EN/FR clichés and negative-parallelism slop.
     assert "negative parallelism" in wq.scan_prose_for_slop("It's not just fast, it's magical.", lang="en")

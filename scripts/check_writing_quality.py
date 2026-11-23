@@ -116,13 +116,45 @@ def _check_catalog() -> list[str]:
     return violations
 
 
-def _check_prompt_builder() -> list[str]:
-    from agent import prompt_builder
+def _eval_str_expr(node: ast.AST, env: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in env:
+        return env[node.id]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _eval_str_expr(node.left, env)
+        right = _eval_str_expr(node.right, env)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _check_prompt_builder(root: Path) -> list[str]:
+    """Parse agent/prompt_builder.py with pure-stdlib AST (zero third-party imports)."""
+    path = root / "agent" / "prompt_builder.py"
+    if not path.is_file():
+        return ["agent/prompt_builder.py: file not found"]
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+    except SyntaxError as exc:
+        return [f"agent/prompt_builder.py: syntax error {exc}"]
+
+    env: dict[str, str] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            val = _eval_str_expr(stmt.value, env)
+            if val is not None:
+                env[stmt.targets[0].id] = val
 
     violations: list[str] = []
-    hits = scan_prose_for_slop(prompt_builder.DEFAULT_AGENT_IDENTITY, lang="en")
-    if hits:
-        violations.append(f"agent/prompt_builder.py:DEFAULT_AGENT_IDENTITY: banned slop {hits}")
+    for name in ("ANTI_SLOP_STYLE_RULES", "DEFAULT_AGENT_IDENTITY"):
+        text = env.get(name)
+        if not text:
+            violations.append(f"agent/prompt_builder.py:{name}: missing or non-string constant")
+            continue
+        hits = scan_prose_for_slop(text, lang="en")
+        if hits:
+            violations.append(f"agent/prompt_builder.py:{name}: banned slop {hits}")
     return violations
 
 
@@ -172,7 +204,7 @@ def _check_mobile_tools(root: Path) -> list[str]:
 def run_all_checks(root: Path = ROOT) -> list[str]:
     violations: list[str] = []
     violations.extend(_check_catalog())
-    violations.extend(_check_prompt_builder())
+    violations.extend(_check_prompt_builder(root))
     violations.extend(_check_docs(root))
     violations.extend(_check_mobile_tools(root))
     return violations
