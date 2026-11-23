@@ -703,23 +703,18 @@ def _pending_result(spec, session_key: str, *, command: str, description: str,
         return _scan_incomplete_block(_NO_REVIEWER_PRESENT)
     if (denied := stranded_denial(session_key, gateway, spec.noun, pattern_key, description)) is not None:
         return denied
+    from gateway.i18n import t as _gt
     if not spec.pending_keys:
         return {
             "approved": False, "pattern_key": pattern_key, "status": "approval_required",
             "command": command, "description": description,
-            "message": (f"⚠️ This action is potentially dangerous ({description}). "
-                        f"Asking the user for approval.\n\n**Target:**\n```\n{command}\n```"),
+            "message": _gt("approval.required_notice", description=description, command=command),
         }
     body = body or f"**Command:**\n```\n{command}\n```"
     result = {
         "approved": False, "pattern_key": pattern_key, "status": "pending_approval",
         "approval_pending": True, "command": command, "description": description,
-        "message": (
-            f"⚠️ {description}. Asking the user for approval.\n\n{body}\n\n"
-            f"STOP: do NOT re-run, rephrase, or re-issue this {spec.noun} — each "
-            "variant sends the user ANOTHER approval card. Wait for the "
-            "user's decision; if this turn must end, report that approval is pending."
-        ),
+        "message": _gt("approval.pending_notice", description=description, body=body, noun=spec.noun),
     }
     if smart_denied:
         result.update(smart_denied=True, allow_permanent=False)

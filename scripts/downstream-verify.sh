@@ -51,6 +51,7 @@ DOWNSTREAM_TESTS=(
   tests/gateway/test_runtime_footer.py
   tests/gateway/test_session_info.py
   tests/gateway/test_hygiene_provider_identity.py
+  tests/gateway/test_i18n_and_anti_slop.py
   tests/gateway/test_signal_format.py
   tests/gateway/test_signal_inbound_attachments.py
   tests/gateway/test_signal_rate_limit.py

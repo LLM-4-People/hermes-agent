@@ -433,12 +433,14 @@ def _detect_delivery_origin() -> str:
     return "agent"
 
 
-_DELIVERY_EXAMPLE = {
-    "kind": "briefing",
-    "title": "Briefing du matin",
-    "payload": {"summary": "3 tâches prioritaires aujourd'hui"},
-    "urgency": "normal",
-}
+def _delivery_example() -> dict[str, Any]:
+    from gateway.i18n import t as _gt
+    return {
+        "kind": "briefing",
+        "title": _gt("mobile.deliver_example_title"),
+        "payload": {"summary": _gt("mobile.deliver_example_summary")},
+        "urgency": "normal",
+    }
 
 
 def mobile_deliver_tool(
@@ -466,15 +468,17 @@ def mobile_deliver_tool(
         )
     except ValueError as exc:
         logger.warning("mobile_deliver rejected: %s", exc)
+        from gateway.i18n import t as _gt
         return json.dumps(
             {
                 "ok": False,
                 "error": str(exc),
-                "hint": (
-                    f"Use kind in {sorted(ALLOWED_DELIVERY_KINDS)} (alias 'alert'->'notice'), "
-                    f"urgency in {sorted(ALLOWED_URGENCIES)} (alias 'low'->'silent'), non-empty title, and JSON payload."
+                "hint": _gt(
+                    "mobile.deliver_hint",
+                    kinds=sorted(ALLOWED_DELIVERY_KINDS),
+                    urgencies=sorted(ALLOWED_URGENCIES),
                 ),
-                "example": _DELIVERY_EXAMPLE,
+                "example": _delivery_example(),
             },
             ensure_ascii=False,
         )

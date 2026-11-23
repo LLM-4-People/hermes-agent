@@ -22,6 +22,7 @@ try:
 except ImportError:
     web = None  # type: ignore[assignment]
 
+from gateway.i18n import resolve_request_lang, t as _gt, user_lang_scope
 from hermes_constants import (
     assert_named_profile_home_live,
     get_hermes_home,
@@ -76,10 +77,10 @@ def _connect_habits_db(*, write: bool = False) -> Iterator[sqlite3.Connection]:
 
 def _validate_key(raw: Any, field: str) -> tuple[Optional[str], Optional[str]]:
     if not isinstance(raw, str) or not raw.strip():
-        return None, f"'{field}' must be a non-empty lowercase token."
+        return None, _gt("habits.invalid_key_empty", field=field)
     norm = raw.strip().lower()
     if not _KEY_RE.fullmatch(norm):
-        return None, f"'{field}' must match lowercase slug format (a-z, 0-9, '.', '_', '-', max 64 chars)."
+        return None, _gt("habits.invalid_key_format", field=field)
     return norm, None
 
 
@@ -170,51 +171,57 @@ async def handle_habit_suggestions(adapter, request: web.Request) -> web.Respons
     """GET /api/mobile/habits/suggestions — return learned patterns (count >= 3 only)."""
     from gateway.platforms.api_server import _error_response
 
-    if auth_err := adapter._check_auth(request):
-        return auth_err
-    raw_cat = (request.query.get("category") or "").strip()
-    category: Optional[str] = None
-    if raw_cat:
-        category, cat_err = _validate_key(raw_cat, "category")
-        if cat_err is not None:
-            return _error_response(cat_err, 400, code="invalid_habit_category")
-    try:
-        limit = int(request.query.get("limit", "8"))
-        min_count = int(request.query.get("min_count", str(HABIT_MIN_THRESHOLD)))
-    except ValueError:
-        return _error_response("limit and min_count must be integers.", 400, code="invalid_habit_query")
-    if limit < 1 or limit > _MAX_SUGGESTIONS_LIMIT:
-        return _error_response(f"limit must be 1..{_MAX_SUGGESTIONS_LIMIT}.", 400, code="invalid_habit_query")
-    min_count = max(min_count, HABIT_MIN_THRESHOLD)
-    payload = await asyncio.to_thread(list_habit_suggestions, category=category, limit=limit, min_count=min_count)
-    return web.json_response(payload)
+    with user_lang_scope(resolve_request_lang(request.headers)):
+        if auth_err := adapter._check_auth(request):
+            return auth_err
+        raw_cat = (request.query.get("category") or "").strip()
+        category: Optional[str] = None
+        if raw_cat:
+            category, cat_err = _validate_key(raw_cat, "category")
+            if cat_err is not None:
+                return _error_response(cat_err, 400, code="invalid_habit_category")
+        try:
+            limit = int(request.query.get("limit", "8"))
+            min_count = int(request.query.get("min_count", str(HABIT_MIN_THRESHOLD)))
+        except ValueError:
+            return _error_response(_gt("habits.invalid_int_query"), 400, code="invalid_habit_query")
+        if limit < 1 or limit > _MAX_SUGGESTIONS_LIMIT:
+            return _error_response(
+                _gt("habits.invalid_limit", max_limit=_MAX_SUGGESTIONS_LIMIT),
+                400,
+                code="invalid_habit_query",
+            )
+        min_count = max(min_count, HABIT_MIN_THRESHOLD)
+        payload = await asyncio.to_thread(list_habit_suggestions, category=category, limit=limit, min_count=min_count)
+        return web.json_response(payload)
 
 
 async def handle_record_habit_event(adapter, request: web.Request) -> web.Response:
     """POST /api/mobile/habits/events — record an anonymized category/action signal."""
     from gateway.platforms.api_server import _error_response
 
-    if auth_err := adapter._check_auth(request):
-        return auth_err
-    body, err = await adapter._read_json_body(request)
-    if err is not None:
-        return err
-    unknown = sorted(set(body) - {"category", "action"})
-    if unknown:
-        return _error_response(
-            f"Only anonymized 'category' and 'action' fields are allowed (rejected: {', '.join(unknown)}).",
-            400,
-            code="disallowed_habit_fields",
-        )
-    category, cat_err = _validate_key(body.get("category"), "category")
-    if cat_err is not None:
-        return _error_response(cat_err, 400, code="invalid_habit_category")
-    action_key, act_err = _validate_key(body.get("action"), "action")
-    if act_err is not None:
-        return _error_response(act_err, 400, code="invalid_habit_action")
-    assert category is not None and action_key is not None
-    result = await asyncio.to_thread(record_habit_event, category, action_key)
-    return web.json_response({"object": "hermes.habit.event", **result}, status=201)
+    with user_lang_scope(resolve_request_lang(request.headers)):
+        if auth_err := adapter._check_auth(request):
+            return auth_err
+        body, err = await adapter._read_json_body(request)
+        if err is not None:
+            return err
+        unknown = sorted(set(body) - {"category", "action"})
+        if unknown:
+            return _error_response(
+                _gt("habits.disallowed_fields", fields=", ".join(unknown)),
+                400,
+                code="disallowed_habit_fields",
+            )
+        category, cat_err = _validate_key(body.get("category"), "category")
+        if cat_err is not None:
+            return _error_response(cat_err, 400, code="invalid_habit_category")
+        action_key, act_err = _validate_key(body.get("action"), "action")
+        if act_err is not None:
+            return _error_response(act_err, 400, code="invalid_habit_action")
+        assert category is not None and action_key is not None
+        result = await asyncio.to_thread(record_habit_event, category, action_key)
+        return web.json_response({"object": "hermes.habit.event", **result}, status=201)
 
 
 async def handle_reset_habits(adapter, request: web.Request) -> web.Response:
