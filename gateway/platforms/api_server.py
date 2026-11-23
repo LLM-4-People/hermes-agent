@@ -783,14 +783,14 @@ def _invalid_request(message: str) -> web.Response:
     return web.json_response({"error": {"message": message, "type": "invalid_request_error"}}, status=400)
 
 
-_api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextVar(
+from gateway.platforms import api_server_auth_guard as _auth_guard
+
+_api_agent_request_reservation: ContextVar[Optional[dict[str, Any]]] = ContextVar(
     "api_agent_request_reservation", default=None)
 
 
 def _admit_api_agent_request(handler):
-    """Reserve an authenticated API turn before its handler first awaits: drain check +
-    reservation in one non-awaiting block so a request admitted just before shutdown can't go
-    invisible while parsing its body. The mutable reservation releases the slot exactly once."""
+    """Reserve an authenticated API turn before its handler first awaits."""
     @wraps(handler)
     async def _wrapped(self, request, *args, **kwargs):
         auth_err = (
@@ -799,12 +799,13 @@ def _admit_api_agent_request(handler):
             else self._check_auth(request))
         if auth_err:
             return auth_err
-        draining = self._draining_response()
-        if draining is not None:
+        if (draining := self._draining_response()) is not None:
             return draining
-        reservation = {"active": True}
+        profile_key = _api_request_profile.get() or "default"
+        reservation: dict[str, Any] = {"active": True, "profile": profile_key}
         token = _api_agent_request_reservation.set(reservation)
         self._pending_agent_requests += 1
+        _auth_guard.adjust_profile_counter(getattr(self, "_pending_agent_requests_by_profile", None), profile_key, 1)
         try:
             return await handler(self, request, *args, **kwargs)
         finally:
@@ -813,19 +814,20 @@ def _admit_api_agent_request(handler):
     return _wrapped
 
 
-def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
+def _release_pending_api_work(adapter, reservation: dict[str, Any]) -> None:
     """Release a pending-work reservation exactly once."""
     if reservation["active"]:
         reservation["active"] = False
         adapter._pending_agent_requests = max(0, adapter._pending_agent_requests - 1)
+        _auth_guard.adjust_profile_counter(
+            getattr(adapter, "_pending_agent_requests_by_profile", None), reservation.get("profile"), -1)
 
 
 def _require_auth(handler):
     """Run ``self._check_auth`` first and return its 401 instead of the handler."""
     @wraps(handler)
     async def _wrapped(self, request, *args, **kwargs):
-        auth_err = self._check_auth(request)
-        if auth_err:
+        if (auth_err := self._check_auth(request)):
             return auth_err
         return await handler(self, request, *args, **kwargs)
     return _wrapped
@@ -833,10 +835,11 @@ def _require_auth(handler):
 
 @contextmanager
 def _reserve_pending_api_work(adapter):
-    """Keep externally-triggered background work visible across awaits; a handler may detach
-    the reservation to a task whose done callback then owns release."""
-    reservation = {"active": True, "detached": False}
+    """Keep externally-triggered background work visible across awaits."""
+    profile_key = _api_request_profile.get() or "default"
+    reservation: dict[str, Any] = {"active": True, "detached": False, "profile": profile_key}
     adapter._pending_agent_requests += 1
+    _auth_guard.adjust_profile_counter(getattr(adapter, "_pending_agent_requests_by_profile", None), profile_key, 1)
     try:
         yield reservation
     finally:
@@ -1116,26 +1119,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._home_stores: dict[str, Any] = {}  # per-profile-home storage interface handle cache
         self._session_db_cache_lock = threading.Lock()
         self._session_db_cache_closed = False
-        # Last-known-good model per gateway_session_key ("*" = process-wide; never session_id,
-        # which is per request -> unbounded). Recovers a transient empty model resolution.
         self._last_resolved_model: dict[str, str] = {}
         self._session_db_lock: Optional[asyncio.Lock] = None  # single-flight for lazy init
         self._max_concurrent_runs: int = self._resolve_max_concurrent_runs()  # 0 disables
         self._history_tool_output_max_chars = self._resolve_api_server_int(
             "history_tool_output_max_chars", default=0)
-        # In-flight _run_agent() turns (/v1/runs tracks its own via _active_run_tasks).
-        # Concurrency cap shared across all agent-serving endpoints (/v1/chat/completions, /v1/responses,
-        # /v1/runs, /api/sessions/{id}/chat[/stream]). Read from config.yaml
-        # gateway.api_server.max_concurrent_runs; 0 disables the cap.
-        # Bounds CPU / memory / upstream-LLM-quota exhaustion from a request flood (#7483).
+        _auth_guard.init_adapter_security_and_concurrency(self)
         self._inflight_agent_runs: int = 0
-        # Every agent inside _run_agent() for shutdown interrupt, keyed by id() (the strong ref
-        # keeps the id() from recycling); distinct from the run_id-keyed _active_run_agents.
         self._shutdown_interruptible_agents: dict[int, Any] = {}
-        # One memory provider per session across requests (this surface rebuilds the agent per turn).
         self._memory_sessions = ApiServerMemorySessions()
         self.gateway_runner: Optional[Any] = None  # set by gateway/run.py
-        # Admitted requests not yet in agent bookkeeping, so shutdown drain counts them.
         self._pending_agent_requests: int = 0
         # Daily API metrics + heartbeat stamps published to gateway runtime status (#52323).
         self._metrics_day: str = self._metrics_day_key()
@@ -1155,6 +1148,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     + sum(not task.done() for task in self._active_run_tasks.values()))
         except Exception:
             return 0
+
+    def active_profile_agent_work_count(self, profile: Optional[str] = None) -> int:
+        """Live agent work scoped to one profile (fair-share isolation under multi-user load)."""
+        return _auth_guard.active_profile_agent_work_count(self, profile, _api_request_profile)
 
     def interrupt_active_runs(self, reason: str) -> int:
         """Interrupt every adapter-owned agent during shutdown (they are not in
@@ -1220,11 +1217,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _active_structured_run_count(self) -> int:
         """Count structured runs that still have executable work."""
-        # "stopping" is not terminal: executor work continues until the agent notices.
-        return sum(
-            1 for status in self._run_statuses.values()
-            if status.get("status") in {"queued", "running", "waiting_for_approval", "waiting_for_input", "stopping"}
-        )
+        active = {"queued", "running", "waiting_for_approval", "waiting_for_input", "waiting_for_device", "stopping"}
+        with getattr(self, "_run_state_lock", None) or nullcontext():
+            return sum(1 for status in self._run_statuses.values() if status.get("status") in active)
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -1238,8 +1233,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @staticmethod
     def _resolve_max_concurrent_runs() -> int:
-        """gateway.api_server.max_concurrent_runs (0 disables; default 10; negatives -> 0)."""
-        return APIServerAdapter._resolve_api_server_int("max_concurrent_runs", default=10)
+        """gateway.api_server.max_concurrent_runs (0 disables; default 32; negatives -> 0)."""
+        return APIServerAdapter._resolve_api_server_int(
+            "max_concurrent_runs", default=_auth_guard.DEFAULT_MAX_CONCURRENT_RUNS)
 
     @staticmethod
     def _resolve_api_server_int(key: str, *, default: int) -> int:
@@ -1434,29 +1430,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return web.json_response(
             {"error": {"message": "Invalid gateway API key (API_SERVER_KEY)", "type": "gateway_auth_error",
                        "code": "gateway_auth_failed"}},
-            status=401)
+            status=401,
+            headers={"Cache-Control": "no-store"})
 
     def _check_auth(self, request: web.Request) -> Optional[web.Response]:
-        """Validate the Bearer token; None when OK, else a 401. The no-key branch (connect()
-        refuses to start without API_SERVER_KEY) exists for tests/manual wiring on the default
-        listener only; named profiles fail closed rather than inherit the owner's key."""
-        profile = _api_request_profile.get()
-        expected_key = self._expected_api_key()
-        if not expected_key:
-            if not (profile and profile != "default"):
-                return None
-            logger.warning(
-                "API server rejected request for profile %r: no profile-scoped "
-                "API_SERVER_KEY is configured; %s",
-                profile, self._request_audit_log_suffix(request))
-            return self._auth_failed_response()
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            if secrets_match(token, expected_key):
-                return None
-        logger.warning("API server rejected invalid API key: %s", self._request_audit_log_suffix(request))
-        return self._auth_failed_response()
+        """Validate the Bearer token with fail-closed named profiles and per-(IP, profile) throttling."""
+        return _auth_guard.check_adapter_auth(
+            self, request, profile_var=_api_request_profile, secrets_match=secrets_match, logger=logger)
 
     @staticmethod
     def _normalize_callback_platform(value: str) -> str:
@@ -2107,23 +2087,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     logger.info(
                         "No model configured — defaulting to %s for provider %s",
                         model, runtime_kwargs["provider"])
-        # Keyed by gateway_session_key only (session_id is per-request -> unbounded growth).
-        _resolved_key = gateway_session_key or ""
-        if not model:
-            _recovered = (self._last_resolved_model.get(_resolved_key)
-                          or self._last_resolved_model.get("*"))
-            if _recovered and _recovered != self._model_name:
-                logger.warning(
-                    "Empty model resolved for session=%s — recovering "
-                    "last-known-good model %s (config read likely returned "
-                    "empty; see #35314)",
-                    _resolved_key, _recovered)
-                model = _recovered
-        elif model != self._model_name:
-            if _resolved_key:
-                self._last_resolved_model[_resolved_key] = model
-            self._last_resolved_model["*"] = model
-        return model
+        return _auth_guard.recover_or_record_profile_model(
+            self, model, gateway_session_key, profile_var=_api_request_profile, logger=logger)
 
     def _select_agent_runtime(
         self, runtime_kwargs: dict[str, Any], model: str, *, requested_model: Optional[str],
@@ -3444,21 +3409,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             task.add_done_callback(self._background_tasks.discard)
 
     def _concurrency_limited_response(self) -> Optional[web.Response]:
-        """429 when the concurrent-run cap is reached (0 disables), else None. Uses the same
-        adapter-owned work count as shutdown draining (admitted requests included)."""
-        limit = self._max_concurrent_runs
-        if limit <= 0:
-            return None
-        inflight = self.active_agent_work_count()
-        # The current request's own reservation must not consume its last available slot.
-        reservation = _api_agent_request_reservation.get()
-        if reservation and reservation["active"]:
-            inflight -= 1
-        if inflight >= limit:
-            return _error_response(
-                f"Too many concurrent runs (max {limit})", 429, err_type="rate_limit_error",
-                code="rate_limit_exceeded", headers={"Retry-After": "1"})
-        return None
+        """429 when global or per-profile concurrent-run cap is reached (0 disables), else None."""
+        return _auth_guard.concurrency_limited_response(
+            self, profile_var=_api_request_profile,
+            reservation_var=_api_agent_request_reservation, error_response=_error_response)
 
     @staticmethod
     def _bind_api_server_session(
@@ -3598,133 +3552,138 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
         def _run():
             from gateway.session_context import clear_session_vars
-            with self._profile_scope(request_profile):
-                tokens = self._bind_api_server_session(
-                    chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
-                    session_id=session_id or "", profile=request_profile or "",
-                    session_history_delivery=session_history_delivery)
-                agent = None
-                from agent.notification_presentation import notification_turn
-                from gateway.warning_notifications import diagnostic_turn_muted
-                muted = diagnostic_turn_muted({"notification_category": notification_category}, "api_server")
-                try:
-                    agent = self._create_agent(
-                        ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
-                        stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
-                        tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
-                        interim_assistant_callback=interim_assistant_callback,
-                        reasoning_callback=reasoning_callback, status_callback=status_callback,
-                        gateway_session_key=gateway_session_key, requested_model=requested_model,
-                        requested_provider=requested_provider, model_options=model_options, route=route,
-                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
-                    if agent_ref is not None:
-                        agent_ref[0] = agent
-                    if resume_unanswered_turn:
-                        # A dispatcher's re-run of a failed delivery turn: the DM's own row is already
-                        # in the store (the failed attempt persisted it at turn start), so continue THAT
-                        # row instead of appending a second copy of the same text (#115325).
-                        from agent.session_persistence import adopt_unanswered_turn
-
-                        adopt_unanswered_turn(conversation_history, user_message, agent)
-                    if active_run_id:
-                        self._active_run_agents[active_run_id] = agent
-                    effective_task_id = session_id or str(uuid.uuid4())
-                    # Process baseline for disconnect reaping (this surface bypasses TurnRunner)
-                    # + shutdown-interrupt registration, once for every caller.
-                    # Baseline for selective background-process reaping on SSE client disconnect — mirrors
-                    # gateway/run.py's gateway-turn cleanup (#76115); this API-server surface runs its own
-                    # agent lifecycle and doesn't go through TurnRunner, so it needs its own baseline.
-                    # /v1/runs runs its own agent lifecycle (no TurnRunner, no _run_agent) — record turn
-                    # process ownership so stop/cancel can reap only the background processes this run
-                    # created (#76115).
-                    _publish_turn_process_ownership(agent, effective_task_id)
-                    # Registering here, once, covers every _run_agent() caller — the same reason the
-                    # _ProviderAuthResolutionError handler below lives here rather than in each route. Only
-                    # two callers pass ``agent_ref``, and only /v1/runs has a run_id, so neither is a usable
-                    # hook for the rest. See #63529.
-                    self._shutdown_interruptible_agents[id(agent)] = agent
-                    # Passed only when set: a human turn keeps today's call shape.
-                    author_kwargs = {"turn_author": turn_author} if turn_author is not None else {}
-                    conversation_kwargs = dict(
-                        user_message=user_message,
-                        conversation_history=conversation_history,
-                        task_id=effective_task_id,
-                        **author_kwargs,
-                    )
-                    if relay_metadata:
-                        conversation_kwargs["relay_metadata"] = relay_metadata
-                    approval_token = None
-                    if approval_notify_callback is not None and approval_session_key:
-                        # Same machinery as /v1/runs (_run_agent_sync): the contextvar scopes
-                        # this turn's approvals to the key the resolve endpoint looks up.
-                        from tools.approval import register_gateway_notify
-                        from tools.approval_context import set_current_session_key
-                        approval_token = set_current_session_key(approval_session_key)
-                        register_gateway_notify(approval_session_key, approval_notify_callback)
+            profile_token = _api_request_profile.set(request_profile)
+            try:
+                with self._profile_scope(request_profile):
+                    tokens = self._bind_api_server_session(
+                        chat_id=session_id or "", session_key=gateway_session_key or session_id or "",
+                        session_id=session_id or "", profile=request_profile or "",
+                        session_history_delivery=session_history_delivery)
+                    agent = None
+                    from agent.notification_presentation import notification_turn
+                    from gateway.warning_notifications import diagnostic_turn_muted
+                    muted = diagnostic_turn_muted({"notification_category": notification_category}, "api_server")
                     try:
-                        with notification_turn(agent, muted=muted, session_id=session_id or ""):
-                            result = agent.run_conversation(**conversation_kwargs)
+                        agent = self._create_agent(
+                            ephemeral_system_prompt=ephemeral_system_prompt, session_id=session_id,
+                            stream_delta_callback=stream_delta_callback, tool_progress_callback=tool_progress_callback,
+                            tool_start_callback=tool_start_callback, tool_complete_callback=tool_complete_callback,
+                            interim_assistant_callback=interim_assistant_callback,
+                            reasoning_callback=reasoning_callback, status_callback=status_callback,
+                            gateway_session_key=gateway_session_key, requested_model=requested_model,
+                            requested_provider=requested_provider, model_options=model_options, route=route,
+                            session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
+                        if agent_ref is not None:
+                            agent_ref[0] = agent
+                        if resume_unanswered_turn:
+                            # A dispatcher's re-run of a failed delivery turn: the DM's own row is already
+                            # in the store (the failed attempt persisted it at turn start), so continue THAT
+                            # row instead of appending a second copy of the same text (#115325).
+                            from agent.session_persistence import adopt_unanswered_turn
+
+                            adopt_unanswered_turn(conversation_history, user_message, agent)
+                        if active_run_id:
+                            self._active_run_agents[active_run_id] = agent
+                        effective_task_id = session_id or str(uuid.uuid4())
+                        # Process baseline for disconnect reaping (this surface bypasses TurnRunner)
+                        # + shutdown-interrupt registration, once for every caller.
+                        # Baseline for selective background-process reaping on SSE client disconnect — mirrors
+                        # gateway/run.py's gateway-turn cleanup (#76115); this API-server surface runs its own
+                        # agent lifecycle and doesn't go through TurnRunner, so it needs its own baseline.
+                        # /v1/runs runs its own agent lifecycle (no TurnRunner, no _run_agent) — record turn
+                        # process ownership so stop/cancel can reap only the background processes this run
+                        # created (#76115).
+                        _publish_turn_process_ownership(agent, effective_task_id)
+                        # Registering here, once, covers every _run_agent() caller — the same reason the
+                        # _ProviderAuthResolutionError handler below lives here rather than in each route. Only
+                        # two callers pass ``agent_ref``, and only /v1/runs has a run_id, so neither is a usable
+                        # hook for the rest. See #63529.
+                        self._shutdown_interruptible_agents[id(agent)] = agent
+                        # Passed only when set: a human turn keeps today's call shape.
+                        author_kwargs = {"turn_author": turn_author} if turn_author is not None else {}
+                        conversation_kwargs = dict(
+                            user_message=user_message,
+                            conversation_history=conversation_history,
+                            task_id=effective_task_id,
+                            **author_kwargs,
+                        )
+                        if relay_metadata:
+                            conversation_kwargs["relay_metadata"] = relay_metadata
+                        approval_token = None
+                        if approval_notify_callback is not None and approval_session_key:
+                            # Same machinery as /v1/runs (_run_agent_sync): the contextvar scopes
+                            # this turn's approvals to the key the resolve endpoint looks up.
+                            from tools.approval import register_gateway_notify
+                            from tools.approval_context import set_current_session_key
+                            approval_token = set_current_session_key(approval_session_key)
+                            register_gateway_notify(approval_session_key, approval_notify_callback)
+                        try:
+                            with notification_turn(agent, muted=muted, session_id=session_id or ""):
+                                result = agent.run_conversation(**conversation_kwargs)
+                        finally:
+                            if approval_token is not None:
+                                from tools.approval_context import reset_current_session_key
+                                _api_runs._unregister_approval_notify(approval_session_key)
+                                with suppress(Exception):
+                                    reset_current_session_key(approval_token)
+                        result, usage = self._finish_turn_result(
+                            agent, result, session_id, route=route, requested_runtime=requested_runtime,
+                            route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
+                        if muted and isinstance(result, dict):
+                            # Project presentation only after finishing the source outcome. Keep
+                            # the agent's result, transcript, failure flags and usage intact.
+                            result = {**result, "_notification_presentation_suppressed": True}
+                        return result, usage
+                    except _ProviderAuthResolutionError as exc:
+                        # Typed provider-auth failure only, handled once for every caller in
+                        # run.py's response shape (text, no HTTP error).
+                        logger.warning("Provider resolution failed for session=%s: %s",
+                                       session_id or "", exc)
+                        return (
+                            {"final_response": exc.user_text(), "messages": [],
+                             "api_calls": 0, "tools": [],
+                             **({"_notification_presentation_suppressed": True} if muted else {})},
+                            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                    except Exception as exc:
+                        if muted:
+                            # Keep the original exception/traceback for logs and failure
+                            # handling; the HTTP/SSE boundary suppresses its presentation.
+                            exc._notification_presentation_suppressed = True
+                        raise
                     finally:
-                        if approval_token is not None:
-                            from tools.approval_context import reset_current_session_key
-                            _api_runs._unregister_approval_notify(approval_session_key)
-                            with suppress(Exception):
-                                reset_current_session_key(approval_token)
-                    result, usage = self._finish_turn_result(
-                        agent, result, session_id, route=route, requested_runtime=requested_runtime,
-                        route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock)
-                    if muted and isinstance(result, dict):
-                        # Project presentation only after finishing the source outcome. Keep
-                        # the agent's result, transcript, failure flags and usage intact.
-                        result = {**result, "_notification_presentation_suppressed": True}
-                    return result, usage
-                except _ProviderAuthResolutionError as exc:
-                    # Typed provider-auth failure only, handled once for every caller in
-                    # run.py's response shape (text, no HTTP error).
-                    logger.warning("Provider resolution failed for session=%s: %s",
-                                   session_id or "", exc)
-                    return (
-                        {"final_response": exc.user_text(), "messages": [],
-                         "api_calls": 0, "tools": [],
-                         **({"_notification_presentation_suppressed": True} if muted else {})},
-                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
-                except Exception as exc:
-                    if muted:
-                        # Keep the original exception/traceback for logs and failure
-                        # handling; the HTTP/SSE boundary suppresses its presentation.
-                        exc._notification_presentation_suppressed = True
-                    raise
-                finally:
-                    # Turn over (any outcome): clear ownership so a late disconnect can't reap
-                    # background work this turn deliberately left running.
-                    if active_run_id:
-                        self._active_run_agents.pop(active_run_id, None)
-                    if agent is not None:
-                        _clear_turn_process_ownership(agent)
-                        self._shutdown_interruptible_agents.pop(id(agent), None)
-                        self._memory_sessions.checkin(agent)
-                        # Bind the declared key to the row the turn actually ended on
-                        # (agent.session_id carries a mid-turn rotation). Opt-in per route.
-                        # Record the declared conversation on the row the turn actually ended on —
-                        # ``agent.session_id`` already carries a mid-turn compression rotation (#16938), so
-                        # the next reply resolves the live transcript rather than its retired parent.
-                        # Opt-in: only the routes that resolve their session id from the declared key
-                        # (/v1/responses, /v1/runs) record one, so no other caller's rows change shape.
-                        if bind_declared_conversation:
-                            self._bind_declared_conversation(
-                                getattr(agent, "session_id", None) or session_id, gateway_session_key)
-                    clear_session_vars(tokens)
+                        # Turn over (any outcome): clear ownership so a late disconnect can't reap
+                        # background work this turn deliberately left running.
+                        if active_run_id:
+                            self._active_run_agents.pop(active_run_id, None)
+                        if agent is not None:
+                            _clear_turn_process_ownership(agent)
+                            self._shutdown_interruptible_agents.pop(id(agent), None)
+                            self._memory_sessions.checkin(agent)
+                            # Bind the declared key to the row the turn actually ended on
+                            # (agent.session_id carries a mid-turn rotation). Opt-in per route.
+                            # Record the declared conversation on the row the turn actually ended on —
+                            # ``agent.session_id`` already carries a mid-turn compression rotation (#16938), so
+                            # the next reply resolves the live transcript rather than its retired parent.
+                            # Opt-in: only the routes that resolve their session id from the declared key
+                            # (/v1/responses, /v1/runs) record one, so no other caller's rows change shape.
+                            if bind_declared_conversation:
+                                self._bind_declared_conversation(
+                                    getattr(agent, "session_id", None) or session_id, gateway_session_key)
+                        clear_session_vars(tokens)
+            finally:
+                _api_request_profile.reset(profile_token)
+        profile_key = request_profile or "default"
         self._activate_admitted_request()
         self._inflight_agent_runs += 1
+        _auth_guard.adjust_profile_counter(getattr(self, "_inflight_agent_runs_by_profile", None), profile_key, 1)
         started_at = time.perf_counter()
         usage: Optional[dict[str, Any]] = None
         try:
-# Worker-scoped count rides along so the shutdown close gate still sees the thread
-            # after this handler task is cancelled (#116535); released in the worker's finally.
             result, usage = await _api_runs._submit_api_worker(loop, _run)
             return result, usage
         finally:
             self._inflight_agent_runs -= 1
+            _auth_guard.adjust_profile_counter(getattr(self, "_inflight_agent_runs_by_profile", None), profile_key, -1)
             if usage is not None:
                 self._record_api_metrics(usage, time.perf_counter() - started_at)
 

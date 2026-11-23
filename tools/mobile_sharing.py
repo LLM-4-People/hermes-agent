@@ -18,12 +18,10 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import secrets
 import sqlite3
-import threading
 import time
 from typing import Any, Iterator, Optional
 
@@ -32,6 +30,7 @@ from hermes_constants import (
     get_hermes_home,
     mkdir_under_hermes_home,
 )
+from tools.mobile_sqlite import open_mobile_db, open_mobile_db_readonly
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -101,9 +100,6 @@ _RESOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
 _MAX_LABEL_CHARS = 120
 _MAX_ARTIFACT_PREVIEW_BYTES = 64 * 1024
 
-_LOCKS_GUARD = threading.Lock()
-_LOCKS: dict[str, threading.RLock] = {}
-
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS outgoing_shares (
     share_id TEXT PRIMARY KEY,
@@ -149,15 +145,6 @@ class ShareError(Exception):
         self.example = example
 
 
-def _lock_for(db_path: Path) -> threading.RLock:
-    key = str(db_path.resolve(strict=False))
-    with _LOCKS_GUARD:
-        lock = _LOCKS.get(key)
-        if lock is None:
-            lock = _LOCKS[key] = threading.RLock()
-        return lock
-
-
 def active_profile_name() -> str:
     """Resolve the active profile name in the current runtime scope."""
     try:
@@ -197,36 +184,14 @@ def _connect_shares_db(home: Optional[Path] = None, *, write: bool = False) -> I
     db_path = _shares_db_path(home)
     if write:
         mkdir_under_hermes_home(db_path.parent)
-    with _lock_for(db_path):
-        if not write and not db_path.is_file():
-            conn = sqlite3.connect(":memory:")
-            conn.row_factory = sqlite3.Row
-            conn.executescript(_SCHEMA_SQL)
-            try:
-                yield conn
-            finally:
-                conn.close()
-            return
-        conn = sqlite3.connect(str(db_path), timeout=10.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.executescript(_SCHEMA_SQL)
-            with suppress(OSError):
-                if db_path.exists():
-                    os.chmod(db_path, 0o600)
-            if write:
-                conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            if write and conn.in_transaction:
-                conn.execute("COMMIT")
-        except BaseException:
-            if write and conn.in_transaction:
-                with suppress(sqlite3.Error):
-                    conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+    with open_mobile_db(
+        db_path,
+        schema_key="shares",
+        schema_sql=_SCHEMA_SQL,
+        db_label="shares.db",
+        write=write,
+    ) as conn:
+        yield conn
 
 
 def normalize_resource_kind(raw: Any) -> str:
@@ -310,15 +275,11 @@ def _read_note_resource(owner_home: Path, resource_id: str, *, include_content: 
     if not db_path.is_file():
         return None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        try:
+        with open_mobile_db_readonly(db_path) as conn:
             row = conn.execute(
                 "SELECT id, title, content, tags_json, pinned, updated_at, updated_by FROM notes WHERE id = ? AND archived = 0",
                 (resource_id,),
             ).fetchone()
-        finally:
-            conn.close()
     except sqlite3.Error:
         return None
     if row is None:
@@ -463,12 +424,8 @@ def _read_mobile_ui_resource(
     if not db_path.is_file():
         return None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)  # health: allow HX015 -- reads mobile_state.db, not session state.db
-        conn.row_factory = sqlite3.Row
-        try:
+        with open_mobile_db_readonly(db_path) as conn:
             row = conn.execute("SELECT state_json FROM ui_active_state LIMIT 1").fetchone()
-        finally:
-            conn.close()
         if not row or not row["state_json"]:
             return None
         state = json.loads(row["state_json"])

@@ -61,13 +61,19 @@ class ResponseStore:
                 db_path = str(get_hermes_home() / "response_store.db")
         self._db_path: Optional[str] = db_path if db_path != ":memory:" else None
         try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=15.0)
         except Exception:
             self._conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._db_path = None
         # Shared WAL-fallback so response_store.db degrades gracefully on NFS/SMB/FUSE homes.
+        import sys
         from sqlite_support import apply_wal_with_fallback
-        apply_wal_with_fallback(self._conn, db_label="response_store.db")
+        with suppress(sqlite3.OperationalError):
+            self._conn.execute("PRAGMA busy_timeout=15000")
+        wal_mode = apply_wal_with_fallback(self._conn, db_label="response_store.db")
+        if wal_mode == "wal" and sys.platform != "darwin":
+            with suppress(sqlite3.OperationalError):
+                self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS responses ("
             "response_id TEXT PRIMARY KEY, data TEXT NOT NULL, accessed_at REAL NOT NULL)")

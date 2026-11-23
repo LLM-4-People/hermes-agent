@@ -893,11 +893,12 @@ class TranscriptRow:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptPage:
-    """A chronological page, its pre-pagination row count and the root of its verified transcript lineage."""
+    """A chronological page, its pre-pagination row count, the root of its verified transcript lineage, and whether more rows exist in the paged direction."""
 
     rows: tuple[TranscriptRow, ...]
     total: int
     root_id: SessionId
+    has_more: Optional[bool] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1068,8 +1069,16 @@ class MessageRepository(Protocol):
         """The stored rows ``request`` selects, chronological; ``DISPLAY`` pages logical messages (one per display identity, the live row preferred, then the newest)."""
         ...
 
-    def read_transcript_page(self, session_id: SessionId, request: TranscriptRead, *, visible_only: bool = False) -> TranscriptPage:
-        """Read the page and count from the same projection. Visible pages omit session metadata and projected hidden rows before paging."""
+    def read_transcript_page(
+        self,
+        session_id: SessionId,
+        request: TranscriptRead,
+        *,
+        visible_only: bool = False,
+        before_id: Optional[MessageId] = None,
+        after_id: Optional[MessageId] = None,
+    ) -> TranscriptPage:
+        """Read the page and count from the same projection. Visible pages omit session metadata and projected hidden rows before paging. Optional keyset cursors ``before_id`` and ``after_id`` are mutually exclusive and incompatible with a non-zero ``offset``."""
         ...
 
     def active_message_ids(self, session_id: SessionId) -> tuple[MessageId, ...]:

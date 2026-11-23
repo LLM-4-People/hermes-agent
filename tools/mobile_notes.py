@@ -11,12 +11,10 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import secrets
 import sqlite3
-import threading
 import time
 from typing import Any, Iterator, Optional
 
@@ -25,6 +23,7 @@ from hermes_constants import (
     get_hermes_home,
     mkdir_under_hermes_home,
 )
+from tools.mobile_sqlite import open_mobile_db
 from tools.mobile_sharing import (
     ShareError,
     active_profile_name,
@@ -79,9 +78,6 @@ _ACTION_ALIASES = {
     "revoke": "unshare",
 }
 
-_DB_LOCKS_GUARD = threading.Lock()
-_DB_LOCKS: dict[str, threading.RLock] = {}
-
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS notes (
     id TEXT PRIMARY KEY,
@@ -128,15 +124,6 @@ def _wrap_share_error(exc: ShareError) -> NotesError:
     )
 
 
-def _lock_for(db_path: Path) -> threading.RLock:
-    key = str(db_path.resolve(strict=False))
-    with _DB_LOCKS_GUARD:
-        lock = _DB_LOCKS.get(key)
-        if lock is None:
-            lock = _DB_LOCKS[key] = threading.RLock()
-        return lock
-
-
 def _notes_db_path(home: Optional[Path] = None) -> Path:
     base = home if home is not None else get_hermes_home()
     assert_named_profile_home_live(base)
@@ -148,36 +135,14 @@ def _connect_notes_db(home: Optional[Path] = None, *, write: bool = False) -> It
     db_path = _notes_db_path(home)
     if write:
         mkdir_under_hermes_home(db_path.parent)
-    with _lock_for(db_path):
-        if not write and not db_path.is_file():
-            conn = sqlite3.connect(":memory:")
-            conn.row_factory = sqlite3.Row
-            conn.executescript(_SCHEMA_SQL)
-            try:
-                yield conn
-            finally:
-                conn.close()
-            return
-        conn = sqlite3.connect(str(db_path), timeout=10.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.executescript(_SCHEMA_SQL)
-            with suppress(OSError):
-                if db_path.exists():
-                    os.chmod(db_path, 0o600)
-            if write:
-                conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            if write and conn.in_transaction:
-                conn.execute("COMMIT")
-        except BaseException:
-            if write and conn.in_transaction:
-                with suppress(sqlite3.Error):
-                    conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+    with open_mobile_db(
+        db_path,
+        schema_key="notes",
+        schema_sql=_SCHEMA_SQL,
+        db_label="notes.db",
+        write=write,
+    ) as conn:
+        yield conn
 
 
 def _validate_utf8(value: Any, field: str, *, max_chars: int, allow_empty: bool = False) -> str:
